@@ -13,8 +13,19 @@ ready to depend on.
 
 - `encoding`: `Accept-Encoding` negotiation. `negotiate(header, supported)`
   returns a token borrowed from `supported` in server-preference order,
-  `"identity"`, or `null` when the client accepts nothing else. The caller maps
-  the token to its codec: `gzip`, `br`, `zstd`, or `deflate` for a zlib codec.
+  `"identity"`, or `null` when the client accepts nothing else.
+  `negotiateFields` takes every `Accept-Encoding` line, because the lines
+  combine as one ordered list. The caller maps the token to its codec: `gzip`,
+  `br`, `zstd`, or `deflate` for a zlib codec.
+- `token_list`: comma-separated token lists (`Connection`, `Upgrade`, `Vary`).
+  `contains(field, token)` tests membership without allocating; `iterator`
+  yields trimmed elements. Empty elements are ignored, and the comparison
+  folds ASCII case.
+- `content_length`: `Content-Length` parsing and combination. Repeated values
+  must agree, a comma list of identical values is accepted, and non-digits,
+  conflicts, and overflow are errors. `null` means the field was absent. The
+  caller owns the rule that `Transfer-Encoding` and `Content-Length` cannot
+  both frame a request.
 
 Ranges, entity tags, dates, media types, and form decoding are next. No server,
 no middleware, and no request or response types: those depend on an I/O
@@ -32,9 +43,16 @@ const coding = http.encoding.negotiate("gzip;q=0.5, br;q=1", &.{ "br", "gzip" })
 The token is borrowed from `supported`; `"identity"` is a static string. The
 tests carry the q-value, wildcard, and identity rules.
 
+```zig
+const persistent = !http.token_list.contains("keep-alive, Upgrade", "close");
+const length = try http.content_length.parse(&.{ "42", "42" }); // 42
+```
+
 ## Work on it
 
-`nix develop` provides the toolchain, and `just ci` runs what CI runs.
+`nix develop` provides the toolchain. `just ci` runs what CI runs, `just bench`
+runs the benchmarks, and `just fuzz` drives the fuzz targets with the built-in
+runner.
 
 ## License
 

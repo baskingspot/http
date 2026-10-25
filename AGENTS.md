@@ -18,9 +18,15 @@ Zig 0.16 only. The flake is the tool contract, from `baskingspot/nix`: `nix deve
 - No server, no middleware, no request or response types, and no header map.
   Those depend on the host's I/O runtime; this package stops at the field
   value.
+- stdx is first-party, not third-party: when it already solves the problem
+  (`fmt.atoi` for decimal parsing, `buffer`, `time`), use it instead of
+  reimplementing the primitive here. The ban above is on `compress`, because a
+  field-value parser has no business pulling in a codec.
 - Tokens stay slices; do not freeze a registry in an enum. `encoding` returns
   the caller's own token, and the caller maps `deflate` to a zlib codec, `br`
-  to brotli, and so on.
+  to brotli, and so on. The set is an open IANA registry (RFC 9110 §8.4.1,
+  IETF Review), so an enum here is a release behind, and a non-exhaustive enum
+  cannot carry an unknown string token.
 - One module per field family. The root exports namespaces:
   `pub const encoding = @import("encoding.zig");`.
 - Tests cite the RFC section they pin. Every parser gets hostile-input cases;

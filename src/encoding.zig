@@ -1,9 +1,11 @@
 //! `Accept-Encoding` parsing and content-coding negotiation.
 //!
-//! `negotiate(header, supported)` takes the field value and the server's
-//! supported codings in preference order. It returns a token borrowed from
-//! `supported`, the static `identity`, or `null` when the client accepts
-//! nothing else. It allocates nothing.
+//! `negotiate(header, supported)` takes one field value and the server's
+//! supported codings in preference order. `negotiateFields` takes every field
+//! line with that name, because multiple lines combine as one ordered list
+//! (RFC 9110 §5.3). Both return a token borrowed from `supported`, the static
+//! `identity`, or `null` when the client accepts nothing else. They allocate
+//! nothing.
 //!
 //! Rules (RFC 9110 §12.5.3):
 //! - A coding's weight is its `q` parameter, 0..1 with at most three fractional
@@ -11,8 +13,9 @@
 //! - `*` gives a weight to every coding not named explicitly.
 //! - `identity` is acceptable by default. It is excluded by `identity;q=0`, or
 //!   by `*;q=0` when there is no explicit identity entry.
-//! - An absent `Accept-Encoding` field is treated as `identity` here, the
-//!   conservative server policy, not as "anything is acceptable".
+//! - An empty field lists no codings and negotiates to `identity`. An absent
+//!   field is the caller's policy: pass `""` for the conservative default, or
+//!   `"*"` to treat every supported coding as acceptable.
 //! - A malformed weight is 0, and the first entry for a coding wins.
 //! - Ties go to the server's order in `supported`; an explicit identity
 //!   weight only wins when it is higher than the best coding's.
@@ -20,6 +23,9 @@
 const std = @import("std");
 const ascii = std.ascii;
 const testing = std.testing;
+const mem = std.mem;
+
+const ows = @import("ows.zig");
 
 /// The token for "no content coding". It is not looked up in `supported`.
 pub const identity = "identity";
@@ -30,16 +36,54 @@ pub const identity = "identity";
 /// preferred first. It must not contain `identity`; that token is handled
 /// here. The returned slice is either one of `supported`'s elements or
 /// `identity`.
-pub fn negotiate(header: ?[]const u8, supported: []const []const u8) ?[]const u8 {
-    const value = header orelse return identity;
+pub fn negotiate(header: []const u8, supported: []const []const u8) ?[]const u8 {
+    return negotiateFields(&.{header}, supported);
+}
 
+/// Like `negotiate`, over every field line named `Accept-Encoding`.
+///
+/// The lines combine as if they were one comma-separated list, in order
+/// (RFC 9110 §5.3). A coding named on two lines therefore takes the weight of
+/// its first appearance.
+pub fn negotiateFields(fields: []const []const u8, supported: []const []const u8) ?[]const u8 {
+    // The common case parses each field entry once. Servers do not offer
+    // dozens of codings; past the bound, fall back to rescanning per coding.
+    if (supported.len > max_tracked) return negotiateRescan(fields, supported);
+
+    var first_q: [max_tracked]?u16 = @splat(null);
     var wildcard_q: ?u16 = null;
     var identity_q: ?u16 = null;
-    var entries: Entries = .{ .value = value };
+
+    var entries: AllEntries = .{ .fields = fields };
     while (entries.next()) |entry| {
-        if (eq(entry.coding, "*")) {
+        if (mem.eql(u8, entry.coding, "*")) {
             if (wildcard_q == null) wildcard_q = entry.q;
-        } else if (eq(entry.coding, identity)) {
+        } else if (ascii.eqlIgnoreCase(entry.coding, identity)) {
+            if (identity_q == null) identity_q = entry.q;
+        }
+        for (supported, 0..) |coding, index| {
+            if (first_q[index] == null and ascii.eqlIgnoreCase(entry.coding, coding)) {
+                first_q[index] = entry.q;
+                break;
+            }
+        }
+    }
+    return choose(supported, first_q[0..supported.len], wildcard_q, identity_q);
+}
+
+/// Upper bound on the codings the single-pass path tracks. A server listing
+/// more than this still negotiates, one rescan per coding.
+const max_tracked = 32;
+
+/// One rescan per coding: the fallback for an unusually long `supported`.
+fn negotiateRescan(fields: []const []const u8, supported: []const []const u8) ?[]const u8 {
+    var wildcard_q: ?u16 = null;
+    var identity_q: ?u16 = null;
+    var entries: AllEntries = .{ .fields = fields };
+    while (entries.next()) |entry| {
+        if (mem.eql(u8, entry.coding, "*")) {
+            if (wildcard_q == null) wildcard_q = entry.q;
+        } else if (ascii.eqlIgnoreCase(entry.coding, identity)) {
             if (identity_q == null) identity_q = entry.q;
         }
     }
@@ -47,14 +91,37 @@ pub fn negotiate(header: ?[]const u8, supported: []const []const u8) ?[]const u8
     var best: ?[]const u8 = null;
     var best_q: u16 = 0;
     for (supported) |coding| {
-        if (eq(coding, identity)) continue;
-        const q = explicitQ(value, coding) orelse wildcard_q orelse 0;
+        if (ascii.eqlIgnoreCase(coding, identity)) continue;
+        const q = firstQ(fields, coding) orelse wildcard_q orelse 0;
         if (q > best_q) {
             best = coding;
             best_q = q;
         }
     }
 
+    return finish(best, best_q, wildcard_q, identity_q);
+}
+
+fn choose(
+    supported: []const []const u8,
+    first_q: []const ?u16,
+    wildcard_q: ?u16,
+    identity_q: ?u16,
+) ?[]const u8 {
+    var best: ?[]const u8 = null;
+    var best_q: u16 = 0;
+    for (supported, first_q) |coding, q| {
+        if (ascii.eqlIgnoreCase(coding, identity)) continue;
+        const weight = q orelse wildcard_q orelse 0;
+        if (weight > best_q) {
+            best = coding;
+            best_q = weight;
+        }
+    }
+    return finish(best, best_q, wildcard_q, identity_q);
+}
+
+fn finish(best: ?[]const u8, best_q: u16, wildcard_q: ?u16, identity_q: ?u16) ?[]const u8 {
     if (best_q == 0) {
         return if (identityAllowed(wildcard_q, identity_q)) identity else null;
     }
@@ -64,12 +131,12 @@ pub fn negotiate(header: ?[]const u8, supported: []const []const u8) ?[]const u8
     return best;
 }
 
-/// The first explicit weight for `coding`, or null when the field does not
-/// name it.
-fn explicitQ(value: []const u8, coding: []const u8) ?u16 {
-    var entries: Entries = .{ .value = value };
+/// The first explicit weight for `coding`, or null when no field line names
+/// it.
+fn firstQ(fields: []const []const u8, coding: []const u8) ?u16 {
+    var entries: AllEntries = .{ .fields = fields };
     while (entries.next()) |entry| {
-        if (eq(entry.coding, coding)) return entry.q;
+        if (ascii.eqlIgnoreCase(entry.coding, coding)) return entry.q;
     }
     return null;
 }
@@ -86,6 +153,22 @@ const Entry = struct {
     q: u16,
 };
 
+/// Every entry across every field line, in order.
+const AllEntries = struct {
+    fields: []const []const u8,
+    field_index: usize = 0,
+    entries: Entries = .{ .value = "" },
+
+    fn next(self: *AllEntries) ?Entry {
+        while (true) {
+            if (self.entries.next()) |entry| return entry;
+            if (self.field_index == self.fields.len) return null;
+            self.entries = .{ .value = self.fields[self.field_index] };
+            self.field_index += 1;
+        }
+    }
+};
+
 /// A one-pass iterator over the comma-separated entries. Each coding is a
 /// borrowed slice; weights are in thousandths.
 const Entries = struct {
@@ -95,16 +178,17 @@ const Entries = struct {
     fn next(self: *Entries) ?Entry {
         while (self.pos <= self.value.len) {
             const start = self.pos;
-            const comma = std.mem.findScalarPos(u8, self.value, start, ',') orelse self.value.len;
-            self.pos = comma + 1;
-            const item = trimOws(self.value[start..comma]);
-            if (item.len == 0) continue;
+            var end = start;
+            var semi: ?usize = null;
+            while (end < self.value.len and self.value[end] != ',') : (end += 1) {
+                if (semi == null and self.value[end] == ';') semi = end;
+            }
+            self.pos = end + 1;
 
-            const semi = std.mem.findScalar(u8, item, ';');
-            const coding = trimOws(if (semi) |index| item[0..index] else item);
+            const coding = ows.trim(if (semi) |index| self.value[start..index] else self.value[start..end]);
             if (coding.len == 0) continue;
 
-            const q = if (semi) |index| qOf(item[index + 1 ..]) orelse 1000 else 1000;
+            const q = if (semi) |index| qOf(self.value[index + 1 .. end]) orelse 1000 else 1000;
             return .{ .coding = coding, .q = q };
         }
         return null;
@@ -115,12 +199,12 @@ const Entries = struct {
 /// malformed weight is 0: the field said something, and it was not a valid
 /// preference.
 fn qOf(params: []const u8) ?u16 {
-    var iterator = std.mem.splitScalar(u8, params, ';');
+    var iterator = mem.splitScalar(u8, params, ';');
     while (iterator.next()) |raw| {
-        const param = trimOws(raw);
-        const equals = std.mem.findScalar(u8, param, '=') orelse continue;
-        const name = trimOws(param[0..equals]);
-        if (!eq(name, "q")) continue;
+        const param = ows.trim(raw);
+        const equals = mem.findScalar(u8, param, '=') orelse continue;
+        const name = ows.trim(param[0..equals]);
+        if (!ascii.eqlIgnoreCase(name, "q")) continue;
         return parseQ(param[equals + 1 ..]) orelse 0;
     }
     return null;
@@ -130,7 +214,7 @@ fn qOf(params: []const u8) ?u16 {
 /// one. `0`, `0.5`, `1`, and `1.000` are valid; `1.5`, `0.0001`, and `abc`
 /// are not.
 fn parseQ(raw: []const u8) ?u16 {
-    const value = trimOws(raw);
+    const value = ows.trim(raw);
     if (value.len == 0) return null;
     if (value[0] != '0' and value[0] != '1') return null;
 
@@ -151,27 +235,14 @@ fn parseQ(raw: []const u8) ?u16 {
     return q;
 }
 
-fn trimOws(value: []const u8) []const u8 {
-    var start: usize = 0;
-    while (start < value.len and (value[start] == ' ' or value[start] == '\t')) start += 1;
-    var end: usize = value.len;
-    while (end > start and (value[end - 1] == ' ' or value[end - 1] == '\t')) end -= 1;
-    return value[start..end];
-}
-
-fn eq(a: []const u8, b: []const u8) bool {
-    return ascii.eqlIgnoreCase(a, b);
-}
-
 test "negotiate: the field, the weights, and the server order" {
     const Case = struct {
-        header: ?[]const u8,
+        header: []const u8,
         supported: []const []const u8,
         want: ?[]const u8,
     };
     const cases = [_]Case{
-        // Absent and empty fields fall back to identity.
-        .{ .header = null, .supported = &.{ "br", "gzip" }, .want = identity },
+        // An empty field lists no codings and falls back to identity.
         .{ .header = "", .supported = &.{ "br", "gzip" }, .want = identity },
         // A named coding with no weight is fully acceptable.
         .{ .header = "gzip", .supported = &.{ "br", "gzip" }, .want = "gzip" },
@@ -222,6 +293,15 @@ test "negotiate: the field, the weights, and the server order" {
         } else {
             try testing.expect(got == null);
         }
+
+        // One line through the general entry point must agree.
+        const many = negotiateFields(&.{case.header}, case.supported);
+        if (got) |token| {
+            try testing.expect(many != null);
+            try testing.expectEqualStrings(token, many.?);
+        } else {
+            try testing.expect(many == null);
+        }
     }
 }
 
@@ -242,4 +322,145 @@ test "negotiate: the scale's boundaries" {
     try testing.expectEqualStrings(identity, negotiate("gzip;q=1.001", &.{"gzip"}).?);
     try testing.expectEqualStrings(identity, negotiate("gzip;q=0.", &.{"gzip"}).?);
     try testing.expectEqualStrings("gzip", negotiate("gzip;q=1.", &.{"gzip"}).?);
+}
+
+test "negotiateFields: lines combine as one ordered list" {
+    const Case = struct {
+        fields: []const []const u8,
+        supported: []const []const u8,
+        want: ?[]const u8,
+    };
+    const cases = [_]Case{
+        // No field lines at all: the conservative default.
+        .{ .fields = &.{}, .supported = &.{"gzip"}, .want = identity },
+        .{ .fields = &.{ "", "" }, .supported = &.{"gzip"}, .want = identity },
+        // Ties still follow the server's order.
+        .{ .fields = &.{ "br", "gzip" }, .supported = &.{ "br", "gzip" }, .want = "br" },
+        .{ .fields = &.{ "gzip", "br" }, .supported = &.{ "br", "gzip" }, .want = "br" },
+        // A weight on a later line competes normally.
+        .{ .fields = &.{ "gzip;q=0.5", "br;q=0.9" }, .supported = &.{ "br", "gzip" }, .want = "br" },
+        // The first appearance of a coding wins, across lines.
+        .{ .fields = &.{ "gzip;q=0", "gzip;q=1" }, .supported = &.{"gzip"}, .want = identity },
+        .{ .fields = &.{ "gzip;q=1", "gzip;q=0" }, .supported = &.{"gzip"}, .want = "gzip" },
+        // Wildcard and identity may arrive on different lines.
+        .{ .fields = &.{ "*;q=0", "identity;q=1" }, .supported = &.{"gzip"}, .want = identity },
+        .{ .fields = &.{ "*;q=0", "gzip;q=0.5" }, .supported = &.{ "br", "gzip" }, .want = "gzip" },
+        .{ .fields = &.{ "gzip;q=0", "identity;q=0" }, .supported = &.{"gzip"}, .want = null },
+    };
+
+    for (cases) |case| {
+        const got = negotiateFields(case.fields, case.supported);
+        if (case.want) |want| {
+            try testing.expect(got != null);
+            try testing.expectEqualStrings(want, got.?);
+        } else {
+            try testing.expect(got == null);
+        }
+    }
+}
+
+/// The qvalue ABNF, written out: no more than three fractional digits, and
+/// a `1` may only be followed by zeros.
+fn referenceQ(raw: []const u8) ?u16 {
+    const value = mem.trim(u8, raw, " \t");
+    if (value.len == 0) return null;
+
+    if (value[0] == '0') {
+        if (value.len == 1) return 0;
+        if (value[1] != '.') return null;
+        const digits = value[2..];
+        if (digits.len > 3) return null;
+        var q: u16 = 0;
+        var scale: u16 = 100;
+        for (digits) |byte| {
+            if (byte < '0' or byte > '9') return null;
+            q += @as(u16, byte - '0') * scale;
+            scale /= 10;
+        }
+        return q;
+    }
+    if (value[0] == '1') {
+        if (value.len == 1) return 1000;
+        if (value[1] != '.') return null;
+        const digits = value[2..];
+        if (digits.len > 3) return null;
+        for (digits) |byte| if (byte != '0') return null;
+        return 1000;
+    }
+    return null;
+}
+
+test "parseQ: every short string over a tiny alphabet agrees with the ABNF" {
+    const alphabet = "01.9a ";
+    var buf: [5]u8 = undefined;
+    for (1..buf.len + 1) |len| {
+        var code: usize = 0;
+        var total: usize = 1;
+        for (0..len) |_| total *= alphabet.len;
+        while (code < total) : (code += 1) {
+            var rest = code;
+            for (0..len) |i| {
+                buf[i] = alphabet[rest % alphabet.len];
+                rest /= alphabet.len;
+            }
+            try testing.expectEqual(referenceQ(buf[0..len]), parseQ(buf[0..len]));
+        }
+    }
+}
+
+test "fuzz accept-encoding" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var buf: [128]u8 = undefined;
+            const field = buf[0..smith.slice(&buf)];
+
+            const result = negotiate(field, &.{ "br", "gzip", "zstd" });
+            if (result) |token| {
+                const known = mem.eql(u8, token, "br") or
+                    mem.eql(u8, token, "gzip") or
+                    mem.eql(u8, token, "zstd") or
+                    mem.eql(u8, token, identity);
+                try testing.expect(known);
+            }
+
+            // Splitting a field at a comma cannot change the ordered entries.
+            if (mem.findScalar(u8, field, ',')) |at| {
+                const one = negotiate(field, &.{"gzip"});
+                const two = negotiateFields(&.{ field[0..at], field[at + 1 ..] }, &.{"gzip"});
+                if (one) |token| {
+                    try testing.expect(two != null);
+                    try testing.expectEqualStrings(token, two.?);
+                } else {
+                    try testing.expect(two == null);
+                }
+            }
+        }
+    }.run, .{
+        .corpus = &.{
+            "",
+            "gzip",
+            "gzip;q=0",
+            "br, gzip",
+            "*",
+            "*;q=0",
+            "identity;q=0, *;q=0",
+            "gzip;q=0.0001",
+            "gzip;q=abc",
+        },
+    });
+}
+
+test "negotiateFields: the rescan fallback past the tracked bound" {
+    var names: [max_tracked + 8][4]u8 = undefined;
+    var supported: [max_tracked + 8][]const u8 = undefined;
+    for (&names, &supported, 0..) |*name, *coding, index| {
+        coding.* = std.fmt.bufPrint(name, "x{d}", .{index}) catch unreachable;
+    }
+    supported[supported.len - 1] = "zstd";
+
+    try testing.expectEqualStrings("zstd", negotiateFields(&.{"zstd"}, &supported).?);
+    try testing.expectEqualStrings("x0", negotiateFields(&.{"x0"}, &supported).?);
+    try testing.expectEqualStrings("x0", negotiateFields(&.{"x0;q=0.5, zstd;q=0.4"}, &supported).?);
+    try testing.expectEqualStrings(identity, negotiateFields(&.{""}, &supported).?);
+    try testing.expect(negotiateFields(&.{"identity;q=0"}, &supported) == null);
 }
