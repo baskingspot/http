@@ -7,6 +7,11 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `Field`, `Fields`, and `Fields.values`: borrowed field lines and ordered,
+  case-insensitive lookup over a field section. Duplicate lines are yielded
+  separately, and lookups trim OWS.
+- `Fields.containsToken`: list-element membership across every line with a
+  given name.
 - `encoding.negotiate`: `Accept-Encoding` parsing and content-coding
   negotiation over the q-value, wildcard, and identity rules. The chosen
   token is borrowed from the caller's supported list.

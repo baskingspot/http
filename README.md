@@ -21,6 +21,11 @@ ready to depend on.
   `contains(field, token)` tests membership without allocating; `iterator`
   yields trimmed elements. Empty elements are ignored, and the comparison
   folds ASCII case.
+- `Field` / `Fields`: a borrowed field line and an ordered, case-insensitive
+  view over a field section. `get` returns the first value for singleton
+  fields, `values` yields every line separately (`Set-Cookie` needs that), and
+  `containsToken` tests list membership across all lines. Lookups trim OWS;
+  the raw spans stay in `Fields.items`.
 - `content_length`: `Content-Length` parsing and combination. Repeated values
   must agree, a comma list of identical values is accepted, and non-digits,
   conflicts, and overflow are errors. `null` means the field was absent. The
