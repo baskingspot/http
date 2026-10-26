@@ -185,7 +185,8 @@ const Entries = struct {
             }
             self.pos = end + 1;
 
-            const coding = ows.trim(if (semi) |index| self.value[start..index] else self.value[start..end]);
+            const span = if (semi) |index| self.value[start..index] else self.value[start..end];
+            const coding = ows.trim(span);
             if (coding.len == 0) continue;
 
             const q = if (semi) |index| qOf(self.value[index + 1 .. end]) orelse 1000 else 1000;
@@ -256,7 +257,11 @@ test "negotiate: the field, the weights, and the server order" {
         // q=0 is not acceptable; identity is the fallback.
         .{ .header = "gzip;q=0", .supported = &.{"gzip"}, .want = identity },
         .{ .header = "gzip;q=0, br;q=0", .supported = &.{ "br", "gzip" }, .want = identity },
-        .{ .header = "gzip;q=0, br;q=0, identity;q=0", .supported = &.{ "br", "gzip" }, .want = null },
+        .{
+            .header = "gzip;q=0, br;q=0, identity;q=0",
+            .supported = &.{ "br", "gzip" },
+            .want = null,
+        },
         // The wildcard covers codings not named, including identity's
         // exclusion at q=0.
         .{ .header = "*", .supported = &.{ "br", "gzip" }, .want = "br" },
@@ -276,7 +281,11 @@ test "negotiate: the field, the weights, and the server order" {
         .{ .header = "gzip;q=0, gzip;q=1", .supported = &.{"gzip"}, .want = identity },
         // Tokens and parameter names are case-insensitive; OWS is ignored.
         .{ .header = "GZIP;Q=0.8, Br;q=0.9", .supported = &.{ "br", "gzip" }, .want = "br" },
-        .{ .header = " gzip ; q = 0.8 , br ; q = 1 ", .supported = &.{ "br", "gzip" }, .want = "br" },
+        .{
+            .header = " gzip ; q = 0.8 , br ; q = 1 ",
+            .supported = &.{ "br", "gzip" },
+            .want = "br",
+        },
         // The token is the caller's: aliases and the deflate mapping live there.
         .{ .header = "deflate", .supported = &.{"deflate"}, .want = "deflate" },
         .{ .header = "x-gzip", .supported = &.{"gzip"}, .want = identity },
@@ -338,7 +347,11 @@ test "negotiateFields: lines combine as one ordered list" {
         .{ .fields = &.{ "br", "gzip" }, .supported = &.{ "br", "gzip" }, .want = "br" },
         .{ .fields = &.{ "gzip", "br" }, .supported = &.{ "br", "gzip" }, .want = "br" },
         // A weight on a later line competes normally.
-        .{ .fields = &.{ "gzip;q=0.5", "br;q=0.9" }, .supported = &.{ "br", "gzip" }, .want = "br" },
+        .{
+            .fields = &.{ "gzip;q=0.5", "br;q=0.9" },
+            .supported = &.{ "br", "gzip" },
+            .want = "br",
+        },
         // The first appearance of a coding wins, across lines.
         .{ .fields = &.{ "gzip;q=0", "gzip;q=1" }, .supported = &.{"gzip"}, .want = identity },
         .{ .fields = &.{ "gzip;q=1", "gzip;q=0" }, .supported = &.{"gzip"}, .want = "gzip" },

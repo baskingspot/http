@@ -97,7 +97,10 @@ test "parse: the u64 boundaries" {
     try testing.expectError(error.Overflow, parse(&.{"18446744073709551616"}));
     try testing.expectError(error.Overflow, parse(&.{"99999999999999999999"}));
     try testing.expectError(error.Overflow, parse(&.{"100000000000000000000"}));
-    try testing.expectError(error.Overflow, parse(&.{"18446744073709551615, 18446744073709551616"}));
+    try testing.expectError(
+        error.Overflow,
+        parse(&.{"18446744073709551615, 18446744073709551616"}),
+    );
 }
 
 test "parse: every short digit string agrees with the std oracle" {

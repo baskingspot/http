@@ -1,3 +1,11 @@
 .{
-    .paths = .{ "build.zig", "src" },
+    .paths = .{
+        "build.zig",
+        "src",
+        "bench",
+    },
+
+    .rules = .{
+        .Z024 = .{ .max_length = 100 },
+    },
 }
