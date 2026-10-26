@@ -18,6 +18,7 @@ const std = @import("std");
 const mem = std.mem;
 const testing = std.testing;
 const math = std.math;
+const fmt = std.fmt;
 
 const atoi = @import("stdx").fmt.atoi;
 
@@ -115,7 +116,7 @@ test "parse: every short digit string agrees with the std oracle" {
                 buf[i] = '0' + @as(u8, @intCast(rest % 10));
                 rest /= 10;
             }
-            const want = try std.fmt.parseInt(u64, buf[0..len], 10);
+            const want = try fmt.parseInt(u64, buf[0..len], 10);
             try testing.expectEqual(@as(?u64, want), try parse(&.{buf[0..len]}));
         }
     }

@@ -6,11 +6,11 @@
 const testing = @import("std").testing;
 
 pub fn trim(value: []const u8) []const u8 {
-    var start: usize = 0;
-    while (start < value.len and isOws(value[start])) start += 1;
-    var end: usize = value.len;
-    while (end > start and isOws(value[end - 1])) end -= 1;
-    return value[start..end];
+    var start: u32 = 0;
+    while (@as(usize, start) < value.len and isOws(value[@intCast(start)])) start += 1;
+    var end: u32 = @intCast(value.len);
+    while (end > start and isOws(value[@intCast(end - 1)])) end -= 1;
+    return value[@intCast(start)..@intCast(end)];
 }
 
 pub fn isOws(byte: u8) bool {

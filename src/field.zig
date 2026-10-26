@@ -64,11 +64,11 @@ pub const Fields = struct {
 pub const Values = struct {
     fields: Fields,
     name: []const u8,
-    index: usize = 0,
+    index: u32 = 0,
 
     pub fn next(self: *Values) ?[]const u8 {
-        while (self.index < self.fields.items.len) {
-            const field = self.fields.items[self.index];
+        while (@as(usize, self.index) < self.fields.items.len) {
+            const field = self.fields.items[@intCast(self.index)];
             self.index += 1;
             if (ascii.eqlIgnoreCase(field.name, self.name)) return ows.trim(field.value);
         }

@@ -24,6 +24,7 @@ const std = @import("std");
 const ascii = std.ascii;
 const testing = std.testing;
 const mem = std.mem;
+const fmt = std.fmt;
 
 const ows = @import("ows.zig");
 
@@ -156,14 +157,14 @@ const Entry = struct {
 /// Every entry across every field line, in order.
 const AllEntries = struct {
     fields: []const []const u8,
-    field_index: usize = 0,
+    field_index: u32 = 0,
     entries: Entries = .{ .value = "" },
 
     fn next(self: *AllEntries) ?Entry {
         while (true) {
             if (self.entries.next()) |entry| return entry;
-            if (self.field_index == self.fields.len) return null;
-            self.entries = .{ .value = self.fields[self.field_index] };
+            if (@as(usize, self.field_index) == self.fields.len) return null;
+            self.entries = .{ .value = self.fields[@intCast(self.field_index)] };
             self.field_index += 1;
         }
     }
@@ -173,23 +174,31 @@ const AllEntries = struct {
 /// borrowed slice; weights are in thousandths.
 const Entries = struct {
     value: []const u8,
-    pos: usize = 0,
+    pos: u32 = 0,
 
     fn next(self: *Entries) ?Entry {
-        while (self.pos <= self.value.len) {
+        while (@as(usize, self.pos) <= self.value.len) {
             const start = self.pos;
             var end = start;
-            var semi: ?usize = null;
-            while (end < self.value.len and self.value[end] != ',') : (end += 1) {
-                if (semi == null and self.value[end] == ';') semi = end;
+            var semi: ?u32 = null;
+            while (@as(usize, end) < self.value.len and
+                self.value[@intCast(end)] != ',') : (end += 1)
+            {
+                if (semi == null and self.value[@intCast(end)] == ';') semi = end;
             }
             self.pos = end + 1;
 
-            const span = if (semi) |index| self.value[start..index] else self.value[start..end];
+            const span = if (semi) |index|
+                self.value[@intCast(start)..@intCast(index)]
+            else
+                self.value[@intCast(start)..@intCast(end)];
             const coding = ows.trim(span);
             if (coding.len == 0) continue;
 
-            const q = if (semi) |index| qOf(self.value[index + 1 .. end]) orelse 1000 else 1000;
+            const q = if (semi) |index|
+                qOf(self.value[@intCast(index + 1)..@intCast(end)]) orelse 1000
+            else
+                1000;
             return .{ .coding = coding, .q = q };
         }
         return null;
@@ -224,9 +233,9 @@ fn parseQ(raw: []const u8) ?u16 {
     if (value[1] != '.') return null;
 
     var scale: u16 = 100;
-    var index: usize = 2;
-    while (index < value.len) : (index += 1) {
-        const byte = value[index];
+    var index: u32 = 2;
+    while (@as(usize, index) < value.len) : (index += 1) {
+        const byte = value[@intCast(index)];
         if (byte < '0' or byte > '9') return null;
         if (index >= 5) return null; // more than three fractional digits
         q += @as(u16, byte - '0') * scale;
@@ -467,7 +476,7 @@ test "negotiateFields: the rescan fallback past the tracked bound" {
     var names: [max_tracked + 8][4]u8 = undefined;
     var supported: [max_tracked + 8][]const u8 = undefined;
     for (&names, &supported, 0..) |*name, *coding, index| {
-        coding.* = std.fmt.bufPrint(name, "x{d}", .{index}) catch unreachable;
+        coding.* = fmt.bufPrint(name, "x{d}", .{index}) catch unreachable;
     }
     supported[supported.len - 1] = "zstd";
 

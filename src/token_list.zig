@@ -26,15 +26,15 @@ pub fn contains(field: []const u8, token: []const u8) bool {
 
 pub const Iterator = struct {
     field: []const u8,
-    pos: usize = 0,
+    pos: u32 = 0,
 
     pub fn next(self: *Iterator) ?[]const u8 {
-        while (self.pos <= self.field.len) {
+        while (@as(usize, self.pos) <= self.field.len) {
             const start = self.pos;
             var end = start;
-            while (end < self.field.len and self.field[end] != ',') end += 1;
+            while (@as(usize, end) < self.field.len and self.field[@intCast(end)] != ',') end += 1;
             self.pos = end + 1;
-            const element = ows.trim(self.field[start..end]);
+            const element = ows.trim(self.field[@intCast(start)..@intCast(end)]);
             if (element.len != 0) return element;
         }
         return null;
