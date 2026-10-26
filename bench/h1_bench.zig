@@ -74,3 +74,37 @@ pub fn benchmarkResponse(b: *testingx.B) !void {
     b.keepAlive(sink);
     b.keepAlive(&storage);
 }
+
+const long_value = "a" ** 1024;
+const long_request = "GET / HTTP/1.1\r\nX-Long: " ++ long_value ++ "\r\n\r\n";
+
+// No final empty line: the completeness gate scans and returns Incomplete.
+const incomplete_request = "GET / HTTP/1.1\r\n" ++ ("X-Filler: value\r\n" ** 400);
+
+pub fn benchmarkRequestLongValue(b: *testingx.B) !void {
+    const buf: []const u8 = long_request;
+    var storage: [4]http.Field = undefined;
+    var sink: usize = 0;
+    while (try b.loop()) {
+        const parsed = try h1.parseRequest(buf, 0, &storage);
+        sink +%= parsed.head.fields[1].value.len;
+    }
+    b.keepAlive(sink);
+    b.keepAlive(&storage);
+}
+
+pub fn benchmarkIncompleteScan(b: *testingx.B) !void {
+    const buf: []const u8 = incomplete_request;
+    var storage: [4]http.Field = undefined;
+    var sink: usize = 0;
+    while (try b.loop()) {
+        const parsed = h1.parseRequest(buf, 4096, &storage);
+        if (parsed) |_| {
+            unreachable;
+        } else |err| {
+            sink +%= @intFromError(err);
+        }
+    }
+    b.keepAlive(sink);
+    b.keepAlive(&storage);
+}

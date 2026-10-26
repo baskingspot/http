@@ -22,6 +22,7 @@
 //! until the terminator arrives.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const assert = std.debug.assert;
 const mem = std.mem;
@@ -142,6 +143,10 @@ const Cursor = struct {
         return @as(usize, self.pos) == self.buf.len;
     }
 
+    fn has(self: Cursor, count: u32) bool {
+        return @as(usize, self.pos) + count <= self.buf.len;
+    }
+
     /// The byte at `index`. The casts are the one place a head offset becomes
     /// a slice index; `parseRequest` asserts the buffer fits `u32`.
     fn at(self: Cursor, index: u32) u8 {
@@ -186,7 +191,57 @@ const Cursor = struct {
 fn headComplete(buf: []const u8, last_len: u32) bool {
     assert(@as(usize, last_len) <= buf.len);
     const start: u32 = if (last_len > 4) last_len - 4 else 0;
-    return mem.indexOfPos(u8, buf, @intCast(start), "\r\n\r\n") != null;
+    return findHeadEnd(buf, start) != null;
+}
+
+/// Bytes per vector scan. A target without vectors, or a big-endian one, uses
+/// the scalar path: the mask bit order below assumes lane 0 is the low bit.
+const block = std.simd.suggestVectorLength(u8) orelse 8;
+const Vec = @Vector(block, u8);
+const Mask = @Int(.unsigned, block);
+const vector_scans = builtin.cpu.arch.endian() == .little and
+    std.simd.suggestVectorLength(u8) != null;
+
+/// The first index of `CRLF CRLF` at or after `start`, or null. The vector
+/// path scans for CR and checks the three following bytes; the scalar path
+/// covers the tail and every target without vectors.
+fn findHeadEnd(buf: []const u8, start: u32) ?u32 {
+    if (comptime !vector_scans) return findHeadEndScalar(buf, @intCast(start));
+
+    var index: usize = start;
+    while (index + block <= buf.len) : (index += block) {
+        const chunk: Vec = buf[index..][0..block].*;
+        var mask: Mask = @bitCast(chunk == @as(Vec, @splat('\r')));
+        while (mask != 0) : (mask &= mask - 1) {
+            const at = index + @as(usize, @ctz(mask));
+            if (at + 4 <= buf.len and
+                buf[at + 1] == '\n' and
+                buf[at + 2] == '\r' and
+                buf[at + 3] == '\n')
+            {
+                return @intCast(at);
+            }
+        }
+    }
+    return findHeadEndScalarFrom(buf, index);
+}
+
+fn findHeadEndScalar(buf: []const u8, start: usize) ?u32 {
+    return findHeadEndScalarFrom(buf, start);
+}
+
+fn findHeadEndScalarFrom(buf: []const u8, from: usize) ?u32 {
+    var index = from;
+    while (index + 4 <= buf.len) : (index += 1) {
+        if (buf[index] == '\r' and
+            buf[index + 1] == '\n' and
+            buf[index + 2] == '\r' and
+            buf[index + 3] == '\n')
+        {
+            return @intCast(index);
+        }
+    }
+    return null;
 }
 
 /// RFC 9112 §2.2: a server SHOULD ignore at least one empty line before the
@@ -228,15 +283,18 @@ fn scanTarget(cursor: *Cursor) Error![]const u8 {
     const found = mem.findScalarPos(u8, cursor.buf, @intCast(start), ' ');
     const end: u32 = if (found) |index| @intCast(index) else @intCast(cursor.buf.len);
 
-    var index = start;
-    while (index < end) : (index += 1) {
-        if (!target_table[cursor.at(index)]) return error.Invalid;
-    }
     if (found == null) return error.Incomplete;
     if (end == start) return error.Invalid;
 
+    const target = cursor.slice(start, end);
+    if (target.len >= block) {
+        if (!allTargetBytes(target)) return error.Invalid;
+    } else {
+        for (target) |byte| if (!target_table[byte]) return error.Invalid;
+    }
+
     cursor.pos = end;
-    return cursor.slice(start, end);
+    return target;
 }
 
 /// One line up to, but not including, its CR. Validation is the field-value or
@@ -246,14 +304,17 @@ fn scanLine(cursor: *Cursor) Error![]const u8 {
     const found = mem.findScalarPos(u8, cursor.buf, @intCast(start), '\r');
     const end: u32 = if (found) |index| @intCast(index) else @intCast(cursor.buf.len);
 
-    var index = start;
-    while (index < end) : (index += 1) {
-        if (!field_value_table[cursor.at(index)]) return error.Invalid;
-    }
     if (found == null) return error.Incomplete;
 
+    const line = cursor.slice(start, end);
+    if (line.len >= block) {
+        if (!allFieldValueBytes(line)) return error.Invalid;
+    } else {
+        for (line) |byte| if (!field_value_table[byte]) return error.Invalid;
+    }
+
     cursor.pos = end;
-    return cursor.slice(start, end);
+    return line;
 }
 
 /// `HTTP-version` from RFC 9112 §2.3: `%s"HTTP" "/" DIGIT "." DIGIT`, exactly
@@ -263,11 +324,18 @@ fn scanLine(cursor: *Cursor) Error![]const u8 {
 /// process a higher minor version as its highest supported minor, so 1.2
 /// through 1.9 become 1.1.
 fn parseVersion(cursor: *Cursor) Error!Version {
-    try cursor.expect('H');
-    try cursor.expect('T');
-    try cursor.expect('T');
-    try cursor.expect('P');
-    try cursor.expect('/');
+    // RFC 9112 §2.3: the name is case-sensitive. A little-endian read of the
+    // five bytes is one compare instead of five branches.
+    const http_prefix: u40 = 'H' |
+        (@as(u40, 'T') << 8) |
+        (@as(u40, 'T') << 16) |
+        (@as(u40, 'P') << 24) |
+        (@as(u40, '/') << 32);
+    if (!cursor.has(5)) return error.Incomplete;
+    const prefix = mem.readVarInt(u40, cursor.buf[@intCast(cursor.pos)..][0..5], .little);
+    if (prefix != http_prefix) return error.Invalid;
+    cursor.pos += 5;
+
     const major = try cursor.expectDigit();
     try cursor.expect('.');
     const minor = try cursor.expectDigit();
@@ -357,6 +425,42 @@ fn isFieldValueByte(byte: u8) bool {
 /// RFC 9112 §3.2: printable US-ASCII, and SP is the delimiter.
 fn isTargetByte(byte: u8) bool {
     return byte >= 0x21 and byte <= 0x7e;
+}
+
+/// RFC 9112 §3.2: printable US-ASCII. The scalar tail uses `target_table`.
+fn allTargetBytes(bytes: []const u8) bool {
+    var index: usize = 0;
+    if (comptime vector_scans) {
+        while (index + block <= bytes.len) : (index += block) {
+            const chunk: Vec = bytes[index..][0..block].*;
+            const bad = (chunk < @as(Vec, @splat(0x21))) |
+                (chunk > @as(Vec, @splat(0x7e)));
+            if (@reduce(.Or, bad)) return false;
+        }
+    }
+    while (index < bytes.len) : (index += 1) {
+        if (!target_table[bytes[index]]) return false;
+    }
+    return true;
+}
+
+/// RFC 9110 §5.5: no NUL, other CTL, or DEL. The scalar tail uses
+/// `field_value_table`.
+fn allFieldValueBytes(bytes: []const u8) bool {
+    var index: usize = 0;
+    if (comptime vector_scans) {
+        while (index + block <= bytes.len) : (index += block) {
+            const chunk: Vec = bytes[index..][0..block].*;
+            const ctl = (chunk < @as(Vec, @splat(0x20))) &
+                (chunk != @as(Vec, @splat('\t')));
+            const del = chunk == @as(Vec, @splat(0x7f));
+            if (@reduce(.Or, ctl | del)) return false;
+        }
+    }
+    while (index < bytes.len) : (index += 1) {
+        if (!field_value_table[bytes[index]]) return false;
+    }
+    return true;
 }
 
 fn makeTable(comptime predicate: fn (u8) bool) [256]bool {
@@ -639,6 +743,75 @@ test "incomplete: every strict prefix of a valid response" {
             parseResponse(typical_response[0..len], 0, &storage),
         );
     }
+}
+
+test "head terminator: every placement, vector and scalar (RFC 9112 §2.1)" {
+    var buf: [4 * block + 8]u8 = undefined;
+    for (0..buf.len - 3) |at| {
+        @memset(&buf, 'a');
+        @memcpy(buf[at..][0..4], "\r\n\r\n");
+
+        const want: ?u32 = @intCast(at);
+        try testing.expectEqual(want, findHeadEnd(&buf, 0));
+        try testing.expectEqual(want, findHeadEnd(&buf, @intCast(at)));
+        try testing.expectEqual(want, findHeadEndScalar(&buf, 0));
+    }
+
+    @memset(&buf, 'a');
+    try testing.expect(findHeadEnd(&buf, 0) == null);
+    try testing.expect(findHeadEndScalar(&buf, 0) == null);
+
+    // One CRLF is not the end of the head.
+    @memset(&buf, 'a');
+    buf[3] = '\r';
+    buf[4] = '\n';
+    try testing.expect(findHeadEnd(&buf, 0) == null);
+}
+
+test "value validation: vector and scalar agree (RFC 9110 §5.5, RFC 9112 §3.2)" {
+    var buf: [block + 3]u8 = undefined;
+    for (0..256) |value| {
+        for (0..buf.len) |at| {
+            @memset(&buf, 'a');
+            buf[at] = @intCast(value);
+
+            try testing.expectEqual(scalarTarget(&buf), allTargetBytes(&buf));
+            try testing.expectEqual(scalarFieldValue(&buf), allFieldValueBytes(&buf));
+        }
+    }
+}
+
+fn scalarTarget(bytes: []const u8) bool {
+    for (bytes) |byte| if (!target_table[byte]) return false;
+    return true;
+}
+
+fn scalarFieldValue(bytes: []const u8) bool {
+    for (bytes) |byte| if (!field_value_table[byte]) return false;
+    return true;
+}
+
+test "fuzz head terminator against std" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var buf: [256]u8 = undefined;
+            const input = buf[0..smith.slice(&buf)];
+
+            const want: ?u32 = if (mem.findPos(u8, input, 0, "\r\n\r\n")) |at|
+                @intCast(at)
+            else
+                null;
+            try testing.expectEqual(want, findHeadEnd(input, 0));
+        }
+    }.run, .{
+        .corpus = &.{
+            "",
+            "\r\n\r\n",
+            "abc\r\n\r\ndef",
+            "\r\r\n\r\n",
+            "GET / HTTP/1.1\r\n\r\n",
+        },
+    });
 }
 
 test "fuzz request head" {
