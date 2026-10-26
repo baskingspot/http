@@ -20,6 +20,10 @@ All notable changes to http are recorded here. The format follows
 - `token_list.contains` and `token_list.iterator`: comma-separated token
   lists such as `Connection` and `Upgrade`, with OWS handling and
   case-insensitive membership.
+- `h1.parseRequest` and `h1.parseResponse`: sans-I/O HTTP/1.1 head parsing
+  into the shared `Field`s. Both report `error.Incomplete` until a whole head
+  arrives, take `last_len` for a resumable completeness check, and reject bare
+  LF, obs-fold, and whitespace before the colon.
 - `content_length.parse`: `Content-Length` parsing and duplicate
   combination. Conflicting values, non-digits, and overflow are errors;
   `null` means the field was absent.

@@ -26,6 +26,11 @@ ready to depend on.
   fields, `values` yields every line separately (`Set-Cookie` needs that), and
   `containsToken` tests list membership across all lines. Lookups trim OWS;
   the raw spans stay in `Fields.items`.
+- `h1`: sans-I/O HTTP/1.1 head parsing into the shared `Field`s.
+  `parseRequest` and `parseResponse` return `error.Incomplete` until a whole
+  head arrives, and take `last_len` so a client trickling bytes cannot force a
+  rescan. Strict where RFC 9112 allows leniency: bare LF, obs-fold, whitespace
+  before the colon, and lenient start-line whitespace are rejected.
 - `content_length`: `Content-Length` parsing and combination. Repeated values
   must agree, a comma list of identical values is accepted, and non-digits,
   conflicts, and overflow are errors. `null` means the field was absent. The

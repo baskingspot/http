@@ -8,12 +8,14 @@ pub const Fields = @import("field.zig").Fields;
 pub const Values = @import("field.zig").Values;
 
 pub const content_length = @import("content_length.zig");
+pub const h1 = @import("h1/root.zig");
 pub const encoding = @import("encoding.zig");
 pub const token_list = @import("token_list.zig");
 
 test {
     _ = @import("field.zig");
     _ = content_length;
+    _ = h1;
     _ = encoding;
     _ = token_list;
 }
