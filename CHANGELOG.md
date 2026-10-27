@@ -7,6 +7,8 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `Method`: the common request methods as an enum with the wire spelling as
+  the tag, plus `Method.token` and the case-sensitive `Method.parse`.
 - `Field`, `Fields`, and `Fields.values`: borrowed field lines and ordered,
   case-insensitive lookup over a field section. Duplicate lines are yielded
   separately, and lookups trim OWS.

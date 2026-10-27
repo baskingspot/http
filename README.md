@@ -21,6 +21,10 @@ ready to depend on.
   `contains(field, token)` tests membership without allocating; `iterator`
   yields trimmed elements. Empty elements are ignored, and the comparison
   folds ASCII case.
+- `Method`: the common request methods as an enum whose tags are the wire
+  spelling, so `Method.GET.token()` is `"GET"` and `Method.parse("GET")` is
+  exact. The parser still returns the token; this is the caller-facing
+  vocabulary, not the registry.
 - `Field` / `Fields`: a borrowed field line and an ordered, case-insensitive
   view over a field section. `get` returns the first value for singleton
   fields, `values` yields every line separately (`Set-Cookie` needs that), and
