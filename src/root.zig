@@ -5,6 +5,7 @@
 
 pub const Field = @import("field.zig").Field;
 pub const Method = @import("method.zig").Method;
+pub const method = @import("method.zig");
 pub const StatusCode = @import("status.zig").StatusCode;
 pub const status = @import("status.zig");
 pub const Fields = @import("field.zig").Fields;

@@ -42,9 +42,10 @@ pub const Error = error{
     TooManyFields,
 };
 
-/// The versions an HTTP/1.1 endpoint processes. A message with major version 1
-/// and a higher minor version is processed as 1.1 (RFC 9110 §2.5).
-pub const Version = enum { @"1.0", @"1.1" };
+/// `std.http.Version`, whose tags are the start-line spelling. A message with
+/// major version 1 and a higher minor version is processed as 1.1
+/// (RFC 9110 §2.5).
+pub const Version = std.http.Version;
 
 pub const RequestHead = struct {
     method: []const u8,
@@ -341,7 +342,7 @@ fn parseVersion(cursor: *Cursor) Error!Version {
     const minor = try cursor.expectDigit();
 
     return switch (major) {
-        1 => if (minor == 0) .@"1.0" else .@"1.1",
+        1 => if (minor == 0) .@"HTTP/1.0" else .@"HTTP/1.1",
         else => error.UnsupportedVersion,
     };
 }
@@ -493,7 +494,7 @@ test "request: a typical head (RFC 9112 §2.1, §3, §5)" {
 
     try testing.expectEqualStrings("GET", parsed.head.method);
     try testing.expectEqualStrings("/metrics?x=1", parsed.head.target);
-    try testing.expectEqual(.@"1.1", parsed.head.version);
+    try testing.expectEqual(.@"HTTP/1.1", parsed.head.version);
     try testing.expectEqual(typical.len, parsed.consumed);
     try testing.expectEqual(4, parsed.head.fields.len);
 
@@ -541,12 +542,12 @@ test "HTTP-version: syntax and support (RFC 9112 §2.3, RFC 9110 §2.5)" {
     var storage: [1]Field = undefined;
 
     try testing.expectEqual(
-        Version.@"1.0",
+        Version.@"HTTP/1.0",
         (try parseRequest("GET / HTTP/1.0\r\n\r\n", 0, &storage)).head.version,
     );
     // Minor versions above 1 are processed as 1.1.
     try testing.expectEqual(
-        Version.@"1.1",
+        Version.@"HTTP/1.1",
         (try parseRequest("GET / HTTP/1.9\r\n\r\n", 0, &storage)).head.version,
     );
 
@@ -698,7 +699,7 @@ test "response: a typical head (RFC 9112 §4, §5)" {
     var storage: [4]Field = undefined;
     const parsed = try parseResponse(typical_response, 0, &storage);
 
-    try testing.expectEqual(.@"1.1", parsed.head.version);
+    try testing.expectEqual(.@"HTTP/1.1", parsed.head.version);
     try testing.expectEqual(200, parsed.head.status);
     try testing.expectEqualStrings("OK", parsed.head.reason);
     try testing.expectEqual(2, parsed.head.fields.len);

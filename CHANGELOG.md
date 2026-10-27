@@ -9,10 +9,10 @@ All notable changes to http are recorded here. The format follows
 
 - `StatusCode`: the status codes as an exhaustive enum derived from
   `std.http.Status`, with `status.code`, `status.parse`, and `status.phrase`.
-- `Method`: the common request methods as an enum with the wire spelling as
-  the tag, plus `Method.token` and the case-sensitive `Method.parse`.
-- `Field`, `Fields`, and `Fields.values`: borrowed field lines and ordered,
-  case-insensitive lookup over a field section. Duplicate lines are yielded
+- `Method`: `std.http.Method` re-exported, plus `method.token` and the
+  case-sensitive `method.parse`.
+- `Field` (`std.http.Header`), `Fields`, and `Fields.values`: borrowed field
+  lines and ordered, case-insensitive lookup over a field section. Duplicate lines are yielded
   separately, and lookups trim OWS.
 - `Fields.containsToken`: list-element membership across every line with a
   given name.

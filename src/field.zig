@@ -18,14 +18,9 @@ const testing = std.testing;
 const ows = @import("ows.zig");
 const token_list = @import("token_list.zig");
 
-/// One field line, as the parser found it.
-pub const Field = struct {
-    /// The name exactly as received. Comparisons fold ASCII case.
-    name: []const u8,
-    /// The value exactly as received, without the name, colon, or line
-    /// terminator. Lookups through `Fields` trim surrounding OWS.
-    value: []const u8,
-};
+/// One field line, as the parser found it. `std.http.Header` is the same pair;
+/// the contract above describes how this package treats the value.
+pub const Field = std.http.Header;
 
 /// A borrowed view of every field line in a message, in wire order.
 pub const Fields = struct {

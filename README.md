@@ -21,16 +21,16 @@ ready to depend on.
   `contains(field, token)` tests membership without allocating; `iterator`
   yields trimmed elements. Empty elements are ignored, and the comparison
   folds ASCII case.
-- `Method`: the common request methods as an enum whose tags are the wire
-  spelling, so `Method.GET.token()` is `"GET"` and `Method.parse("GET")` is
-  exact. The parser still returns the token; this is the caller-facing
-  vocabulary, not the registry.
+- `Method`: `std.http.Method`, the conventional nine, with `method.token(.GET)`
+  as `"GET"` and `method.parse("GET")` exact and case-sensitive. The parser
+  still returns the token; this is the caller-facing vocabulary, not the
+  registry.
 - `StatusCode`: the status codes as an exhaustive enum, built from
   `std.http.Status`'s named fields. `status.code(.ok)` is the wire number,
   `status.parse(200)` is `.ok`, and a code the enum does not name returns
   null. The parser still returns the `u16` from the wire.
-- `Field` / `Fields`: a borrowed field line and an ordered, case-insensitive
-  view over a field section. `get` returns the first value for singleton
+- `Field` / `Fields`: `Field` is `std.http.Header`; `Fields` is an ordered,
+  case-insensitive view over a field section. `get` returns the first value for singleton
   fields, `values` yields every line separately (`Set-Cookie` needs that), and
   `containsToken` tests list membership across all lines. Lookups trim OWS;
   the raw spans stay in `Fields.items`.
