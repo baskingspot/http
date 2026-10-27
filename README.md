@@ -29,12 +29,12 @@ ready to depend on.
   `std.http.Status`'s named fields. `status.code(.ok)` is the wire number,
   `status.parse(200)` is `.ok`, and a code the enum does not name returns
   null. The parser still returns the `u16` from the wire.
-- `Field` / `Fields`: `Field` is `std.http.Header`; `Fields` is an ordered,
-  case-insensitive view over a field section. `get` returns the first value for singleton
-  fields, `values` yields every line separately (`Set-Cookie` needs that), and
-  `containsToken` tests list membership across all lines. Lookups trim OWS;
-  the raw spans stay in `Fields.items`.
-- `h1`: sans-I/O HTTP/1.1 head parsing into the shared `Field`s.
+- `Header` / `Headers`: `Header` is `std.http.Header`; `Headers` is an
+  ordered, case-insensitive view over a field section. `get` returns the first
+  value for singleton fields, `values` yields every line separately
+  (`Set-Cookie` needs that), and `containsToken` tests list membership across
+  all lines. Lookups trim OWS; the raw spans stay in `Headers.items`.
+- `h1`: sans-I/O HTTP/1.1 head parsing into shared `Headers`.
   `parseRequest` and `parseResponse` return `error.Incomplete` until a whole
   head arrives, and take `last_len` so a client trickling bytes cannot force a
   rescan. Strict where RFC 9112 allows leniency: bare LF, obs-fold, whitespace

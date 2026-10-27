@@ -29,7 +29,7 @@ const mem = std.mem;
 const fmt = std.fmt;
 const math = std.math;
 
-const Field = @import("../field.zig").Field;
+const Header = @import("../header.zig").Header;
 
 pub const Error = error{
     /// The buffer ends before the head does. Read more and retry.
@@ -39,7 +39,7 @@ pub const Error = error{
     /// A well-formed HTTP-version this parser does not handle. 505.
     UnsupportedVersion,
     /// The caller's field storage is full. The caller should send 431.
-    TooManyFields,
+    TooManyHeaders,
 };
 
 /// `std.http.Version`, whose tags are the start-line spelling. A message with
@@ -51,7 +51,7 @@ pub const RequestHead = struct {
     method: []const u8,
     target: []const u8,
     version: Version,
-    fields: []const Field,
+    headers: []const Header,
 };
 
 pub const ResponseHead = struct {
@@ -61,7 +61,7 @@ pub const ResponseHead = struct {
     /// range check to the caller.
     status: u16,
     reason: []const u8,
-    fields: []const Field,
+    headers: []const Header,
 };
 
 pub const ParsedRequest = struct {
@@ -77,10 +77,10 @@ pub const ParsedResponse = struct {
 
 /// Parse a request head from `buf`.
 ///
-/// `storage` receives the field lines; the returned `head.fields` is the used
+/// `storage` receives the field lines; the returned `head.headers` is the used
 /// prefix. `last_len` is the previously searched length, or 0 on the first
 /// call. `buf` must be shorter than 4 GiB; a real head limit is far smaller.
-pub fn parseRequest(buf: []const u8, last_len: u32, storage: []Field) Error!ParsedRequest {
+pub fn parseRequest(buf: []const u8, last_len: u32, storage: []Header) Error!ParsedRequest {
     assert(buf.len <= math.maxInt(u32));
     if (last_len != 0 and !headComplete(buf, last_len)) return error.Incomplete;
 
@@ -95,20 +95,20 @@ pub fn parseRequest(buf: []const u8, last_len: u32, storage: []Field) Error!Pars
     const version = try parseVersion(&cursor);
     try cursor.expectCrlf();
 
-    const fields = try parseFields(&cursor, storage);
+    const headers = try parseHeaders(&cursor, storage);
     return .{
         .head = .{
             .method = method,
             .target = target,
             .version = version,
-            .fields = fields,
+            .headers = headers,
         },
         .consumed = cursor.pos,
     };
 }
 
 /// Parse a response head from `buf`. `last_len` works as in `parseRequest`.
-pub fn parseResponse(buf: []const u8, last_len: u32, storage: []Field) Error!ParsedResponse {
+pub fn parseResponse(buf: []const u8, last_len: u32, storage: []Header) Error!ParsedResponse {
     assert(buf.len <= math.maxInt(u32));
     if (last_len != 0 and !headComplete(buf, last_len)) return error.Incomplete;
 
@@ -121,13 +121,13 @@ pub fn parseResponse(buf: []const u8, last_len: u32, storage: []Field) Error!Par
     const reason = try scanReason(&cursor);
     try cursor.expectCrlf();
 
-    const fields = try parseFields(&cursor, storage);
+    const headers = try parseHeaders(&cursor, storage);
     return .{
         .head = .{
             .version = version,
             .status = status,
             .reason = reason,
-            .fields = fields,
+            .headers = headers,
         },
         .consumed = cursor.pos,
     };
@@ -364,7 +364,7 @@ fn scanReason(cursor: *Cursor) Error![]const u8 {
 }
 
 /// `*( field-line CRLF ) CRLF` from RFC 9112 §2.1.
-fn parseFields(cursor: *Cursor, storage: []Field) Error![]const Field {
+fn parseHeaders(cursor: *Cursor, storage: []Header) Error![]const Header {
     var count: u32 = 0;
     while (true) {
         if (cursor.atEnd()) return error.Incomplete;
@@ -403,7 +403,7 @@ fn parseFields(cursor: *Cursor, storage: []Field) Error![]const Field {
 
         try cursor.expectCrlf();
 
-        if (@as(usize, count) == storage.len) return error.TooManyFields;
+        if (@as(usize, count) == storage.len) return error.TooManyHeaders;
         storage[@intCast(count)] = .{ .name = name, .value = raw[0..@intCast(value_end)] };
         count += 1;
     }
@@ -489,19 +489,19 @@ const typical_response =
     "\r\n";
 
 test "request: a typical head (RFC 9112 §2.1, §3, §5)" {
-    var storage: [8]Field = undefined;
+    var storage: [8]Header = undefined;
     const parsed = try parseRequest(typical, 0, &storage);
 
     try testing.expectEqualStrings("GET", parsed.head.method);
     try testing.expectEqualStrings("/metrics?x=1", parsed.head.target);
     try testing.expectEqual(.@"HTTP/1.1", parsed.head.version);
     try testing.expectEqual(typical.len, parsed.consumed);
-    try testing.expectEqual(4, parsed.head.fields.len);
+    try testing.expectEqual(4, parsed.head.headers.len);
 
-    try testing.expectEqualStrings("Host", parsed.head.fields[0].name);
-    try testing.expectEqualStrings("example.com", parsed.head.fields[0].value);
-    try testing.expectEqualStrings("Accept-Encoding", parsed.head.fields[3].name);
-    try testing.expectEqualStrings("gzip, br", parsed.head.fields[3].value);
+    try testing.expectEqualStrings("Host", parsed.head.headers[0].name);
+    try testing.expectEqualStrings("example.com", parsed.head.headers[0].value);
+    try testing.expectEqualStrings("Accept-Encoding", parsed.head.headers[3].name);
+    try testing.expectEqualStrings("gzip, br", parsed.head.headers[3].value);
 }
 
 test "request: method is a token (RFC 9112 §3.1, RFC 9110 §5.6.2)" {
@@ -509,7 +509,7 @@ test "request: method is a token (RFC 9112 §3.1, RFC 9110 §5.6.2)" {
     for (valid) |method| {
         const buf = try fmt.allocPrint(testing.allocator, "{s} / HTTP/1.1\r\n\r\n", .{method});
         defer testing.allocator.free(buf);
-        var storage: [1]Field = undefined;
+        var storage: [1]Header = undefined;
         const parsed = try parseRequest(buf, 0, &storage);
         try testing.expectEqualStrings(method, parsed.head.method);
     }
@@ -517,13 +517,13 @@ test "request: method is a token (RFC 9112 §3.1, RFC 9110 §5.6.2)" {
     for ([_][]const u8{ "GE(T", "GE T", "" }) |method| {
         const buf = try fmt.allocPrint(testing.allocator, "{s} / HTTP/1.1\r\n\r\n", .{method});
         defer testing.allocator.free(buf);
-        var storage: [1]Field = undefined;
+        var storage: [1]Header = undefined;
         try testing.expectError(error.Invalid, parseRequest(buf, 0, &storage));
     }
 }
 
 test "request: exactly one SP between components (RFC 9112 §3)" {
-    var storage: [1]Field = undefined;
+    var storage: [1]Header = undefined;
     // §3 permits lenient whitespace-delimited parsing; this parser is strict.
     try testing.expectError(error.Invalid, parseRequest("GET  / HTTP/1.1\r\n\r\n", 0, &storage));
     try testing.expectError(error.Invalid, parseRequest("GET\t/ HTTP/1.1\r\n\r\n", 0, &storage));
@@ -531,7 +531,7 @@ test "request: exactly one SP between components (RFC 9112 §3)" {
 }
 
 test "request-target: no whitespace, and non-empty (RFC 9112 §3.2)" {
-    var storage: [1]Field = undefined;
+    var storage: [1]Header = undefined;
     try testing.expectError(error.Invalid, parseRequest("GET /a b HTTP/1.1\r\n\r\n", 0, &storage));
     try testing.expectError(error.Invalid, parseRequest("GET  HTTP/1.1\r\n\r\n", 0, &storage));
     try testing.expectError(error.Invalid, parseRequest("GET /\x7f HTTP/1.1\r\n\r\n", 0, &storage));
@@ -539,7 +539,7 @@ test "request-target: no whitespace, and non-empty (RFC 9112 §3.2)" {
 }
 
 test "HTTP-version: syntax and support (RFC 9112 §2.3, RFC 9110 §2.5)" {
-    var storage: [1]Field = undefined;
+    var storage: [1]Header = undefined;
 
     try testing.expectEqual(
         Version.@"HTTP/1.0",
@@ -568,7 +568,7 @@ test "HTTP-version: syntax and support (RFC 9112 §2.3, RFC 9110 §2.5)" {
 }
 
 test "request: leading empty lines are skipped (RFC 9112 §2.2)" {
-    var storage: [1]Field = undefined;
+    var storage: [1]Header = undefined;
     const buf = "\r\n\r\nGET / HTTP/1.1\r\n\r\n";
     const parsed = try parseRequest(buf, 0, &storage);
     try testing.expectEqual(buf.len, parsed.consumed);
@@ -576,7 +576,7 @@ test "request: leading empty lines are skipped (RFC 9112 §2.2)" {
 }
 
 test "field-line: name colon OWS value OWS (RFC 9112 §5, §5.1)" {
-    var storage: [4]Field = undefined;
+    var storage: [4]Header = undefined;
     const buf =
         "GET / HTTP/1.1\r\n" ++
         "Name: value\r\n" ++
@@ -585,17 +585,17 @@ test "field-line: name colon OWS value OWS (RFC 9112 §5, §5.1)" {
         "\r\n";
     const parsed = try parseRequest(buf, 0, &storage);
 
-    try testing.expectEqual(3, parsed.head.fields.len);
-    try testing.expectEqualStrings("Name", parsed.head.fields[0].name);
-    try testing.expectEqualStrings("value", parsed.head.fields[0].value);
-    try testing.expectEqualStrings("Empty", parsed.head.fields[1].name);
-    try testing.expectEqualStrings("", parsed.head.fields[1].value);
-    try testing.expectEqualStrings("Padded", parsed.head.fields[2].name);
-    try testing.expectEqualStrings("spaced", parsed.head.fields[2].value);
+    try testing.expectEqual(3, parsed.head.headers.len);
+    try testing.expectEqualStrings("Name", parsed.head.headers[0].name);
+    try testing.expectEqualStrings("value", parsed.head.headers[0].value);
+    try testing.expectEqualStrings("Empty", parsed.head.headers[1].name);
+    try testing.expectEqualStrings("", parsed.head.headers[1].value);
+    try testing.expectEqualStrings("Padded", parsed.head.headers[2].name);
+    try testing.expectEqualStrings("spaced", parsed.head.headers[2].value);
 }
 
 test "field-line: whitespace before the colon is rejected (RFC 9112 §5.1)" {
-    var storage: [1]Field = undefined;
+    var storage: [1]Header = undefined;
     try testing.expectError(
         error.Invalid,
         parseRequest("GET / HTTP/1.1\r\nName : value\r\n\r\n", 0, &storage),
@@ -607,7 +607,7 @@ test "field-line: whitespace before the colon is rejected (RFC 9112 §5.1)" {
 }
 
 test "field-line: obs-fold is rejected (RFC 9112 §5.2)" {
-    var storage: [2]Field = undefined;
+    var storage: [2]Header = undefined;
     try testing.expectError(
         error.Invalid,
         parseRequest("GET / HTTP/1.1\r\nX: a\r\n b: c\r\n\r\n", 0, &storage),
@@ -620,7 +620,7 @@ test "field-line: obs-fold is rejected (RFC 9112 §5.2)" {
 }
 
 test "field-line: bare LF is rejected; bare CR is invalid (RFC 9112 §2.2)" {
-    var storage: [2]Field = undefined;
+    var storage: [2]Header = undefined;
     // RFC 9112 §2.2 permits recognizing bare LF; this parser does not.
     try testing.expectError(
         error.Invalid,
@@ -634,7 +634,7 @@ test "field-line: bare LF is rejected; bare CR is invalid (RFC 9112 §2.2)" {
 }
 
 test "field value: CTLs and NUL are invalid (RFC 9110 §5.5)" {
-    var storage: [1]Field = undefined;
+    var storage: [1]Header = undefined;
     for ([_][]const u8{ "a\x00b", "a\x01b", "a\x0bb", "a\x7fb" }) |value| {
         const buf = try fmt.allocPrint(
             testing.allocator,
@@ -647,45 +647,45 @@ test "field value: CTLs and NUL are invalid (RFC 9110 §5.5)" {
 }
 
 test "field value: obs-text and HTAB are allowed (RFC 9110 §5.5)" {
-    var storage: [2]Field = undefined;
+    var storage: [2]Header = undefined;
     const parsed = try parseRequest(
         "GET / HTTP/1.1\r\nX: caf\xc3\xa9\r\nY: a\tb\r\n\r\n",
         0,
         &storage,
     );
-    try testing.expectEqualStrings("caf\xc3\xa9", parsed.head.fields[0].value);
-    try testing.expectEqualStrings("a\tb", parsed.head.fields[1].value);
+    try testing.expectEqualStrings("caf\xc3\xa9", parsed.head.headers[0].value);
+    try testing.expectEqualStrings("a\tb", parsed.head.headers[1].value);
 }
 
 test "fields: order and duplicates are preserved" {
-    var storage: [3]Field = undefined;
+    var storage: [3]Header = undefined;
     const parsed = try parseRequest(
         "GET / HTTP/1.1\r\nSet-Cookie: a=1\r\nX: y\r\nset-cookie: b=2\r\n\r\n",
         0,
         &storage,
     );
-    try testing.expectEqual(3, parsed.head.fields.len);
-    try testing.expectEqualStrings("Set-Cookie", parsed.head.fields[0].name);
-    try testing.expectEqualStrings("set-cookie", parsed.head.fields[2].name);
+    try testing.expectEqual(3, parsed.head.headers.len);
+    try testing.expectEqualStrings("Set-Cookie", parsed.head.headers[0].name);
+    try testing.expectEqualStrings("set-cookie", parsed.head.headers[2].name);
 }
 
 test "fields: storage exhaustion is distinct from invalid syntax" {
-    var storage: [1]Field = undefined;
+    var storage: [1]Header = undefined;
     try testing.expectError(
-        error.TooManyFields,
+        error.TooManyHeaders,
         parseRequest("GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\n\r\n", 0, &storage),
     );
 }
 
 test "incomplete: every strict prefix of a valid request" {
-    var storage: [8]Field = undefined;
+    var storage: [8]Header = undefined;
     for (0..typical.len) |len| {
         try testing.expectError(error.Incomplete, parseRequest(typical[0..len], 0, &storage));
     }
 }
 
 test "last_len: the completeness check sees only new bytes (RFC 9112 §2.2)" {
-    var storage: [8]Field = undefined;
+    var storage: [8]Header = undefined;
     const prefix = typical.len - 8;
     try testing.expectError(error.Incomplete, parseRequest(typical[0..prefix], 0, &storage));
     const parsed = try parseRequest(typical, prefix, &storage);
@@ -696,19 +696,19 @@ test "last_len: the completeness check sees only new bytes (RFC 9112 §2.2)" {
 }
 
 test "response: a typical head (RFC 9112 §4, §5)" {
-    var storage: [4]Field = undefined;
+    var storage: [4]Header = undefined;
     const parsed = try parseResponse(typical_response, 0, &storage);
 
     try testing.expectEqual(.@"HTTP/1.1", parsed.head.version);
     try testing.expectEqual(200, parsed.head.status);
     try testing.expectEqualStrings("OK", parsed.head.reason);
-    try testing.expectEqual(2, parsed.head.fields.len);
-    try testing.expectEqualStrings("Content-Length", parsed.head.fields[1].name);
-    try testing.expectEqualStrings("0", parsed.head.fields[1].value);
+    try testing.expectEqual(2, parsed.head.headers.len);
+    try testing.expectEqualStrings("Content-Length", parsed.head.headers[1].name);
+    try testing.expectEqualStrings("0", parsed.head.headers[1].value);
 }
 
 test "status-line: the second SP is required, even with no reason (RFC 9112 §4)" {
-    var storage: [1]Field = undefined;
+    var storage: [1]Header = undefined;
     const no_reason = try parseResponse("HTTP/1.1 204 \r\n\r\n", 0, &storage);
     try testing.expectEqual(204, no_reason.head.status);
     try testing.expectEqualStrings("", no_reason.head.reason);
@@ -719,7 +719,7 @@ test "status-line: the second SP is required, even with no reason (RFC 9112 §4)
 }
 
 test "status code: three digits are returned; the range is the caller's (RFC 9110 §15)" {
-    var storage: [1]Field = undefined;
+    var storage: [1]Header = undefined;
     try testing.expectEqual(
         999,
         (try parseResponse("HTTP/1.1 999 X\r\n\r\n", 0, &storage)).head.status,
@@ -731,13 +731,13 @@ test "status code: three digits are returned; the range is the caller's (RFC 911
 }
 
 test "reason-phrase: HTAB, SP, VCHAR, and obs-text are allowed (RFC 9112 §4)" {
-    var storage: [1]Field = undefined;
+    var storage: [1]Header = undefined;
     const parsed = try parseResponse("HTTP/1.1 200 a\tb caf\xc3\xa9 \r\n\r\n", 0, &storage);
     try testing.expectEqualStrings("a\tb caf\xc3\xa9 ", parsed.head.reason);
 }
 
 test "incomplete: every strict prefix of a valid response" {
-    var storage: [4]Field = undefined;
+    var storage: [4]Header = undefined;
     for (0..typical_response.len) |len| {
         try testing.expectError(
             error.Incomplete,
@@ -820,22 +820,22 @@ test "fuzz request head" {
         fn run(_: void, smith: *testing.Smith) anyerror!void {
             var buf: [256]u8 = undefined;
             const input = buf[0..smith.slice(&buf)];
-            var storage: [8]Field = undefined;
+            var storage: [8]Header = undefined;
 
             const parsed = parseRequest(input, 0, &storage) catch |err| switch (err) {
                 error.Incomplete,
                 error.Invalid,
                 error.UnsupportedVersion,
-                error.TooManyFields,
+                error.TooManyHeaders,
                 => return,
             };
 
             try testing.expect(parsed.consumed <= input.len);
             try testing.expect(parsed.head.method.len != 0);
             try testing.expect(parsed.head.target.len != 0);
-            for (parsed.head.fields) |field| {
-                try testing.expect(within(input, field.name));
-                try testing.expect(within(input, field.value));
+            for (parsed.head.headers) |header| {
+                try testing.expect(within(input, header.name));
+                try testing.expect(within(input, header.value));
             }
         }
     }.run, .{
@@ -853,21 +853,21 @@ test "fuzz response head" {
         fn run(_: void, smith: *testing.Smith) anyerror!void {
             var buf: [256]u8 = undefined;
             const input = buf[0..smith.slice(&buf)];
-            var storage: [8]Field = undefined;
+            var storage: [8]Header = undefined;
 
             const parsed = parseResponse(input, 0, &storage) catch |err| switch (err) {
                 error.Incomplete,
                 error.Invalid,
                 error.UnsupportedVersion,
-                error.TooManyFields,
+                error.TooManyHeaders,
                 => return,
             };
 
             try testing.expect(parsed.consumed <= input.len);
             try testing.expect(parsed.head.status <= 999);
-            for (parsed.head.fields) |field| {
-                try testing.expect(within(input, field.name));
-                try testing.expect(within(input, field.value));
+            for (parsed.head.headers) |header| {
+                try testing.expect(within(input, header.name));
+                try testing.expect(within(input, header.value));
             }
         }
     }.run, .{

@@ -11,7 +11,7 @@ Namespaces are `http.h1`, `http.h2`, and `http.h3`.
 
 ## What is shared
 
-`Field { name, value }` is the one name/value type across all three protocols.
+`Header { name, value }` is the one name/value type across all three protocols.
 It is also the natural entry type for the HPACK static table (61 entries) and
 the QPACK static table (99 entries), which is the strongest argument for
 keeping it plain borrowed slices.
@@ -25,8 +25,8 @@ The shared contract:
   decoder is allowed to hand out table references.
 - Pseudo-headers are fields whose name starts with `:`. The type does not care.
 
-`Fields` is a borrowed slice view over `[]const Field`. A decoder fills a
-caller-owned `[]Field` and reports the count; the same `Fields` helpers then
+`Headers` is a borrowed slice view over `[]const Header`. A decoder fills a
+caller-owned `[]Header` and reports the count; the same `Headers` helpers then
 apply. `Values` iterates every line with a given name, in order.
 
 Protocol differences are validation, not types:
@@ -37,16 +37,16 @@ Protocol differences are validation, not types:
   with `"; "` before processing.
 - `Set-Cookie` never combines, in any protocol.
 
-No `h1.Field` unless a protocol needs metadata the shared type must not
+No `h1.Header` unless a protocol needs metadata the shared type must not
 carry. Encoder-side metadata (indexing mode, table index) belongs in a parallel
-array or a `FieldRef` wrapper, not in `Field`.
+array or a `HeaderRef` wrapper, not in `Header`.
 
 ## Modules
 
 Shared field values, already present or planned:
 
 ```
-field.zig            Field, Fields, Values
+header.zig           Header, Headers, Values
 ows.zig              SP/HTAB
 token_list.zig       #token lists
 content_length.zig   Content-Length
@@ -106,7 +106,7 @@ from the peer's SETTINGS. Nothing in the decoder allocates.
 Open question: whether a decoded field may borrow a dynamic-table entry or must
 be copied into the caller's output buffer. Recommendation: copy. It removes a
 lifetime hazard (a table eviction invalidating a live field) for a linear copy
-of the output, and it makes `Field` mean the same thing on all three protocols.
+of the output, and it makes `Header` mean the same thing on all three protocols.
 
 ## Scope boundary
 
