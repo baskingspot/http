@@ -25,6 +25,10 @@ ready to depend on.
   spelling, so `Method.GET.token()` is `"GET"` and `Method.parse("GET")` is
   exact. The parser still returns the token; this is the caller-facing
   vocabulary, not the registry.
+- `StatusCode`: the status codes as an exhaustive enum, built from
+  `std.http.Status`'s named fields. `status.code(.ok)` is the wire number,
+  `status.parse(200)` is `.ok`, and a code the enum does not name returns
+  null. The parser still returns the `u16` from the wire.
 - `Field` / `Fields`: a borrowed field line and an ordered, case-insensitive
   view over a field section. `get` returns the first value for singleton
   fields, `values` yields every line separately (`Set-Cookie` needs that), and

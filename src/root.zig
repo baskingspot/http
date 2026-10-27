@@ -5,6 +5,8 @@
 
 pub const Field = @import("field.zig").Field;
 pub const Method = @import("method.zig").Method;
+pub const StatusCode = @import("status.zig").StatusCode;
+pub const status = @import("status.zig");
 pub const Fields = @import("field.zig").Fields;
 pub const Values = @import("field.zig").Values;
 
@@ -16,6 +18,7 @@ pub const token_list = @import("token_list.zig");
 test {
     _ = @import("field.zig");
     _ = @import("method.zig");
+    _ = @import("status.zig");
     _ = content_length;
     _ = h1;
     _ = encoding;
