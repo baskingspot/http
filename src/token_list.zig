@@ -123,7 +123,7 @@ test "fuzz token lists" {
             var elements = iterator(field);
             while (elements.next()) |element| {
                 try testing.expect(element.len != 0);
-                const at = mem.indexOf(u8, rest, element) orelse return error.TestUnexpectedResult;
+                const at = mem.find(u8, rest, element) orelse return error.TestUnexpectedResult;
                 rest = rest[at + element.len ..];
             }
         }
