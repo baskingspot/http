@@ -22,12 +22,16 @@
 //! until the terminator arrives.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const testing = std.testing;
 const assert = std.debug.assert;
 const mem = std.mem;
 const fmt = std.fmt;
 const math = std.math;
+/// `std.http.Version`, whose tags are the start-line spelling. A message with
+/// major version 1 and a higher minor version is processed as 1.1
+/// (RFC 9110 §2.5).
+pub const Version = std.http.Version;
+const builtin = @import("builtin");
 
 const Header = @import("../header.zig").Header;
 
@@ -41,11 +45,6 @@ pub const Error = error{
     /// The caller's field storage is full. The caller should send 431.
     TooManyHeaders,
 };
-
-/// `std.http.Version`, whose tags are the start-line spelling. A message with
-/// major version 1 and a higher minor version is processed as 1.1
-/// (RFC 9110 §2.5).
-pub const Version = std.http.Version;
 
 pub const RequestHead = struct {
     method: []const u8,

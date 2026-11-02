@@ -27,7 +27,7 @@ const values: [status_fields.len]u10 = blk: {
     break :blk out;
 };
 
-pub const StatusCode = @Enum(
+pub const Status = @Enum(
     u10,
     .exhaustive,
     &names,
@@ -35,16 +35,16 @@ pub const StatusCode = @Enum(
 );
 
 /// The three-digit wire code.
-pub fn code(status: StatusCode) u16 {
+pub fn code(status: Status) u16 {
     return @intFromEnum(status);
 }
 
 /// The status with this number, or null when the enum does not name it.
-pub fn parse(value: u16) ?StatusCode {
-    return enums.fromInt(StatusCode, value);
+pub fn parse(value: u16) ?Status {
+    return enums.fromInt(Status, value);
 }
 
 /// The canonical reason phrase, or null for an unnamed code.
-pub fn phrase(status: StatusCode) ?[]const u8 {
+pub fn phrase(status: Status) ?[]const u8 {
     return @as(std.http.Status, @enumFromInt(@intFromEnum(status))).phrase();
 }
