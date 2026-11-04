@@ -19,12 +19,13 @@ const std = @import("std");
 const testing = std.testing;
 const mem = std.mem;
 const ascii = std.ascii;
+const stringToEnum = std.meta.stringToEnum;
 
 const Header = @import("../header.zig").Header;
 const Headers = @import("../header.zig").Headers;
 const Method = @import("../method.zig").Method;
-const Status = @import("../status.zig").Status;
 const response_mod = @import("../response.zig");
+const Status = @import("../status.zig").Status;
 
 pub const Error = error{
     /// A field name is empty, has a colon, or is not lowercase tchar.
@@ -67,6 +68,10 @@ const Pseudo = enum {
     @":path",
     @":protocol",
     @":status",
+
+    fn fromString(str: []const u8) error{UnknownPseudo}!Pseudo {
+        return stringToEnum(Pseudo, str) orelse error.UnknownPseudo;
+    }
 };
 
 pub const RequestHead = struct {
@@ -96,15 +101,13 @@ pub fn request(fields: Headers) Error!RequestHead {
     var path: ?[]const u8 = null;
     var protocol: ?[]const u8 = null;
     var seen_regular = false;
-    var regular_start: usize = fields.items.len;
+    var regular_start = fields.items.len;
 
     for (fields.items, 0..) |field, index| {
         try validateValue(field.value);
         if (field.name.len != 0 and field.name[0] == ':') {
             if (seen_regular) return error.PseudoAfterField;
-            const pseudo = std.meta.stringToEnum(Pseudo, field.name) orelse
-                return error.UnknownPseudo;
-            switch (pseudo) {
+            switch (try Pseudo.fromString(field.name)) {
                 .@":method" => {
                     if (method != null) return error.DuplicatePseudo;
                     if (!validToken(field.value)) return error.InvalidMethod;
@@ -218,9 +221,10 @@ pub fn response(fields: Headers) Error!ResponseHead {
         try validateValue(field.value);
         if (field.name.len != 0 and field.name[0] == ':') {
             if (seen_regular) return error.PseudoAfterField;
-            const pseudo = std.meta.stringToEnum(Pseudo, field.name) orelse
-                return error.UnknownPseudo;
-            if (pseudo != .@":status") return error.UnknownPseudo;
+            switch (try Pseudo.fromString(field.name)) {
+                .@":status" => {},
+                else => return error.UnknownPseudo,
+            }
             if (status != null) return error.DuplicatePseudo;
             status = try parseStatus(field.value);
         } else {
