@@ -76,7 +76,7 @@ ready to depend on.
   memory and does no I/O.
 - `h1.engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
   connection at a time; `serve` drives one stream. The handler formats a
-  response body into per-connection scratch, and the connection machine handles
+  response body with the exchange arena, and the connection machine handles
   parsing, framing, keep-alive, pipelining, and policy responses. The blocking
   engine sets every timeout to zero because a blocking syscall cannot enforce
   them; the evented engines are separate.
@@ -85,7 +85,8 @@ ready to depend on.
   and pipelining, and a stop eventfd. They share the slot state machine and
   differ only in registration and wait. Both use the same comptime handler and
   `Exchange` as the blocking engine. `onExchangeComplete` reports when a
-  borrowed response body can be released. Kqueue becomes the next backend for
+  borrowed response body can be released. Each exchange owns an arena that is
+  reset after completion. Kqueue becomes the next backend for
   this readiness loop; io_uring is separate.
 - `prefix_int`: HPACK and QPACK prefix integers (RFC 7541 §5.1), shared by
   both. Up to 32 bits, with the representation's tag bits left to the caller.

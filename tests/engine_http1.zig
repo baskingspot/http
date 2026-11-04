@@ -17,14 +17,13 @@ const TestConfig = struct {
     request_buffer: [1024]u8 = undefined,
     headers: [16]http.Header = undefined,
     response_head: [512]u8 = undefined,
-    response_body: [256]u8 = undefined,
 
     fn config(self: *TestConfig, body_bytes: usize) engine.Config {
         return .{
+            .allocator = testing.allocator,
             .request_buffer = &self.request_buffer,
             .headers = &self.headers,
             .response_head_buffer = &self.response_head,
-            .response_body_buffer = &self.response_body,
             .body_bytes = body_bytes,
         };
     }
@@ -152,9 +151,15 @@ const TestApp = struct {
             try exchange.respond(.{ .status = .not_modified }, "");
             return;
         }
+        if (mem.eql(u8, target, "/big")) {
+            const body = try exchange.arena.alloc(u8, 1024 * 1024);
+            @memset(body, 'x');
+            try exchange.respond(.{ .status = .ok }, body);
+            return;
+        }
 
-        const body = try std.fmt.bufPrint(
-            exchange.response_body,
+        const body = try std.fmt.allocPrint(
+            exchange.arena,
             "{s} {d}\n",
             .{ target, exchange.request.body.len },
         );
@@ -187,6 +192,25 @@ test "keep-alive and pipelined requests" {
     try testing.expectEqual(2, mem.count(u8, got, "HTTP/1.1 200 OK"));
     try testing.expect(mem.find(u8, got, "/one 0\n") != null);
     try testing.expect(mem.find(u8, got, "/two 0\n") != null);
+}
+
+test "a body larger than the arena retain limit" {
+    var storage: TestConfig = .{};
+    var h: Harness = undefined;
+    try startTest(&storage, &h, 64);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    var client: Client = undefined;
+    client.init(testing.io, stream);
+    defer client.close();
+
+    try client.send("GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+
+    var response: [1024 * 1024 + 1024]u8 = undefined;
+    const got = try client.readAll(&response);
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
+    try testing.expectEqual(1024 * 1024, mem.count(u8, got, "x"));
 }
 
 test "HEAD keeps Content-Length and drops the body" {
@@ -329,7 +353,8 @@ test "bad Expect is 417" {
     defer client.close();
 
     try client.send(
-        "POST / HTTP/1.1\r\nHost: x\r\nExpect: nope\r\nContent-Length: 1\r\nConnection: close\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: x\r\nExpect: nope\r\n" ++
+            "Content-Length: 1\r\nConnection: close\r\n\r\n",
     );
 
     var response: [2048]u8 = undefined;

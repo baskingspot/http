@@ -9,22 +9,23 @@ const std = @import("std");
 const Io = std.Io;
 const testing = std.testing;
 const mem = std.mem;
+const ArenaAllocator = std.heap.ArenaAllocator;
 
-const h1 = @import("../root.zig");
 const Header = @import("../../header.zig").Header;
+const h1 = @import("../root.zig");
+pub const Exchange = @import("common.zig").Exchange;
 
-/// Buffers for one connection. The request buffer holds the head and body.
-// ast-grep-ignore: public-struct-field-default -- options bag; one knob
+/// Buffers and policy for one connection. The request buffer holds the head
+/// and body.
+// ast-grep-ignore: public-struct-field-default -- options bag; defaults are the policy
 pub const Config = struct {
+    allocator: mem.Allocator,
     request_buffer: []u8,
     headers: []Header,
     response_head_buffer: []u8,
-    /// Stable until the response completes. Handlers format bodies here.
-    response_body_buffer: []u8,
+    arena_retain_bytes: usize = 16 * 1024,
     body_bytes: usize = 64 * 1024,
 };
-
-pub const Exchange = @import("common.zig").Exchange;
 
 // A handler type must provide:
 //
@@ -85,6 +86,9 @@ pub fn serve(
     var stream_writer = stream.writer(io, &write_buffer);
     const writer = &stream_writer.interface;
 
+    var arena: ArenaAllocator = .init(config.allocator);
+    defer arena.deinit();
+
     var conn: h1.ServerConn = .init(.{
         .request_buffer = config.request_buffer,
         .headers = config.headers,
@@ -112,6 +116,7 @@ pub fn serve(
                     writer,
                     handler,
                     config,
+                    &arena,
                     request,
                 );
                 switch (done) {
@@ -163,43 +168,53 @@ fn handleRequest(
     writer: *Io.Writer,
     handler: *Handler,
     config: Config,
+    arena: *ArenaAllocator,
     request: h1.ServerConn.Request,
 ) !h1.ServerConn.Done {
     var exchange: Exchange = .{
         .id = 0,
         .conn = conn,
         .request = request,
-        .response_body = config.response_body_buffer,
+        .arena = arena.allocator(),
     };
     handler.handle(&exchange) catch |err| {
         report(Handler, handler, err);
         if (conn.sendSlices().head.len == 0) {
             exchange.respond(.{ .status = .internal_server_error }, "") catch |resp_err| {
-                complete(Handler, handler, &exchange);
+                complete(Handler, handler, &exchange, arena, config.arena_retain_bytes);
                 return resp_err;
             };
         }
     };
 
     const done = writePending(io, conn, writer) catch |err| {
-        complete(Handler, handler, &exchange);
+        complete(Handler, handler, &exchange, arena, config.arena_retain_bytes);
         return err;
     };
     if (done) |value| {
         switch (value) {
-            .keep_alive, .close, .close_after_drain => complete(Handler, handler, &exchange),
+            .keep_alive, .close, .close_after_drain => {
+                complete(Handler, handler, &exchange, arena, config.arena_retain_bytes);
+            },
             .read, .more => {},
         }
         return value;
     }
-    complete(Handler, handler, &exchange);
+    complete(Handler, handler, &exchange, arena, config.arena_retain_bytes);
     return error.NoResponse;
 }
 
-fn complete(comptime Handler: type, handler: *Handler, exchange: *Exchange) void {
+fn complete(
+    comptime Handler: type,
+    handler: *Handler,
+    exchange: *Exchange,
+    arena: *ArenaAllocator,
+    retain_bytes: usize,
+) void {
     if (@hasDecl(Handler, "onExchangeComplete")) {
         handler.onExchangeComplete(exchange);
     }
+    _ = arena.reset(.{ .retain_with_limit = retain_bytes });
 }
 
 fn report(comptime Handler: type, handler: *Handler, err: anyerror) void {
@@ -274,12 +289,8 @@ const TestClient = struct {
 
 const TestHandler = struct {
     pub fn handle(_: *TestHandler, exchange: *Exchange) anyerror!void {
-        const body = "hello\n";
-        @memcpy(exchange.response_body[0..body.len], body);
-        try exchange.respond(
-            .{ .status = .ok, .content_type = "text/plain" },
-            exchange.response_body[0..body.len],
-        );
+        const body = try exchange.arena.dupe(u8, "hello\n");
+        try exchange.respond(.{ .status = .ok, .content_type = "text/plain" }, body);
     }
 };
 
@@ -300,13 +311,12 @@ test "serve one blocking connection" {
     var request_buffer: [1024]u8 = undefined;
     var headers: [16]Header = undefined;
     var response_head: [256]u8 = undefined;
-    var response_body: [256]u8 = undefined;
     var test_handler: TestHandler = .{};
     serve(TestHandler, testing.io, stream, &test_handler, .{
+        .allocator = testing.allocator,
         .request_buffer = &request_buffer,
         .headers = &headers,
         .response_head_buffer = &response_head,
-        .response_body_buffer = &response_body,
     }) catch |err| {
         stream.close(testing.io);
         thread.join();

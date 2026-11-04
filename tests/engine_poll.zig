@@ -19,12 +19,23 @@ const TestApp = struct {
         const target = exchange.request.head.target;
         if (mem.eql(u8, target, "/no-response")) return;
         if (mem.eql(u8, target, "/big")) {
-            @memset(exchange.response_body, 'x');
-            try exchange.respond(.{ .status = .ok }, exchange.response_body);
+            const body = try exchange.arena.alloc(u8, 1024 * 1024);
+            @memset(body, 'x');
+            try exchange.respond(.{ .status = .ok }, body);
             return;
         }
-        const body = try std.fmt.bufPrint(
-            exchange.response_body,
+        if (mem.eql(u8, target, "/arena")) {
+            const body = try exchange.arena.alloc(u8, 64 * 1024);
+            @memset(body, 'a');
+            try exchange.respond(.{ .status = .ok }, body);
+            return;
+        }
+        if (mem.eql(u8, target, "/plain")) {
+            try exchange.respond(.{ .status = .ok }, "plain\n");
+            return;
+        }
+        const body = try std.fmt.allocPrint(
+            exchange.arena,
             "{s} {d}\n",
             .{ target, exchange.request.body.len },
         );
@@ -49,14 +60,14 @@ const Harness = struct {
     joined: bool = false,
 
     fn init(self: *Harness, limits: h1.ServerConn.Limits, max_connections: usize) !void {
-        try self.initConfig(limits, max_connections, 8 * 1024);
+        try self.initConfig(limits, max_connections, 16 * 1024);
     }
 
     fn initConfig(
         self: *Harness,
         limits: h1.ServerConn.Limits,
         max_connections: usize,
-        response_body_bytes: usize,
+        arena_retain_bytes: usize,
     ) !void {
         self.io = testing.io;
         self.app = .{};
@@ -66,7 +77,7 @@ const Harness = struct {
         self.server = try .init(self.io, address, &self.app, .{
             .allocator = testing.allocator,
             .max_connections = max_connections,
-            .response_body_bytes = response_body_bytes,
+            .arena_retain_bytes = arena_retain_bytes,
             .limits = limits,
         });
         self.address = address;
@@ -189,11 +200,11 @@ test "poll sends 100 Continue before reading the body" {
 
 test "poll closes an idle connection" {
     var h: Harness = undefined;
-    try h.init(.{
+    try h.initConfig(.{
         .idle_timeout = .fromSeconds(1),
         .head_timeout = .fromSeconds(1),
         .total_timeout = .fromSeconds(5),
-    }, 8);
+    }, 8, 16 * 1024);
     defer h.deinit();
 
     const stream = try h.connect();
@@ -338,12 +349,100 @@ test "poll listener does not set SO_REUSEPORT" {
     }));
 }
 
+test "poll serves a body larger than the arena retain limit" {
+    var h: Harness = undefined;
+    try h.init(.{}, 8);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+    try send(
+        stream,
+        h.io,
+        "GET /big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+
+    var response: [1024 * 1024 + 1024]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
+    try testing.expectEqual(1024 * 1024, mem.count(u8, got, "x"));
+}
+
+test "poll resets the arena between keep-alive requests" {
+    var h: Harness = undefined;
+    try h.initConfig(.{}, 1, 4 * 1024);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+    try send(
+        stream,
+        h.io,
+        "GET /arena HTTP/1.1\r\nHost: x\r\n\r\n" ++
+            "GET /arena HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+
+    var response: [140 * 1024]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expectEqual(2, mem.count(u8, got, "HTTP/1.1 200 OK"));
+    try testing.expect(h.server.slots[0].arena.queryCapacity() <= 4 * 1024);
+}
+
+test "poll resets the arena between connections" {
+    var h: Harness = undefined;
+    try h.initConfig(.{}, 1, 4 * 1024);
+    defer h.deinit();
+
+    {
+        const stream = try h.connect();
+        defer stream.close(h.io);
+        try send(
+            stream,
+            h.io,
+            "GET /arena HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        var response: [70 * 1024]u8 = undefined;
+        _ = try readAll(stream, h.io, &response);
+    }
+    {
+        const stream = try h.connect();
+        defer stream.close(h.io);
+        try send(
+            stream,
+            h.io,
+            "GET /arena HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        var response: [70 * 1024]u8 = undefined;
+        _ = try readAll(stream, h.io, &response);
+    }
+
+    try testing.expect(h.server.slots[0].arena.queryCapacity() <= 4 * 1024);
+}
+
+test "poll does not allocate the arena when the handler does not use it" {
+    var h: Harness = undefined;
+    try h.initConfig(.{}, 8, 4 * 1024);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+    try send(
+        stream,
+        h.io,
+        "GET /plain HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+
+    var response: [1024]u8 = undefined;
+    _ = try readAll(stream, h.io, &response);
+    try testing.expectEqual(0, h.server.slots[0].arena.queryCapacity());
+}
+
 test "poll a slow reader hits the write deadline" {
     var h: Harness = undefined;
     try h.initConfig(.{
         .write_timeout = .fromMilliseconds(50),
         .total_timeout = .fromSeconds(5),
-    }, 8, 4 * 1024 * 1024);
+    }, 8, 16 * 1024);
     defer h.deinit();
 
     const stream = try h.connect();
@@ -369,6 +468,7 @@ test "poll a slow reader hits the write deadline" {
     const got = try readAll(stream, h.io, &response);
     try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(got.len < 4 * 1024 * 1024);
+    try testing.expect(h.server.slots[0].arena.queryCapacity() <= 16 * 1024);
 }
 
 test "poll reports exchange completion" {

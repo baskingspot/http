@@ -6,7 +6,7 @@
 //! The accept loop owns the listener; each accepted stream moves into its own
 //! task, which owns the stream and the per-connection buffers. The engine
 //! still sees exactly one connection. `handle` sees a complete request and
-//! formats a response body into the connection's scratch.
+//! formats a response body with the exchange arena.
 
 const std = @import("std");
 const Io = std.Io;
@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
         // `concurrent`, not `async`: `async` is allowed to run the task inline
         // when the pool is busy, which would stall this loop behind one slow
         // client. `concurrent` either starts a real task or fails.
-        group.concurrent(io, serveConnection, .{ io, stream, &app }) catch |err| {
+        group.concurrent(io, serveConnection, .{ init.gpa, io, stream, &app }) catch |err| {
             // No concurrency available: drop the connection rather than
             // serialize it into the accept loop.
             stream.close(io);
@@ -72,14 +72,13 @@ const Connection = struct {
     request: [16 * 1024]u8 = undefined,
     headers: [64]http.Header = undefined,
     response_head: [1024]u8 = undefined,
-    response_body: [512]u8 = undefined,
 
-    fn config(self: *Connection) engine.Config {
+    fn config(self: *Connection, allocator: std.mem.Allocator) engine.Config {
         return .{
+            .allocator = allocator,
             .request_buffer = &self.request,
             .headers = &self.headers,
             .response_head_buffer = &self.response_head,
-            .response_body_buffer = &self.response_body,
             .body_bytes = 8 * 1024,
         };
     }
@@ -87,11 +86,16 @@ const Connection = struct {
 
 /// One task body. Returning `void` keeps it coercible to `Cancelable!void`,
 /// and errors go to `on_error` here instead of vanishing into the group.
-fn serveConnection(io: Io, stream: Io.net.Stream, handler: *App) void {
+fn serveConnection(
+    allocator: std.mem.Allocator,
+    io: Io,
+    stream: Io.net.Stream,
+    handler: *App,
+) void {
     defer stream.close(io);
 
     var connection: Connection = .{};
-    engine.serve(App, io, stream, handler, connection.config()) catch |err| {
+    engine.serve(App, io, stream, handler, connection.config(allocator)) catch |err| {
         handler.onError(err);
     };
 }
@@ -113,8 +117,8 @@ const App = struct {
         const is_root = std.mem.eql(u8, target, "/");
         const method_name = if (head.method) |method| method.token() else "UNKNOWN";
         const body = if (is_root)
-            try std.fmt.bufPrint(
-                exchange.response_body,
+            try std.fmt.allocPrint(
+                exchange.arena,
                 "{s} {s} ({d}-byte body)\n",
                 .{ method_name, target, exchange.request.body.len },
             )

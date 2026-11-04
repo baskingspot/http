@@ -12,6 +12,7 @@ const Io = std.Io;
 const linux = std.os.linux;
 const posix = std.posix;
 const mem = std.mem;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const builtin = @import("builtin");
@@ -19,7 +20,6 @@ const builtin = @import("builtin");
 const Header = @import("../../header.zig").Header;
 const h1 = @import("../root.zig");
 pub const Exchange = @import("common.zig").Exchange;
-
 const wait = @import("wait.zig");
 
 comptime {
@@ -33,7 +33,7 @@ pub const Config = struct {
     request_buffer_bytes: usize = 16 * 1024,
     headers: usize = 64,
     response_head_bytes: usize = 1024,
-    response_body_bytes: usize = 8 * 1024,
+    arena_retain_bytes: usize = 16 * 1024,
     drain_bytes: usize = 4 * 1024,
     body_bytes: usize = 64 * 1024,
     limits: h1.ServerConn.Limits = .{},
@@ -52,7 +52,7 @@ const Slot = struct {
     request: []u8,
     headers: []Header,
     response_head: []u8,
-    response_body: []u8,
+    arena: ArenaAllocator,
     drain: []u8,
     exchange: Exchange,
     exchange_active: bool = false,
@@ -62,7 +62,7 @@ const Slot = struct {
             .id = id,
             .conn = &self.conn,
             .request = undefined,
-            .response_body = self.response_body,
+            .arena = self.arena.allocator(),
         };
     }
 
@@ -312,6 +312,7 @@ pub fn Server(comptime Handler: type, comptime Waiter: type) type {
             if (@hasDecl(Handler, "onExchangeComplete")) {
                 self.handler.onExchangeComplete(&slot.exchange);
             }
+            _ = slot.arena.reset(.{ .retain_with_limit = self.config.arena_retain_bytes });
             slot.exchange.request = undefined;
         }
 
@@ -407,7 +408,6 @@ pub fn Server(comptime Handler: type, comptime Waiter: type) type {
         fn handleRequest(self: *Self, slot: *Slot, request: h1.ServerConn.Request) bool {
             assert(!slot.exchange_active);
             slot.exchange.request = request;
-            slot.exchange.response_body = slot.response_body;
             slot.exchange_active = true;
             self.handler.handle(&slot.exchange) catch |err| {
                 self.report(err);
@@ -508,8 +508,8 @@ fn makeSlot(allocator: Allocator, config: Config) !Slot {
     errdefer allocator.free(headers);
     const response_head = try allocator.alloc(u8, config.response_head_bytes);
     errdefer allocator.free(response_head);
-    const response_body = try allocator.alloc(u8, config.response_body_bytes);
-    errdefer allocator.free(response_body);
+    var arena: ArenaAllocator = .init(allocator);
+    errdefer arena.deinit();
     const drain = try allocator.alloc(u8, config.drain_bytes);
     errdefer allocator.free(drain);
 
@@ -523,7 +523,7 @@ fn makeSlot(allocator: Allocator, config: Config) !Slot {
         .request = request,
         .headers = headers,
         .response_head = response_head,
-        .response_body = response_body,
+        .arena = arena,
         .drain = drain,
         .exchange = undefined,
     };
@@ -539,7 +539,7 @@ fn freeSlotBuffers(allocator: Allocator, slot: *Slot) void {
     allocator.free(slot.request);
     allocator.free(slot.headers);
     allocator.free(slot.response_head);
-    allocator.free(slot.response_body);
+    slot.arena.deinit();
     allocator.free(slot.drain);
 }
 

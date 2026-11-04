@@ -63,15 +63,19 @@ The exchange holds:
 
 - The connection machine.
 - The complete request.
-- A response body scratch buffer.
+- An engine-owned arena allocator.
 
 The request body borrows the request buffer. Use it before the response
-completes. The response body scratch stays valid until the response completes.
-A handler formats the body there and calls `exchange.respond`.
+completes. The arena is valid from handler entry until `onExchangeComplete`
+returns. Build the response body there with `std.fmt.allocPrint`,
+`allocator.alloc`, or another allocator call, then pass the slice to
+`exchange.respond`.
 
 The body passed to `respond` may also point at handler-owned memory that
-outlives the response. The per-slot scratch is a convenience, not a limit;
-do not size it for the largest possible body.
+outlives the response. In both cases the bytes must stay valid until the
+response completes. The engine resets the arena with
+`arena_retain_bytes` (default 16 KiB) after the completion callback, before the
+slot serves another request or connection.
 
 If `handle` returns an error before it responds, the engine queues a 500. If it
 returns an error after it responds, the engine sends that response. The engine
@@ -108,9 +112,10 @@ the clock, and the listener close. The connection machine is the same
 
 `Server(Handler)` takes the handler type at comptime. The caller creates it
 with an address, a handler pointer, and a `Config` that holds the allocator,
-the slot count, the buffer sizes, the connection limits, and the accept
-backoff. The server allocates all slots and buffers once, in `init`; it does no
-allocation per request.
+the slot count, the buffer sizes, the arena retain limit, the connection
+limits, and the accept backoff. The server allocates all slots and buffers
+once, in `init`; it allocates per request only when the handler uses the
+exchange arena.
 
 The methods are `init`, `run`, `stop`, `deinit`, and `port`. `run` blocks in
 the wait backend. `stop` writes a stop eventfd; `run` returns after the next

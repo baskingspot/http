@@ -10,8 +10,8 @@ curl -v http://127.0.0.1:8080/
 The server uses `h1.engine.blocking` over `std.Io`. The accept loop owns the
 listener and moves each accepted stream into a task in an `Io.Group`. One task
 serves one connection and owns its own buffers. The engine calls a handler with
-a complete request. The handler formats a response body into the connection
-scratch and calls `conn.respond`. The connection machine handles head parsing,
+a complete request. The handler formats a response body with the exchange arena
+and calls `exchange.respond`. The connection machine handles head parsing,
 body framing, keep-alive, pipelining, `Expect: 100-continue`, and the policy
 responses.
 
