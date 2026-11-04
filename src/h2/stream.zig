@@ -128,12 +128,13 @@ fn pushPromise(state: State, side: Side) Error!State {
 pub const Ids = struct {
     role: Role,
     local_next: u32,
-    last_remote: u31 = 0,
+    last_remote: u31,
 
     pub fn init(role: Role) Ids {
         return .{
             .role = role,
             .local_next = if (role == .client) 1 else 2,
+            .last_remote = 0,
         };
     }
 
@@ -274,7 +275,7 @@ test "stream identifiers follow role parity and increase" {
 }
 
 test "the stream identifier space can be exhausted" {
-    var ids: Ids = .{ .role = .client, .local_next = 0x7fff_fffd };
+    var ids: Ids = .{ .role = .client, .local_next = 0x7fff_fffd, .last_remote = 0 };
     try testing.expectEqual(@as(?u31, 0x7fff_fffd), ids.nextLocal());
     try testing.expectEqual(@as(?u31, 0x7fff_ffff), ids.nextLocal());
     try testing.expect(ids.nextLocal() == null);
