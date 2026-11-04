@@ -61,11 +61,6 @@ example:
 example-poll:
     zig build example-poll
 
-[doc("Run the HTTP/1.1 poll example server (Linux only)")]
-[group("example")]
-example-poll:
-    zig build example-poll
-
 [doc("Run the HTTP/1.1 io_uring example (Linux only)")]
 [group("example")]
 example-uring:
