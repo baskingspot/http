@@ -5,6 +5,11 @@
 //! every returned slice from the input. The caller owns the buffer and the
 //! storage for the field lines.
 //!
+//! Lifetimes: the returned head borrows the input buffer and the caller's
+//! header storage. It is valid only while both are unchanged. A buffered
+//! reader may move its bytes when it refills, so copy the fields that must
+//! outlive the head before the next read or rebase.
+//!
 //! Chooses strict behavior where RFC 9112 permits leniency:
 //! - Bare LF is rejected. RFC 9112 §2.2 says a recipient MAY recognize it.
 //! - Start lines require exactly one SP between components. RFC 9112 §3 and
@@ -54,6 +59,16 @@ pub const Error = error{
     TooManyHeaders,
 };
 
+/// A parsed request head.
+///
+/// The head borrows. `method_token`, `target`, and every `headers.items` name
+/// and value point into the buffer passed to `parseRequest`; `headers.items`
+/// itself points into the caller's `Header` storage. The value is valid only
+/// while both are unchanged: reading more bytes into the buffer, rebasing it,
+/// or reusing the storage invalidates it. Copy anything that must outlive the
+/// parse.
+///
+/// `method`, `version`, and `wire_version` are plain values.
 pub const RequestHead = struct {
     /// The common method, or null when the wire token is not one of them.
     method: ?Method,
@@ -69,6 +84,11 @@ pub const RequestHead = struct {
     headers: Headers,
 };
 
+/// A parsed response head.
+///
+/// The same lifetime rule as `RequestHead`: `reason` and the field lines
+/// borrow the input buffer, and `headers.items` borrows the caller's storage.
+/// Copy anything that must outlive the parse.
 pub const ResponseHead = struct {
     /// The effective version, after RFC 9110 §6.2.
     version: Version,
@@ -82,12 +102,20 @@ pub const ResponseHead = struct {
     headers: Headers,
 };
 
+/// A request head and the number of bytes it occupied.
+///
+/// The head borrows the input buffer and the caller's header storage; see
+/// `RequestHead`.
 pub const ParsedRequest = struct {
     head: RequestHead,
     /// Bytes consumed, including any leading empty lines.
     consumed: u32,
 };
 
+/// A response head and the number of bytes it occupied.
+///
+/// The head borrows the input buffer and the caller's header storage; see
+/// `ResponseHead`.
 pub const ParsedResponse = struct {
     head: ResponseHead,
     consumed: u32,
@@ -96,9 +124,12 @@ pub const ParsedResponse = struct {
 /// Parse a request head from `buf`.
 ///
 /// `storage` receives the field lines; the returned `head.headers.items` is
-/// the used prefix. `last_len` is the previously searched length: 0, or the
-/// buffer length of the call that returned `error.Incomplete`. `buf` must be
-/// shorter than 4 GiB; a real head limit is far smaller.
+/// the used prefix. The head borrows `buf` and `storage`; see `RequestHead`
+/// for what invalidates it.
+///
+/// `last_len` is the previously searched length: 0, or the buffer length of
+/// the call that returned `error.Incomplete`. `buf` must be shorter than
+/// 4 GiB; a real head limit is far smaller.
 pub fn parseRequest(buf: []const u8, last_len: u32, storage: []Header) Error!ParsedRequest {
     assert(buf.len <= math.maxInt(u32));
     if (last_len != 0 and !headComplete(buf, last_len)) return error.Incomplete;
@@ -129,7 +160,10 @@ pub fn parseRequest(buf: []const u8, last_len: u32, storage: []Header) Error!Par
     };
 }
 
-/// Parse a response head from `buf`. `last_len` works as in `parseRequest`.
+/// Parse a response head from `buf`.
+///
+/// The head borrows `buf` and `storage`; see `ResponseHead`. `last_len` works
+/// as in `parseRequest`.
 pub fn parseResponse(buf: []const u8, last_len: u32, storage: []Header) Error!ParsedResponse {
     assert(buf.len <= math.maxInt(u32));
     if (last_len != 0 and !headComplete(buf, last_len)) return error.Incomplete;

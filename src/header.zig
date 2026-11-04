@@ -18,14 +18,18 @@ const testing = std.testing;
 const ows = @import("ows.zig");
 const token_list = @import("token_list.zig");
 
-/// One field line, as the parser found it. Both slices are borrowed from the
-/// message buffer; the header owns nothing.
+/// One field line, as the parser found it. Both slices borrow the message
+/// buffer and are valid only while it is unchanged. The header owns nothing.
 pub const Header = struct {
     name: []const u8,
     value: []const u8,
 };
 
 /// A borrowed view of every field line in a message, in wire order.
+///
+/// `items` points into the caller's header storage, and each item's name and
+/// value point into the message buffer. The view is valid only while both are
+/// unchanged; see `h1.RequestHead`. The view owns nothing.
 pub const Headers = struct {
     items: []const Header,
 
