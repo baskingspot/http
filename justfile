@@ -49,10 +49,16 @@ fmt:
 example:
     zig build example
 
-[doc("Build the HTTP/1.1 example server without running it")]
+[doc("Run the HTTP/1.1 io_uring example (Linux only)")]
+[group("example")]
+example-uring:
+    zig build example-uring
+
+[doc("Build the HTTP/1.1 examples without running them")]
 [group("example")]
 check-example:
     zig build example-bin
+    zig build example-uring-bin
 
 [doc("Everything CI runs")]
 [group("ci")]

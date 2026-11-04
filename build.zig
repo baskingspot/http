@@ -88,6 +88,28 @@ pub fn build(b: *std.Build) void {
     b.step("example", "Run the HTTP/1.1 example server")
         .dependOn(&run_example.step);
 
+    // The io_uring example is Linux-only. The steps exist everywhere so
+    // `check-example` is portable; only Linux gets a target to build.
+    const uring_bin = b.step("example-uring-bin", "Build the HTTP/1.1 io_uring example");
+    const uring_run = b.step("example-uring", "Run the HTTP/1.1 io_uring example");
+    if (target.result.os.tag == .linux) {
+        const uring_mod = b.createModule(.{
+            .root_source_file = b.path("examples/http1_uring.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "http", .module = mod }},
+        });
+        const uring = b.addExecutable(.{
+            .name = "http1-uring",
+            .root_module = uring_mod,
+        });
+        uring_bin.dependOn(&uring.step);
+
+        const run_uring = b.addRunArtifact(uring);
+        if (b.args) |args| run_uring.addArgs(args);
+        uring_run.dependOn(&run_uring.step);
+    }
+
     if (b.lazyImport(@This(), "testingx")) |testingx| {
         const dep = testingx_dep orelse unreachable;
         // hparse is fetched by the same lazy pass. If it is still null, the

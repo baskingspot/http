@@ -1,4 +1,6 @@
-# HTTP/1.1 server example
+# HTTP/1.1 examples
+
+## Blocking server
 
 ```sh
 just example
@@ -24,3 +26,19 @@ returns to the next head.
 A chunked request gets 501 until the decoder lands. A body over 64 KiB gets 413.
 There are no timeouts, no concurrency, and no TLS; those belong to the server
 above this package.
+
+## io_uring
+
+```sh
+just example-uring
+```
+
+Linux only. A client and server in one process, with io_uring driving every
+socket read and write after a blocking accept. The client sends two pipelined
+requests; the second is already in the receive buffer after the first head, so
+the server has to consume the first request and move the leftover forward
+before parsing again.
+
+This is the useful stress test for the API: the parser sees a buffer that may
+hold a head, a body, and the next request, and the head slices go stale as soon
+as the buffer is reused.
