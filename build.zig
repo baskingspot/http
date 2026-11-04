@@ -117,6 +117,22 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_engine_tests.addArgs(args);
     test_step.dependOn(&run_engine_tests.step);
 
+    // The blocking HTTP/2 engine over a real loopback socket.
+    const h2_engine_tests_mod = b.createModule(.{
+        .root_source_file = b.path("tests/engine_h2.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "http", .module = mod }},
+    });
+    const h2_engine_tests = b.addTest(.{
+        .root_module = h2_engine_tests_mod,
+        .test_runner = test_runner,
+    });
+    const run_h2_engine_tests = b.addRunArtifact(h2_engine_tests);
+    run_h2_engine_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
+    if (b.args) |args| run_h2_engine_tests.addArgs(args);
+    test_step.dependOn(&run_h2_engine_tests.step);
+
     // The readiness engines are Linux-only for now. The test artifact is
     // present on every target in the source tree, but only Linux gets a build
     // target. Both engines run the same integration suite.

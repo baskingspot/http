@@ -135,9 +135,10 @@ ready to depend on.
   full suite passes in strict mode.
 - `h2.engine.blocking`: a blocking server engine over `std.Io`, the h2
   counterpart to `h1.engine.blocking`. `serve` drives one connection and `run`
-  is the accept loop. The engine buffers one request per stream and hands it to
-  a type-erased `Handler` as an `Exchange`: a typed head, the whole body up to
-  `body_bytes`, and trailers, with a per-stream arena. `respond` records the
+  is the accept loop. The shared `h2.engine.Connection` core buffers one
+  request per stream and hands it to a type-erased `Handler` as an `Exchange`:
+  a typed head, the whole body up to `body_bytes`, and trailers, with a
+  per-stream arena. `respond` records the
   response and the engine sends it under flow control; `complete` and
   `report_error` close the lifecycle. The h2c example is this engine with a
   thread per connection above `serve`; `h2.Session` remains the streaming

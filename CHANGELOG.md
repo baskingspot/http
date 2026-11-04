@@ -64,7 +64,9 @@ All notable changes to http are recorded here. The format follows
   head, whole body, trailers, and a per-stream arena. `respond` records the
   response; the engine validates it, sends the HEADERS, and pumps the body
   under flow control. `complete` and `report_error` close the lifecycle. The
-  h2c example uses this engine with a thread per connection.
+  sans-I/O `h2.engine.Connection` core holds the session, slots, arenas, and
+  handler; the blocking engine is a transport driver around it, and the h2c
+  example uses it with a thread per connection.
 - `Status`: the status codes as an open enum. Named codes are constants; any
   other three-digit code is still a value. `Status.code()`, `Status.class()`,
   `Status.phrase()`, and `Status.parse()` work on the wire number, and the
