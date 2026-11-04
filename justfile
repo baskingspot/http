@@ -63,12 +63,12 @@ conformance-run *ARGS:
 
 [doc("Build and run the poll example, run h2spec, then stop it; port 8081 must be free")]
 [group("test")]
-conformance-run-poll *ARGS:
+conformance-run-readiness *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    zig build example-h2-poll-bin
-    bin=$(find .zig-cache -type f -name http2-poll -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)
-    "$bin" >/tmp/http2-poll-conformance.log 2>&1 &
+    zig build example-h2-readiness-bin
+    bin=$(find .zig-cache -type f -name http2-readiness -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)
+    "$bin" >/tmp/http2-readiness-conformance.log 2>&1 &
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
     ready=0
@@ -81,7 +81,7 @@ conformance-run-poll *ARGS:
         sleep 0.1
     done
     if [ "$ready" -ne 1 ]; then
-        echo "http2-poll did not start on 127.0.0.1:8081" >&2
+        echo "http2-readiness did not start on 127.0.0.1:8081" >&2
         exit 1
     fi
     h2spec -h 127.0.0.1 -p 8081 {{ ARGS }}
@@ -141,10 +141,10 @@ example-uring:
 example-h2:
     zig build example-h2
 
-[doc("Run the readiness (poll) HTTP/2 h2c example server on 127.0.0.1:8081")]
+[doc("Run the readiness (poll/kqueue) HTTP/2 h2c example server on 127.0.0.1:8081")]
 [group("example")]
-example-h2-poll:
-    zig build example-h2-poll
+example-h2-readiness:
+    zig build example-h2-readiness
 
 [doc("Build the HTTP/1.1 and HTTP/2 examples without running them")]
 [group("example")]
@@ -155,7 +155,7 @@ check-example:
     zig build example-kqueue-bin
     zig build example-uring-bin
     zig build example-h2-bin
-    zig build example-h2-poll-bin
+    zig build example-h2-readiness-bin
 
 [doc("Everything CI runs")]
 [group("ci")]

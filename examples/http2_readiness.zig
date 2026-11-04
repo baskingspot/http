@@ -1,16 +1,24 @@
-//! A small h2c server on the readiness (poll) engine.
+//! A small h2c server on the readiness engine.
 //!
-//!     just example-h2-poll
-//!     just conformance
+//!     just example-h2-readiness
+//!     just conformance-run-readiness
 //!
-//! The handler is the same exchange handler as the blocking example; the
-//! transport is one thread with fixed connection slots.
+//! poll(2) on Linux, kqueue(2) on macOS. The handler is the same exchange
+//! handler as the blocking example; the transport is one thread with fixed
+//! connection slots.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const print = std.debug.print;
 
 const http = @import("http");
+
+const Engine = switch (builtin.os.tag) {
+    .linux => http.h2.engine.poll,
+    .macos => http.h2.engine.kqueue,
+    else => @compileError("the readiness example is Linux and macOS only"),
+};
 
 const address_text = "127.0.0.1:8081";
 const response_body = "h2c hello\n";
@@ -33,7 +41,7 @@ const App = struct {
     }
 
     fn reportError(_: *anyopaque, err: anyerror) void {
-        print("http2-poll: error: {s}\n", .{@errorName(err)});
+        print("http2-readiness: error: {s}\n", .{@errorName(err)});
     }
 };
 
@@ -42,13 +50,13 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const address: Io.net.IpAddress = try .parseLiteral(address_text);
 
-    var server = try http.h2.engine.poll.Server.init(io, address, App.handler(), .{
+    var server = try Engine.Server.init(io, address, App.handler(), .{
         .allocator = gpa,
         .max_connections = 64,
         .max_streams = 128,
     });
     defer server.deinit();
 
-    print("http2-poll: listening on {s}\n", .{address_text});
+    print("http2-readiness: listening on {s}\n", .{address_text});
     try server.run();
 }

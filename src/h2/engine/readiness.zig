@@ -1,17 +1,15 @@
-//! The readiness engine shared by the poll(2) and epoll backends.
+//! The readiness engine shared by the poll(2), epoll(7), and kqueue(2) backends.
 //!
 //! Fixed connection slots, nonblocking sockets, one thread, and no deadlines
 //! yet. Each slot drives the sans-I/O `Connection` core; the socket is only
-//! read when poll says so, and output is drained through a per-slot buffer.
-//! Linux-only for now.
+//! read when the waiter says so, and output is drained through a per-slot
+//! buffer. The `Waiter.Platform` edge supplies the listener, stop descriptor,
+//! accept, read, send, and close for the host.
 
 const std = @import("std");
 const Io = std.Io;
-const linux = std.os.linux;
-const posix = std.posix;
-const mem = std.mem;
 const Allocator = std.mem.Allocator;
-const builtin = @import("builtin");
+const fd_t = std.posix.fd_t;
 
 const session_mod = @import("../session.zig");
 const SessionOptions = session_mod.Options;
@@ -20,11 +18,7 @@ const Connection = connection_mod.Connection;
 const common = @import("common.zig");
 pub const Exchange = common.Exchange;
 pub const Handler = common.Handler;
-const wait = @import("wait.zig");
-
-comptime {
-    if (builtin.os.tag != .linux) @compileError("the readiness engine is Linux-only for now");
-}
+const wait = @import("../../transport/wait.zig");
 
 // ast-grep-ignore: public-struct-field-default -- options bag; defaults are the policy
 pub const Config = struct {
@@ -42,7 +36,7 @@ const State = enum { free, read, write };
 
 const Slot = struct {
     conn: Connection = undefined,
-    fd: linux.fd_t = -1,
+    fd: fd_t = -1,
     state: State = .free,
     read_buffer: []u8,
     out_buffer: []u8,
@@ -51,6 +45,7 @@ const Slot = struct {
 };
 
 pub fn Server(comptime Wait: type) type {
+    const P = Wait.Platform;
     return struct {
         const Self = @This();
 
@@ -58,8 +53,8 @@ pub fn Server(comptime Wait: type) type {
         allocator: Allocator,
         handler: Handler,
         config: Config,
-        listener: Io.net.Server,
-        stop_fd: linux.fd_t,
+        listener: P.Listener,
+        stop: P.Stop,
         slots: []Slot,
         wait: Wait,
         active: usize,
@@ -75,13 +70,11 @@ pub fn Server(comptime Wait: type) type {
                 return error.NoBuffer;
             }
 
-            var listener = try openListener(bind_address);
-            errdefer listener.deinit(io);
+            var listener = try P.openListener(bind_address, false);
+            errdefer listener.deinit();
 
-            const stop_rc = linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
-            if (linux.errno(stop_rc) != .SUCCESS) return error.EventfdFailed;
-            const stop_fd: linux.fd_t = @intCast(stop_rc);
-            errdefer _ = linux.close(stop_fd);
+            const stop = try P.Stop.init();
+            errdefer stop.deinit();
 
             const slots = try config.allocator.alloc(Slot, config.max_connections);
             errdefer config.allocator.free(slots);
@@ -100,8 +93,8 @@ pub fn Server(comptime Wait: type) type {
 
             var waiter = try Wait.init(config.allocator, config.max_connections + 2);
             errdefer waiter.deinit();
-            try waiter.set(.stop, stop_fd, .initOne(.read));
-            try waiter.set(.listener, listener.socket.handle, .initOne(.read));
+            try waiter.set(.stop, stop.read_fd, .initOne(.read));
+            try waiter.set(.listener, listener.fd, .initOne(.read));
 
             return .{
                 .io = io,
@@ -109,7 +102,7 @@ pub fn Server(comptime Wait: type) type {
                 .handler = handler,
                 .config = config,
                 .listener = listener,
-                .stop_fd = stop_fd,
+                .stop = stop,
                 .slots = slots,
                 .wait = waiter,
                 .active = 0,
@@ -123,19 +116,18 @@ pub fn Server(comptime Wait: type) type {
                 self.allocator.free(slot.out_buffer);
             }
             self.wait.deinit();
-            _ = linux.close(self.stop_fd);
-            self.listener.deinit(self.io);
+            self.stop.deinit();
+            self.listener.deinit();
             self.allocator.free(self.slots);
             self.* = undefined;
         }
 
         pub fn address(self: *const Self) Io.net.IpAddress {
-            return self.listener.socket.address;
+            return self.listener.address;
         }
 
         pub fn requestStop(self: *Self) void {
-            const one: [8]u8 = .{ 1, 0, 0, 0, 0, 0, 0, 0 };
-            _ = linux.write(self.stop_fd, &one);
+            self.stop.wake();
         }
 
         pub fn run(self: *Self) !void {
@@ -154,28 +146,15 @@ pub fn Server(comptime Wait: type) type {
         fn acceptAll(self: *Self) !void {
             while (true) {
                 const index = self.freeSlot() orelse {
-                    const rc = linux.accept4(
-                        self.listener.socket.handle,
-                        null,
-                        null,
-                        linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC,
-                    );
-                    if (linux.errno(rc) == .SUCCESS) _ = linux.close(@intCast(rc));
+                    const maybe = P.accept(self.listener.fd) catch return;
+                    if (maybe) |fd| P.close(fd);
                     return;
                 };
-                const rc = linux.accept4(
-                    self.listener.socket.handle,
-                    null,
-                    null,
-                    linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC,
-                );
-                switch (linux.errno(rc)) {
-                    .SUCCESS => {},
-                    .AGAIN => return,
-                    .INTR, .CONNABORTED, .PROTO, .PERM => continue,
-                    else => return error.AcceptFailed,
-                }
-                const fd: linux.fd_t = @intCast(rc);
+                const maybe = P.accept(self.listener.fd) catch |err| switch (err) {
+                    error.ConnectionAborted => continue,
+                    error.ListenerFailed, error.SystemResources => return error.AcceptFailed,
+                };
+                const fd = maybe orelse return;
 
                 const slot = &self.slots[index];
                 slot.fd = fd;
@@ -189,7 +168,7 @@ pub fn Server(comptime Wait: type) type {
                     .arena_retain_bytes = self.config.arena_retain_bytes,
                     .session = self.config.session,
                 }) catch |err| {
-                    _ = linux.close(fd);
+                    P.close(fd);
                     slot.state = .free;
                     self.handler.vtable.report_error(self.handler.ptr, err);
                     continue;
@@ -221,9 +200,9 @@ pub fn Server(comptime Wait: type) type {
         fn readSlot(self: *Self, index: usize) void {
             const slot = &self.slots[index];
             while (true) {
-                const n = posix.read(slot.fd, slot.read_buffer) catch |err| switch (err) {
+                const n = P.read(slot.fd, slot.read_buffer) catch |err| switch (err) {
                     error.WouldBlock => return,
-                    else => {
+                    error.ReadFailed => {
                         self.closeSlot(index);
                         return;
                     },
@@ -295,7 +274,7 @@ pub fn Server(comptime Wait: type) type {
                 }
 
                 const bytes = slot.out_buffer[slot.out_start..slot.out_end];
-                const n = sendBytes(slot.fd, bytes) catch |err| switch (err) {
+                const n = P.send(slot.fd, &.{}, bytes) catch |err| switch (err) {
                     error.WouldBlock => return,
                     error.BrokenPipe => {
                         self.closeSlot(index);
@@ -331,7 +310,7 @@ pub fn Server(comptime Wait: type) type {
             const slot = &self.slots[index];
             if (slot.state == .free) return;
             slot.conn.deinit();
-            _ = linux.close(slot.fd);
+            P.close(slot.fd);
             slot.fd = -1;
             slot.state = .free;
             slot.out_start = 0;
@@ -346,108 +325,5 @@ pub fn Server(comptime Wait: type) type {
             }
             return null;
         }
-    };
-}
-
-const SendError = error{ WouldBlock, BrokenPipe };
-
-fn sendBytes(fd: linux.fd_t, bytes: []const u8) SendError!usize {
-    var iov: [1]posix.iovec_const = .{
-        .{ .base = bytes.ptr, .len = bytes.len },
-    };
-    const msg: linux.msghdr_const = .{
-        .name = null,
-        .namelen = 0,
-        .iov = &iov,
-        .iovlen = 1,
-        .control = null,
-        .controllen = 0,
-        .flags = 0,
-    };
-    while (true) {
-        const rc = linux.sendmsg(fd, &msg, linux.MSG.DONTWAIT | linux.MSG.NOSIGNAL);
-        switch (linux.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            .INTR => continue,
-            .AGAIN => return error.WouldBlock,
-            else => return error.BrokenPipe,
-        }
-    }
-}
-
-fn openListener(address: Io.net.IpAddress) !Io.net.Server {
-    const family: u32 = switch (address) {
-        .ip4 => linux.AF.INET,
-        .ip6 => linux.AF.INET6,
-    };
-    const fd_rc = linux.socket(
-        family,
-        linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
-        0,
-    );
-    if (linux.errno(fd_rc) != .SUCCESS) return error.SocketFailed;
-    const fd: linux.fd_t = @intCast(fd_rc);
-    errdefer _ = linux.close(fd);
-
-    const one: u32 = 1;
-    const opt_rc = linux.setsockopt(
-        fd,
-        linux.SOL.SOCKET,
-        linux.SO.REUSEADDR,
-        mem.asBytes(&one),
-        @sizeOf(u32),
-    );
-    if (linux.errno(opt_rc) != .SUCCESS) return error.SocketOptionFailed;
-
-    switch (address) {
-        .ip4 => |a| {
-            var sa: linux.sockaddr.in = .{
-                .port = mem.nativeToBig(u16, a.port),
-                .addr = @bitCast(a.bytes),
-            };
-            const bind_rc = linux.bind(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in));
-            if (linux.errno(bind_rc) != .SUCCESS) return error.BindFailed;
-        },
-        .ip6 => |a| {
-            var sa: linux.sockaddr.in6 = .{
-                .port = mem.nativeToBig(u16, a.port),
-                .flowinfo = a.flow,
-                .addr = a.bytes,
-                .scope_id = a.interface.index,
-            };
-            const bind_rc = linux.bind(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in6));
-            if (linux.errno(bind_rc) != .SUCCESS) return error.BindFailed;
-        },
-    }
-
-    const listen_rc = linux.listen(fd, 128);
-    if (linux.errno(listen_rc) != .SUCCESS) return error.ListenFailed;
-
-    var storage: linux.sockaddr.storage = undefined;
-    var len: linux.socklen_t = @sizeOf(linux.sockaddr.storage);
-    const name_rc = linux.getsockname(fd, @ptrCast(&storage), &len);
-    if (linux.errno(name_rc) != .SUCCESS) return error.GetsocknameFailed;
-    const bound: Io.net.IpAddress = switch (address) {
-        .ip4 => blk: {
-            const sa: *const linux.sockaddr.in = @ptrCast(&storage);
-            break :blk .{ .ip4 = .{
-                .bytes = @bitCast(sa.addr),
-                .port = mem.bigToNative(u16, sa.port),
-            } };
-        },
-        .ip6 => blk: {
-            const sa: *const linux.sockaddr.in6 = @ptrCast(&storage);
-            break :blk .{ .ip6 = .{
-                .bytes = sa.addr,
-                .port = mem.bigToNative(u16, sa.port),
-                .flow = sa.flowinfo,
-                .interface = .{ .index = sa.scope_id },
-            } };
-        },
-    };
-
-    return .{
-        .socket = .{ .handle = fd, .address = bound },
-        .options = {},
     };
 }

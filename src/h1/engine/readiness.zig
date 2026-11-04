@@ -16,7 +16,7 @@ const Header = @import("../../header.zig").Header;
 const h1 = @import("../root.zig");
 pub const Exchange = @import("common.zig").Exchange;
 pub const Handler = @import("common.zig").Handler;
-const wait = @import("wait.zig");
+const wait = @import("../../transport/wait.zig");
 
 // ast-grep-ignore: public-struct-field-default -- options bag; the defaults are the buffer policy
 pub const Config = struct {

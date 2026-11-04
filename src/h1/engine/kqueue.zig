@@ -4,7 +4,7 @@
 //! Darwin transport edge and the kqueue registration and wait backend.
 
 const readiness = @import("readiness.zig");
-const Wait = @import("wait_kqueue.zig").Wait;
+const Wait = @import("../../transport/wait_kqueue.zig").Wait;
 
 pub const Config = readiness.Config;
 pub const Exchange = readiness.Exchange;

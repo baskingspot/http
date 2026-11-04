@@ -4,7 +4,7 @@
 //! registration and wait backend.
 
 const readiness = @import("readiness.zig");
-const Wait = @import("wait_poll.zig").Wait;
+const Wait = @import("../../transport/wait_poll.zig").Wait;
 
 pub const Config = readiness.Config;
 pub const Exchange = readiness.Exchange;

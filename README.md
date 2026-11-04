@@ -143,9 +143,12 @@ ready to depend on.
   `report_error` close the lifecycle. The h2c example is this engine with a
   thread per connection above `serve`; `h2.Session` remains the streaming
   escape hatch.
-- `h2.engine.poll`: the readiness engine. One thread, fixed connection slots,
-  nonblocking sockets, and the same `Connection` core and `Exchange` handler.
-  It is Linux-only for now. `just conformance-run-poll` runs h2spec against it.
+- `h2.engine.poll`, `h2.engine.epoll`, and `h2.engine.kqueue`: the readiness
+  engines. One thread, fixed connection slots, nonblocking sockets, and the same
+  `Connection` core and `Exchange` handler. poll and epoll are Linux; kqueue is
+  macOS. The wait backends and platform edge move to `src/transport`, shared
+  with the h1 engines. `just conformance-run-readiness` runs h2spec against the
+  readiness example.
 - `content_length`: `Content-Length` parsing and combination. Repeated values
   must agree, a comma list of identical values is accepted, and non-digits,
   conflicts, and overflow are errors. `null` means the field was absent.
