@@ -16,9 +16,13 @@
 //! pipelined request already in the buffer. `.sent` starts the idle timer on
 //! `.keep_alive`; the first request byte starts the head and total timers.
 //! After `.read`, read the request body. When `.sent` returns
-//! `.close_after_drain`, drain input until `deadline`; then `tick` returns
-//! `.close`. Call `eof` when the peer closes and `tick` when the poll deadline
-//! expires; `tick` covers every phase.
+//! `.close_after_drain`, `recvBuffer` is empty: read into your own scratch
+//! buffer and discard the bytes. The machine does not route drained bytes.
+//! Close on EOF, or when `tick` returns `.close` at the drain deadline. A zero
+//! `drain_timeout` skips the drain and returns `.close` instead.
+//!
+//! Call `eof` when the peer closes during a request and `tick` when the poll
+//! deadline expires; `tick` covers every phase.
 //!
 //! Policy responses are queued by the machine. The application never writes a
 //! 400, 408, 413, 417, 431, 501, or 505 path itself.
@@ -56,8 +60,9 @@ pub const Limits = struct {
     write_timeout: Io.Duration = .fromSeconds(10),
     /// Zero disables the deadline. Starts with the first request byte.
     total_timeout: Io.Duration = .fromSeconds(30),
-    /// Zero disables the deadline. Bounds a lingering close after an unread
-    /// request body; the engine drains input until the deadline.
+    /// Bounds a lingering close after an unread request body. The engine
+    /// drains input until the deadline. Zero skips the drain and returns
+    /// `.close` instead.
     drain_timeout: Io.Duration = .fromSeconds(1),
 };
 
@@ -113,9 +118,10 @@ pub const Done = union(enum) {
     /// The response is complete and the connection must close.
     close,
     /// The response is complete. The request body was not fully read; drain
-    /// the raw socket until `deadline` expires or the peer closes, so a reset
-    /// does not discard the response. The machine no longer reads.
-    /// `Limits.drain_timeout` bounds the drain.
+    /// the raw socket into scratch storage until `deadline` expires or the
+    /// peer closes, so a reset does not discard the response. `recvBuffer` is
+    /// empty in this phase. `Limits.drain_timeout` bounds the drain; zero
+    /// skips it and returns `.close`.
     close_after_drain,
 };
 
@@ -216,8 +222,8 @@ pub fn start(self: *ServerConn, now: Io.Timestamp) void {
     self.startIdleDeadline(now);
 }
 
-/// Where the engine should read. Empty while a response or the application
-/// owns the connection.
+/// Where the engine should read. Empty while a response, the application, or
+/// a drain owns the connection.
 pub fn recvBuffer(self: *ServerConn) []u8 {
     return switch (self.phase) {
         .head, .body => self.request_buffer[self.used..],
@@ -369,7 +375,7 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
     if (!self.keep_alive) {
         const drain = self.drain_close;
         self.drain_close = false;
-        if (drain) {
+        if (drain and self.limits.drain_timeout.nanoseconds != 0) {
             self.phase = .drain;
             self.phase_start = now;
             self.phase_deadline = addDeadline(now, self.limits.drain_timeout);
@@ -1017,10 +1023,22 @@ test "a drain has its own deadline" {
         "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\n",
     ), .payload_too_large);
     try testing.expectEqual(.close_after_drain, std.meta.activeTag(try t.drain()));
+    try testing.expectEqual(0, t.conn.recvBuffer().len);
     try testing.expect(t.conn.deadline() != null);
 
     t.clock.advance(2 * std.time.ns_per_s);
     try testing.expectEqual(.close, std.meta.activeTag(t.conn.tick(t.clock.now)));
+}
+
+test "a zero drain timeout skips the drain" {
+    var t: TestConn = undefined;
+    t.init(.{ .body_bytes = 4, .drain_timeout = .zero });
+
+    try expectReject(try t.feed(
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\n",
+    ), .payload_too_large);
+    try testing.expectEqual(.close, std.meta.activeTag(try t.drain()));
+    try testing.expect(t.conn.deadline() == null);
 }
 
 test "a final 1xx response is rejected" {
