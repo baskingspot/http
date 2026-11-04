@@ -31,6 +31,10 @@ pub const ResponseOptions = struct {
     headers: []const Header = &.{},
 };
 
+/// The maximum response fields, including `:status`, `content-length`, and
+/// any content type. The engine builds them in the exchange, not the arena.
+pub const max_response_headers = 16;
+
 pub const Exchange = struct {
     /// The engine's stream slot. Stable until `complete`, then reused.
     id: usize,
@@ -39,6 +43,9 @@ pub const Exchange = struct {
     /// Per-stream storage for the request and any handler allocations.
     arena: Allocator,
     response: ?Response = null,
+    status_text: [3]u8 = undefined,
+    length_text: [20]u8 = undefined,
+    fields: [max_response_headers]Header = undefined,
 
     pub const Response = struct {
         fields: []const Header,
@@ -48,7 +55,7 @@ pub const Exchange = struct {
     pub const RespondError = error{
         AlreadyResponded,
         InvalidResponse,
-        OutOfMemory,
+        TooManyHeaders,
     };
 
     /// Record the response. The engine sends the HEADERS and pumps `body` under
@@ -61,20 +68,21 @@ pub const Exchange = struct {
     ) RespondError!void {
         if (self.response != null) return error.AlreadyResponded;
 
-        const arena = self.arena;
-        const status_text = try arena.alloc(u8, 3);
         const code = options.status.code();
-        const written = std.fmt.bufPrint(status_text, "{d:0>3}", .{code}) catch {
+        const status_text = std.fmt.bufPrint(&self.status_text, "{d:0>3}", .{code}) catch {
             return error.InvalidResponse;
         };
-        if (written.len != 3) return error.InvalidResponse;
-
-        var length_buf: [20]u8 = undefined;
-        const length_text = std.fmt.bufPrint(&length_buf, "{d}", .{body.len}) catch unreachable;
-        const length = try arena.dupe(u8, length_text);
+        if (status_text.len != 3) return error.InvalidResponse;
+        const length_text = std.fmt.bufPrint(
+            &self.length_text,
+            "{d}",
+            .{body.len},
+        ) catch unreachable;
 
         const extra: usize = if (options.content_type != null) 1 else 0;
-        const fields = try arena.alloc(Header, 2 + extra + options.headers.len);
+        const count = 2 + extra + options.headers.len;
+        if (count > max_response_headers) return error.TooManyHeaders;
+        const fields = self.fields[0..count];
         var index: usize = 0;
         fields[index] = .{ .name = ":status", .value = status_text };
         index += 1;
@@ -82,7 +90,7 @@ pub const Exchange = struct {
             fields[index] = .{ .name = "content-type", .value = content_type };
             index += 1;
         }
-        fields[index] = .{ .name = "content-length", .value = length };
+        fields[index] = .{ .name = "content-length", .value = length_text };
         index += 1;
         for (options.headers) |header| {
             fields[index] = header;
