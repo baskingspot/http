@@ -85,6 +85,10 @@ ready to depend on.
   into caller-owned storage. It allocates nothing and does not reuse the
   connection. `just interop` runs it against a Go `net/http` server.
 
+- `http.engine`: shared server API shapes. `ResponseOptions`, the
+  `Handler(Exchange)` vtable shape, and the body/arena config knobs are common
+  to HTTP/1 and HTTP/2. The protocol-specific exchanges stay distinct.
+
 - `h1.engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
   connection at a time; `serve` drives one stream. The handler formats a
   response body with the exchange arena, and the connection machine handles

@@ -118,7 +118,7 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
             .request_buffer = &request_buffer,
             .headers = &headers,
             .response_head_buffer = &response_head,
-            .body_bytes = 8 * 1024,
+            .common = .{ .body_bytes = 8 * 1024 },
         },
     );
 }

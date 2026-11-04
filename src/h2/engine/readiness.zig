@@ -17,6 +17,7 @@ const SessionOptions = session_mod.Options;
 const connection_mod = @import("connection.zig");
 const Connection = connection_mod.Connection;
 const common = @import("common.zig");
+const shared = @import("../../engine/common.zig");
 pub const Exchange = common.Exchange;
 pub const Handler = common.Handler;
 const wait = @import("../../transport/wait.zig");
@@ -36,8 +37,7 @@ pub fn Config(comptime Transport: type) type {
         /// storage. TLS encrypts from this staging buffer.
         write_buffer_bytes: usize = 16 * 1024,
         max_streams: u16 = 128,
-        body_bytes: usize = 64 * 1024,
-        arena_retain_bytes: usize = 4 * 1024,
+        common: shared.Config = .{ .arena_retain_bytes = 4 * 1024 },
         session: SessionOptions = .{ .role = .server },
         /// Zero disables the deadline.
         idle_timeout: Io.Duration = .zero,
@@ -265,8 +265,8 @@ pub fn Server(comptime Wait: type, comptime Transport: type) type {
                     .allocator = self.allocator,
                     .handler = self.handler,
                     .max_streams = self.config.max_streams,
-                    .body_bytes = self.config.body_bytes,
-                    .arena_retain_bytes = self.config.arena_retain_bytes,
+                    .body_bytes = self.config.common.body_bytes,
+                    .arena_retain_bytes = self.config.common.arena_retain_bytes,
                     .session = self.config.session,
                     .head_timeout = self.config.head_timeout,
                     .body_timeout = self.config.body_timeout,

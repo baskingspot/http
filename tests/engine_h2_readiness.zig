@@ -65,7 +65,7 @@ const Harness = struct {
             .allocator = testing.allocator,
             .max_connections = 4,
             .max_streams = 4,
-            .body_bytes = 1024,
+            .common = .{ .body_bytes = 1024 },
         });
     }
 
@@ -192,7 +192,7 @@ test "an idle deadline closes the connection" {
         .allocator = testing.allocator,
         .max_connections = 4,
         .max_streams = 4,
-        .body_bytes = 1024,
+        .common = .{ .body_bytes = 1024 },
         .idle_timeout = .fromMilliseconds(50),
     });
     defer harness.deinit();
@@ -216,7 +216,7 @@ test "a head deadline closes a silent connection" {
         .allocator = testing.allocator,
         .max_connections = 4,
         .max_streams = 4,
-        .body_bytes = 1024,
+        .common = .{ .body_bytes = 1024 },
         .head_timeout = .fromMilliseconds(50),
     });
     defer harness.deinit();
@@ -240,7 +240,7 @@ test "a body deadline closes a request that never ends" {
         .allocator = testing.allocator,
         .max_connections = 4,
         .max_streams = 4,
-        .body_bytes = 1024,
+        .common = .{ .body_bytes = 1024 },
         .body_timeout = .fromMilliseconds(50),
     });
     defer harness.deinit();

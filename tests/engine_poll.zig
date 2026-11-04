@@ -91,7 +91,7 @@ const Harness = struct {
         self.server = try .init(self.io, address, self.app.handler(), .{
             .allocator = testing.allocator,
             .max_connections = max_connections,
-            .arena_retain_bytes = arena_retain_bytes,
+            .common = .{ .arena_retain_bytes = arena_retain_bytes },
             .limits = limits,
         });
         self.address = address;

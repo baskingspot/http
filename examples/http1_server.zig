@@ -79,7 +79,7 @@ const Connection = struct {
             .request_buffer = &self.request,
             .headers = &self.headers,
             .response_head_buffer = &self.response_head,
-            .body_bytes = 8 * 1024,
+            .common = .{ .body_bytes = 8 * 1024 },
         };
     }
 };

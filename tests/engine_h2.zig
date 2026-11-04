@@ -56,7 +56,7 @@ const Server = struct {
             .read_buffer = &read_buffer,
             .write_buffer = &write_buffer,
             .max_streams = 4,
-            .body_bytes = 1024,
+            .common = .{ .body_bytes = 1024 },
         }) catch |err| {
             self.result = err;
         };

@@ -75,13 +75,9 @@ pub const Config = struct {
 };
 
 // ast-grep-ignore: public-struct-field-default -- options bag; the caller overrides one knob
-pub const ResponseOptions = struct {
-    status: Status = .ok,
-    content_type: ?[]const u8 = null,
-    /// Extra fields after the machine's. Do not duplicate Content-Length or
-    /// Connection.
-    headers: []const Header = &.{},
-};
+/// Extra fields after the machine's. Do not duplicate Content-Length or
+/// Connection.
+pub const ResponseOptions = @import("../engine/common.zig").ResponseOptions;
 
 pub const Request = struct {
     /// Borrows the request buffer and the caller's header storage. Valid until

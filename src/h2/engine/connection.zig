@@ -21,6 +21,7 @@ const Headers = @import("../../header.zig").Headers;
 const response_mod = @import("../../response.zig");
 
 const common = @import("common.zig");
+const shared = @import("../../engine/common.zig");
 pub const Exchange = common.Exchange;
 pub const Handler = common.Handler;
 pub const Request = common.Request;
@@ -421,7 +422,7 @@ pub const Connection = struct {
         if (call_complete and slot.handler_called) {
             self.handler.vtable.complete(self.handler.ptr, &slot.exchange);
         }
-        _ = slot.arena.reset(.{ .retain_with_limit = self.arena_retain_bytes });
+        shared.resetArena(&slot.arena, self.arena_retain_bytes);
         slot.used = false;
         slot.stream_id = 0;
         slot.body = .empty;

@@ -27,6 +27,7 @@ pub const ConnectionOptions = connection.Options;
 pub const readiness = @import("readiness.zig");
 pub const transport = @import("transport.zig");
 pub const wait = @import("../../transport/wait.zig");
+pub const protocol = @import("../../engine/common.zig").Protocol;
 pub const wait_poll = if (builtin.os.tag == .linux) wait_poll_impl else struct {};
 pub const wait_epoll = if (builtin.os.tag == .linux) wait_epoll_impl else struct {};
 pub const wait_kqueue = if (builtin.os.tag == .macos) wait_kqueue_impl else struct {};

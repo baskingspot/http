@@ -5,6 +5,13 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Align the h1/h2 engine foundations: `http.engine.Handler(Exchange)` is the
+  shared vtable shape, `http.engine.ResponseOptions` is the common response
+  type, and `Config.common` holds the body/arena knobs. Protocol-specific
+  exchanges and machine configs remain separate.
+
 ### Added
 
 - `h1.ClientConn`: a sans-I/O HTTP/1 response machine for one request at a

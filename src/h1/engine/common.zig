@@ -4,6 +4,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const h1 = @import("../root.zig");
+const common = @import("../../engine/common.zig");
+
+pub const ResponseOptions = common.ResponseOptions;
 
 /// One request/response exchange handed to the application.
 pub const Exchange = struct {
@@ -28,22 +31,5 @@ pub const Exchange = struct {
     }
 };
 
-/// A type-erased HTTP handler. Build a vtable with `ptr` pointing at the
-/// handler state; a stateless handler passes `ptr = undefined`.
-pub const Handler = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        /// Build the response. Must call `exchange.respond` before returning.
-        handle: *const fn (ptr: *anyopaque, exchange: *Exchange) anyerror!void,
-        /// The response is complete or the connection closed first. The
-        /// exchange arena is still readable; the engine resets it afterward.
-        complete: *const fn (ptr: *anyopaque, exchange: *Exchange) void,
-        /// `handle` returned an error. The engine has already sent the 500.
-        report_error: *const fn (ptr: *anyopaque, err: anyerror) void,
-    };
-
-    pub fn noopComplete(_: *anyopaque, _: *Exchange) void {}
-    pub fn noopReportError(_: *anyopaque, _: anyerror) void {}
-};
+/// A type-erased HTTP handler over this engine's exchange.
+pub const Handler = common.Handler(Exchange);

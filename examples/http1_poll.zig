@@ -22,7 +22,7 @@ pub fn main(init: std.process.Init) !void {
     var server = try PollServer.init(io, address, app.handler(), .{
         .allocator = init.gpa,
         .max_connections = 64,
-        .body_bytes = 8 * 1024,
+        .common = .{ .body_bytes = 8 * 1024 },
     });
     defer server.deinit();
 

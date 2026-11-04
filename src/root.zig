@@ -8,6 +8,7 @@
 
 pub const content_length = @import("content_length.zig");
 pub const encoding = @import("encoding.zig");
+pub const engine = @import("engine/common.zig");
 pub const h1 = @import("h1/root.zig");
 pub const h2 = @import("h2/root.zig");
 pub const hpack = @import("hpack/root.zig");
@@ -40,6 +41,7 @@ test {
     _ = huffman;
     _ = prefix_int;
     _ = response;
+    _ = engine;
     _ = encoding;
     _ = token_list;
     _ = transfer_encoding;

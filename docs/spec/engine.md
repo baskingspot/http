@@ -34,8 +34,10 @@ accepts the next connection.
 
 ## Handler
 
-A handler is `common.Handler`: a pointer plus a vtable. Every engine uses the
-same type. The vtable has three required entries:
+A handler is the shared `http.engine.Handler(Exchange)` shape. Every engine
+uses the same vtable layout with `handle`, `complete`, and `report_error`.
+`h1.engine.Handler` and `h2.engine.Handler` instantiate that type for their
+own exchange.
 
 ```zig
 pub const Handler = struct {
@@ -86,6 +88,8 @@ The exchange holds:
 
 The request body borrows the request buffer. Use it before the response
 completes. The arena is valid from handler entry until `complete` returns.
+`h1.engine` and `h2.engine` share `ResponseOptions` and the body/arena config
+knobs under `Config.common`. The fields have different defaults for h1 and h2.
 Build the response body there with `std.fmt.allocPrint`, `allocator.alloc`, or
 another allocator call, then pass the slice to `exchange.respond`.
 

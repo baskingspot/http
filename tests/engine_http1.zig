@@ -24,7 +24,7 @@ const TestConfig = struct {
             .request_buffer = &self.request_buffer,
             .headers = &self.headers,
             .response_head_buffer = &self.response_head,
-            .body_bytes = body_bytes,
+            .common = .{ .body_bytes = body_bytes },
         };
     }
 };

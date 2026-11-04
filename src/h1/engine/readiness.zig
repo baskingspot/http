@@ -17,17 +17,17 @@ const h1 = @import("../root.zig");
 pub const Exchange = @import("common.zig").Exchange;
 pub const Handler = @import("common.zig").Handler;
 const wait = @import("../../transport/wait.zig");
+const common = @import("../../engine/common.zig");
 
 // ast-grep-ignore: public-struct-field-default -- options bag; the defaults are the buffer policy
 pub const Config = struct {
     allocator: Allocator,
     max_connections: usize,
+    common: common.Config = .{},
     request_buffer_bytes: usize = 16 * 1024,
     headers: usize = 64,
     response_head_bytes: usize = 1024,
-    arena_retain_bytes: usize = 16 * 1024,
     drain_bytes: usize = 4 * 1024,
-    body_bytes: usize = 64 * 1024,
     limits: h1.ServerConn.Limits = .{},
     accept_backoff: Io.Duration = .fromMilliseconds(50),
     /// Linux `TCP_DEFER_ACCEPT`. The listener wakes only when the peer sends
@@ -292,7 +292,7 @@ pub fn Server(comptime Waiter: type) type {
             if (!slot.exchange_active) return;
             slot.exchange_active = false;
             self.handler.vtable.complete(self.handler.ptr, &slot.exchange);
-            _ = slot.arena.reset(.{ .retain_with_limit = self.config.arena_retain_bytes });
+            common.resetArena(&slot.arena, self.config.common.arena_retain_bytes);
             slot.exchange.request = undefined;
         }
 
@@ -511,7 +511,7 @@ fn makeSlot(allocator: Allocator, config: Config) !Slot {
 
 fn limits(config: Config) h1.ServerConn.Limits {
     var value = config.limits;
-    value.body_bytes = config.body_bytes;
+    value.body_bytes = config.common.body_bytes;
     return value;
 }
 

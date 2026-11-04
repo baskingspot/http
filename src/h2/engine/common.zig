@@ -10,8 +10,10 @@ const Allocator = std.mem.Allocator;
 
 const Header = @import("../../header.zig").Header;
 const Headers = @import("../../header.zig").Headers;
-const Status = @import("../../status.zig").Status;
 const head = @import("../head.zig");
+const common = @import("../../engine/common.zig");
+
+pub const ResponseOptions = common.ResponseOptions;
 
 /// One complete request, copied into the exchange arena.
 pub const Request = struct {
@@ -20,15 +22,6 @@ pub const Request = struct {
     body: []const u8,
     /// The trailer section, empty when the request had none.
     trailers: Headers,
-};
-
-/// The response fields the engine adds around a body.
-// ast-grep-ignore: public-struct-field-default -- options bag; status defaults to 200
-pub const ResponseOptions = struct {
-    status: Status = .ok,
-    content_type: ?[]const u8 = null,
-    /// Extra regular fields. The engine adds `:status` and `content-length`.
-    headers: []const Header = &.{},
 };
 
 pub const Exchange = struct {
@@ -70,25 +63,5 @@ pub const Exchange = struct {
     }
 };
 
-/// A type-erased HTTP/2 handler. Build a vtable with `ptr` pointing at the
-/// handler state; a stateless handler passes `ptr = undefined`.
-pub const Handler = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        /// Build the response with `exchange.respond`. The engine supplies a
-        /// 500 if the handler returns without one.
-        handle: *const fn (ptr: *anyopaque, exchange: *Exchange) anyerror!void,
-        /// The exchange is finished: the response was queued, the stream was
-        /// reset, or the connection ended. The arena is readable; the engine
-        /// resets it afterward.
-        complete: *const fn (ptr: *anyopaque, exchange: *Exchange) void,
-        /// `handle` returned an error, or the engine could not serve the
-        /// connection. The engine has already arranged a 500 or a reset.
-        report_error: *const fn (ptr: *anyopaque, err: anyerror) void,
-    };
-
-    pub fn noopComplete(_: *anyopaque, _: *Exchange) void {}
-    pub fn noopReportError(_: *anyopaque, _: anyerror) void {}
-};
+/// A type-erased HTTP/2 handler over this engine's exchange.
+pub const Handler = common.Handler(Exchange);

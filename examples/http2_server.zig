@@ -81,6 +81,6 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
         .read_buffer = &read_buffer,
         .write_buffer = &write_buffer,
         .max_streams = 128,
-        .body_bytes = 64 * 1024,
+        .common = .{},
     });
 }

@@ -13,6 +13,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 
 const Header = @import("../../header.zig").Header;
 const h1 = @import("../root.zig");
+const common = @import("../../engine/common.zig");
 pub const Exchange = @import("common.zig").Exchange;
 pub const Handler = @import("common.zig").Handler;
 
@@ -24,8 +25,7 @@ pub const Config = struct {
     request_buffer: []u8,
     headers: []Header,
     response_head_buffer: []u8,
-    arena_retain_bytes: usize = 16 * 1024,
-    body_bytes: usize = 64 * 1024,
+    common: common.Config = .{},
 };
 
 /// Accept connections until an unrecoverable accept error.
@@ -92,7 +92,7 @@ pub fn serveIo(
         .headers = config.headers,
         .response_buffer = config.response_head_buffer,
         .limits = .{
-            .body_bytes = config.body_bytes,
+            .body_bytes = config.common.body_bytes,
             .idle_timeout = .zero,
             .head_timeout = .zero,
             .body_timeout = .zero,
@@ -177,26 +177,26 @@ fn handleRequest(
         handler.vtable.report_error(handler.ptr, err);
         if (conn.sendSlices().head.len == 0) {
             exchange.respond(.{ .status = .internal_server_error }, "") catch |resp_err| {
-                complete(handler, &exchange, arena, config.arena_retain_bytes);
+                complete(handler, &exchange, arena, config.common.arena_retain_bytes);
                 return resp_err;
             };
         }
     };
 
     const done = writePending(io, conn, writer) catch |err| {
-        complete(handler, &exchange, arena, config.arena_retain_bytes);
+        complete(handler, &exchange, arena, config.common.arena_retain_bytes);
         return err;
     };
     if (done) |value| {
         switch (value) {
             .keep_alive, .close, .close_after_drain => {
-                complete(handler, &exchange, arena, config.arena_retain_bytes);
+                complete(handler, &exchange, arena, config.common.arena_retain_bytes);
             },
             .read, .more => {},
         }
         return value;
     }
-    complete(handler, &exchange, arena, config.arena_retain_bytes);
+    complete(handler, &exchange, arena, config.common.arena_retain_bytes);
     return error.NoResponse;
 }
 
@@ -207,7 +207,7 @@ fn complete(
     retain_bytes: usize,
 ) void {
     handler.vtable.complete(handler.ptr, exchange);
-    _ = arena.reset(.{ .retain_with_limit = retain_bytes });
+    common.resetArena(arena, retain_bytes);
 }
 
 fn writePending(

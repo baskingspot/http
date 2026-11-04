@@ -14,6 +14,7 @@ const Options = session_mod.Options;
 const connection_mod = @import("connection.zig");
 const Connection = connection_mod.Connection;
 const common = @import("common.zig");
+const shared = @import("../../engine/common.zig");
 
 pub const Exchange = common.Exchange;
 pub const Handler = common.Handler;
@@ -29,10 +30,7 @@ pub const Config = struct {
     write_buffer: []u8,
     /// Engine slot count and the session's MAX_CONCURRENT_STREAMS.
     max_streams: u16 = 128,
-    /// Per-request body cap. Worst-case live memory is max_streams × this.
-    body_bytes: usize = 64 * 1024,
-    /// Retained per-stream arena capacity after complete.
-    arena_retain_bytes: usize = 4 * 1024,
+    common: shared.Config = .{ .arena_retain_bytes = 4 * 1024 },
     session: Options = .{ .role = .server },
 };
 
@@ -98,8 +96,8 @@ pub fn serveIo(
         .allocator = config.allocator,
         .handler = handler,
         .max_streams = config.max_streams,
-        .body_bytes = config.body_bytes,
-        .arena_retain_bytes = config.arena_retain_bytes,
+        .body_bytes = config.common.body_bytes,
+        .arena_retain_bytes = config.common.arena_retain_bytes,
         .session = config.session,
     });
     defer conn.deinit();
