@@ -780,7 +780,14 @@ pub const Session = struct {
         tracked.state = stream.transition(tracked.state, .remote, .headers) catch |err| {
             return switch (err) {
                 error.IdleStream => self.connectionError(allocator, .protocol_error),
-                error.InvalidTransition => self.failStream(allocator, id, .protocol_error),
+                error.InvalidTransition => self.failStream(
+                    allocator,
+                    id,
+                    if (tracked.state == .half_closed_remote)
+                        .stream_closed
+                    else
+                        .protocol_error,
+                ),
                 else => self.connectionError(allocator, .protocol_error),
             };
         };
@@ -2112,4 +2119,32 @@ test "fuzz session submissions never panic" {
             }
         }
     }.run, .{ .corpus = &.{} });
+}
+
+test "HEADERS on a half-closed remote stream is STREAM_CLOSED" {
+    var client = try Session.init(testing.allocator, .{ .role = .client });
+    defer client.deinit(testing.allocator);
+    var server = try Session.init(testing.allocator, .{ .role = .server });
+    defer server.deinit(testing.allocator);
+    try handshake(&client, &server, testing.allocator);
+
+    const id = try client.submitRequest(testing.allocator, &request_fields, true);
+    try transfer(&client, &server);
+    _ = (try server.nextEvent(testing.allocator)).?;
+
+    var raw: [16]u8 = undefined;
+    var writer = frame.Writer.init(&raw);
+    try writer.begin(
+        .headers,
+        frame.flags.end_headers | frame.flags.end_stream,
+        id,
+    );
+    writer.end();
+    _ = server.receive(writer.written());
+
+    const event = (try server.nextEvent(testing.allocator)).?;
+    switch (event) {
+        .reset => |reset| try testing.expectEqual(frame.ErrorCode.stream_closed, reset.code),
+        else => return error.TestUnexpectedResult,
+    }
 }
