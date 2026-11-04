@@ -1,11 +1,14 @@
-//! A minimal h2c server over std.Io, driven by `h2.Session`.
+//! A small h2c server over std.Io, driven by `h2.Session`.
 //!
 //!     just example-h2
 //!     curl -v --http2-prior-knowledge http://127.0.0.1:8081/
 //!     nghttp -v http://127.0.0.1:8081/
+//!     just conformance
 //!
-//! The session owns the protocol state; this file owns the socket, the read
-//! loop, and the request handler. No TLS: this is h2c with prior knowledge.
+//! The session owns the protocol state; this file owns the sockets, the
+//! handler, and the accept loop. It accepts connections on threads, waits for a
+//! request to end before it answers, and resumes a body when flow control opens
+//! the window. No TLS: this is h2c with prior knowledge.
 
 const std = @import("std");
 const Io = std.Io;
@@ -15,6 +18,24 @@ const print = std.debug.print;
 const http = @import("http");
 
 const address_text = "127.0.0.1:8081";
+const max_streams = 128;
+const response_body = "h2c hello\n";
+
+const Method = enum { get, head, other };
+
+const Request = struct {
+    stream_id: u31,
+    method: Method,
+    content_length: ?u64,
+    received: u64,
+    ready: bool,
+    responded: bool,
+};
+
+const Pending = struct {
+    stream_id: u31,
+    offset: usize,
+};
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -34,11 +55,20 @@ pub fn main(init: std.process.Init) !void {
             print("http2-server: accept: {s}\n", .{@errorName(err)});
             continue;
         };
-        serveConnection(gpa, io, stream) catch |err| {
-            print("http2-server: connection: {s}\n", .{@errorName(err)});
+        const thread = std.Thread.spawn(.{}, serveThread, .{ gpa, io, stream }) catch |err| {
+            print("http2-server: thread: {s}\n", .{@errorName(err)});
+            stream.close(io);
+            continue;
         };
-        stream.close(io);
+        thread.detach();
     }
+}
+
+fn serveThread(gpa: Allocator, io: Io, stream: Io.net.Stream) void {
+    serveConnection(gpa, io, stream) catch |err| {
+        print("http2-server: connection: {s}\n", .{@errorName(err)});
+    };
+    stream.close(io);
 }
 
 fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
@@ -50,6 +80,9 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
 
     var session = try http.h2.Session.init(gpa, .{ .role = .server });
     defer session.deinit(gpa);
+
+    var requests: [max_streams]?Request = @splat(null);
+    var pending: [max_streams]?Pending = @splat(null);
 
     var read_buf: [16 * 1024]u8 = undefined;
     var out_buf: [4096]u8 = undefined;
@@ -76,9 +109,14 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
             offset += consumed;
 
             while (try session.nextEvent(gpa)) |event| {
-                try handleEvent(&session, gpa, event);
+                try handleEvent(&session, gpa, event, &requests, &pending);
             }
         }
+
+        if (!session.isClosed()) {
+            try respondReady(&session, gpa, &requests, &pending);
+        }
+
         if (session.isClosed()) {
             while (true) {
                 const written = session.send(&out_buf);
@@ -91,51 +129,214 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
     }
 }
 
-fn handleEvent(session: *http.h2.Session, gpa: Allocator, event: http.h2.session.Event) !void {
+fn handleEvent(
+    session: *http.h2.Session,
+    gpa: Allocator,
+    event: http.h2.session.Event,
+    requests: *[max_streams]?Request,
+    pending: *[max_streams]?Pending,
+) !void {
     switch (event) {
         .request => |request| {
-            print("request {s} {s} ({s})\n", .{
-                request.head.method_token,
-                request.head.path orelse "?",
-                request.head.authority orelse "?",
-            });
-
-            const body = "h2c hello\n";
-            var length_buf: [20]u8 = undefined;
-            const length = try std.fmt.bufPrint(&length_buf, "{d}", .{body.len});
-            const response = [_]http.Header{
-                .{ .name = ":status", .value = "200" },
-                .{ .name = "content-type", .value = "text/plain; charset=utf-8" },
-                .{ .name = "content-length", .value = length },
+            const slot = findFreeRequest(requests) orelse {
+                try session.submitReset(gpa, request.stream_id, .refused_stream);
+                return;
             };
-            try session.submitResponse(gpa, request.stream_id, &response, false);
-            _ = try session.submitData(gpa, request.stream_id, body, true);
+            const method: Method = if (std.mem.eql(u8, request.head.method_token, "HEAD"))
+                .head
+            else if (std.mem.eql(u8, request.head.method_token, "GET"))
+                .get
+            else
+                .other;
+
+            const content_length = parseContentLength(request.head.headers) catch {
+                try session.submitReset(gpa, request.stream_id, .protocol_error);
+                return;
+            };
+            slot.* = .{
+                .stream_id = request.stream_id,
+                .method = method,
+                .content_length = content_length,
+                .received = 0,
+                .ready = request.end_stream,
+                .responded = false,
+            };
         },
 
         .data => |data| {
-            print("DATA {d} bytes on stream {d}\n", .{ data.bytes.len, data.stream_id });
+            const request = findRequest(requests, data.stream_id) orelse return;
+            request.received += data.bytes.len;
             if (data.bytes.len > 0) {
                 try session.release(gpa, data.stream_id, @intCast(data.bytes.len));
             }
+            if (data.end_stream) request.ready = true;
         },
 
         .trailers => |trailers| {
-            print("trailers on stream {d}\n", .{trailers.stream_id});
+            if (trailers.end_stream) {
+                if (findRequest(requests, trailers.stream_id)) |request| {
+                    request.ready = true;
+                }
+            }
+        },
+
+        .window_update => |update| {
+            if (update.stream_id == 0) {
+                for (pending) |*slot| {
+                    if (slot.* != null) try pump(session, gpa, slot, requests);
+                }
+            } else if (findPending(pending, update.stream_id)) |slot| {
+                try pump(session, gpa, slot, requests);
+            }
         },
 
         .reset => |reset| {
-            print("reset stream {d}: {s}\n", .{ reset.stream_id, @tagName(reset.code) });
+            clearRequest(requests, reset.stream_id);
+            clearPending(pending, reset.stream_id);
+        },
+
+        .settings => {
+            for (pending) |*slot| {
+                if (slot.* != null) try pump(session, gpa, slot, requests);
+            }
         },
 
         .goaway => |goaway| {
-            print("GOAWAY last={d} code={s}\n", .{ goaway.last_stream_id, @tagName(goaway.code) });
+            print("GOAWAY last={d} code=0x{x}\n", .{
+                goaway.last_stream_id,
+                @intFromEnum(goaway.code),
+            });
         },
 
         .connection_error => |err| {
-            print("connection error: {s}\n", .{@tagName(err.code)});
+            print("connection error: 0x{x}\n", .{@intFromEnum(err.code)});
         },
 
-        .window_update => {},
         .response => {},
+    }
+}
+
+fn respondReady(
+    session: *http.h2.Session,
+    gpa: Allocator,
+    requests: *[max_streams]?Request,
+    pending: *[max_streams]?Pending,
+) !void {
+    for (requests) |*slot| {
+        const request = if (slot.*) |*request| request else continue;
+        if (!request.ready or request.responded) continue;
+
+        if (request.content_length) |expected| {
+            if (expected != request.received) {
+                try session.submitReset(gpa, request.stream_id, .protocol_error);
+                slot.* = null;
+                continue;
+            }
+        }
+
+        const is_head = request.method == .head;
+        const fields = [_]http.Header{
+            .{ .name = ":status", .value = "200" },
+            .{ .name = "content-type", .value = "text/plain; charset=utf-8" },
+            .{ .name = "content-length", .value = "10" },
+        };
+        session.submitResponse(gpa, request.stream_id, &fields, is_head) catch |err| {
+            if (err == error.UnknownStream) {
+                slot.* = null;
+                continue;
+            }
+            return err;
+        };
+        request.responded = true;
+
+        if (is_head) {
+            slot.* = null;
+            continue;
+        }
+
+        const pending_slot = findFreePending(pending) orelse {
+            try session.submitReset(gpa, request.stream_id, .internal_error);
+            slot.* = null;
+            continue;
+        };
+        pending_slot.* = .{ .stream_id = request.stream_id, .offset = 0 };
+        try pump(session, gpa, pending_slot, requests);
+    }
+}
+
+fn pump(
+    session: *http.h2.Session,
+    gpa: Allocator,
+    slot: *?Pending,
+    requests: *[max_streams]?Request,
+) !void {
+    const body = if (slot.*) |*body| body else return;
+    const n = try session.submitData(gpa, body.stream_id, response_body[body.offset..], true);
+    body.offset += n;
+
+    if (body.offset == response_body.len) {
+        clearRequest(requests, body.stream_id);
+        slot.* = null;
+    }
+}
+
+fn parseContentLength(headers: http.Headers) error{Invalid}!?u64 {
+    var value: ?u64 = null;
+    for (headers.items) |field| {
+        if (!std.ascii.eqlIgnoreCase(field.name, "content-length")) continue;
+        const parsed = std.fmt.parseInt(u64, field.value, 10) catch return error.Invalid;
+        if (value) |previous| {
+            if (previous != parsed) return error.Invalid;
+        }
+        value = parsed;
+    }
+    return value;
+}
+
+fn findRequest(requests: *[max_streams]?Request, id: u31) ?*Request {
+    for (requests) |*slot| {
+        if (slot.*) |*request| {
+            if (request.stream_id == id) return request;
+        }
+    }
+    return null;
+}
+
+fn findFreeRequest(requests: *[max_streams]?Request) ?*?Request {
+    for (requests) |*slot| {
+        if (slot.* == null) return slot;
+    }
+    return null;
+}
+
+fn findPending(pending: *[max_streams]?Pending, id: u31) ?*?Pending {
+    for (pending) |*slot| {
+        if (slot.*) |body| {
+            if (body.stream_id == id) return slot;
+        }
+    }
+    return null;
+}
+
+fn findFreePending(pending: *[max_streams]?Pending) ?*?Pending {
+    for (pending) |*slot| {
+        if (slot.* == null) return slot;
+    }
+    return null;
+}
+
+fn clearRequest(requests: *[max_streams]?Request, id: u31) void {
+    for (requests) |*slot| {
+        if (slot.*) |request| {
+            if (request.stream_id == id) slot.* = null;
+        }
+    }
+}
+
+fn clearPending(pending: *[max_streams]?Pending, id: u31) void {
+    for (pending) |*slot| {
+        if (slot.*) |body| {
+            if (body.stream_id == id) slot.* = null;
+        }
     }
 }

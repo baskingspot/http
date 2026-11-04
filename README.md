@@ -125,7 +125,9 @@ ready to depend on.
   requests, responses, DATA, trailers, resets, and GOAWAY; the `submit*`
   methods queue frames. The allocator is per call and never stored. Stream
   records and output chunks come from fixed-record pools, so a
-  `FixedBufferAllocator` gives the connection a fixed ceiling.
+  `FixedBufferAllocator` gives the connection a fixed ceiling. The h2c example
+  is the conformance target: `just conformance` runs h2spec against it, and the
+  full suite passes in strict mode.
 - `content_length`: `Content-Length` parsing and combination. Repeated values
   must agree, a comma list of identical values is accepted, and non-digits,
   conflicts, and overflow are errors. `null` means the field was absent.
@@ -167,7 +169,9 @@ runner, and `just example` runs the HTTP/1.1 server example.
 http://127.0.0.1:8081/`, or with the devshell's `nghttp -v
 http://127.0.0.1:8081/` to see the frames. It handles the preface, SETTINGS,
 PING, HPACK, flow control, and a fixed 200 response over a real session loop;
-the socket, TLS, and handler live outside the library.
+the socket, TLS, and handler live outside the library. With the example running,
+`just conformance` runs h2spec (pass `-S` for strict) and `just load` runs
+h2load.
 
 ## License
 

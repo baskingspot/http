@@ -35,13 +35,17 @@ All notable changes to http are recorded here. The format follows
   `stream.transition` implements the §5.1 states and `stream.Ids` allocates by
   role parity; `header_block.Assembler` joins CONTINUATION fragments.
 - `h2.Session`: the sans-I/O h2 connection machine. `receive`/`send` move
-  bytes, `nextEvent` yields requests, responses, DATA, trailers, resets, and
-  GOAWAY, and `submit*` queues frames. SETTINGS, the stream table, HPACK, flow
-  control, CONTINUATION assembly, and the outbound queue are inside; sockets,
-  TLS, and the event loop are not. The allocator is per call; stream records
-  and output chunks come from `std.heap.MemoryPool`, so a
+  bytes, `nextEvent` yields requests, responses, DATA, trailers, resets,
+  SETTINGS, and GOAWAY, and `submit*` queues frames. SETTINGS, the stream table,
+  HPACK, flow control, CONTINUATION assembly, and the outbound queue are
+  inside; sockets, TLS, and the event loop are not. The allocator is per call;
+  stream records and output chunks come from `std.heap.MemoryPool`, so a
   `FixedBufferAllocator` sets a fixed ceiling. `submitData` returns the prefix
   flow control accepts, and `release` returns consumed bytes to both windows.
+  Closed streams keep a tombstone ring for the right `STREAM_CLOSED` behavior;
+  a self-dependent HEADERS or PRIORITY and a trailer without END_STREAM are
+  stream errors. The h2c example serves connections on threads and the full
+  h2spec suite passes, strict included.
 - `Status`: the status codes as an open enum. Named codes are constants; any
   other three-digit code is still a value. `Status.code()`, `Status.class()`,
   `Status.phrase()`, and `Status.parse()` work on the wire number, and the

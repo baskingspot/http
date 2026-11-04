@@ -92,6 +92,7 @@ pub const Event = union(enum) {
     reset: ResetEvent,
     window_update: WindowUpdateEvent,
     goaway: GoAwayEvent,
+    settings: settings.Values,
     connection_error: ConnectionErrorEvent,
 };
 
@@ -157,6 +158,13 @@ const Pending = struct {
     kind: EventKind,
     end_stream: bool,
 };
+
+const Closed = struct {
+    id: u31,
+    reset: bool,
+};
+
+const closed_capacity = 64;
 
 const Chunk = struct {
     next: ?*Chunk = null,
@@ -279,6 +287,9 @@ pub const Session = struct {
     streams: std.AutoHashMapUnmanaged(u31, Stream),
     active_local: u32,
     active_remote: u32,
+    closed: [closed_capacity]Closed,
+    closed_len: usize,
+    closed_pos: usize,
 
     local: settings.Values,
     remote: settings.Values,
@@ -342,6 +353,9 @@ pub const Session = struct {
             .streams = streams,
             .active_local = 0,
             .active_remote = 0,
+            .closed = undefined,
+            .closed_len = 0,
+            .closed_pos = 0,
             .local = .{
                 .header_table_size = options.header_table_size,
                 .enable_push = false,
@@ -493,7 +507,7 @@ pub const Session = struct {
         return switch (body) {
             .data => |data_frame| self.onData(allocator, header, data_frame),
             .headers => |headers_frame| self.onHeaders(allocator, header, headers_frame),
-            .priority => self.onPriority(allocator, header),
+            .priority => |priority| self.onPriority(allocator, header, priority),
             .rst_stream => |rst| self.onRstStream(allocator, header, rst),
             .settings => |s| self.onSettings(allocator, header, s),
             .push_promise => self.connectionError(allocator, .protocol_error),
@@ -537,7 +551,7 @@ pub const Session = struct {
         };
         self.settings_received = true;
         try self.appendFrame(allocator, .settings, frame.flags.ack, 0, &.{});
-        return null;
+        return .{ .settings = self.remote };
     }
 
     fn onPing(
@@ -590,7 +604,9 @@ pub const Session = struct {
         }
 
         const state = self.streams.getPtr(header.stream_id) orelse {
-            return self.closedOrIdle(allocator, header.stream_id);
+            if (self.closedReason(header.stream_id) != null or
+                self.isClosedStream(header.stream_id)) return null;
+            return self.connectionError(allocator, .protocol_error);
         };
         state.send.increase(update.increment) catch {
             return self.failStream(allocator, header.stream_id, .flow_control_error);
@@ -608,8 +624,11 @@ pub const Session = struct {
         rst: frame.RstStream,
     ) Error!?Event {
         if (header.stream_id == 0) return self.connectionError(allocator, .protocol_error);
-        if (self.removeStream(header.stream_id) == null) {
-            return self.closedOrIdle(allocator, header.stream_id);
+        if (self.closedReason(header.stream_id) != null) return null;
+        if (self.streams.contains(header.stream_id)) {
+            _ = self.removeStream(header.stream_id, true);
+        } else if (!self.isClosedStream(header.stream_id)) {
+            return self.connectionError(allocator, .protocol_error);
         }
         return .{ .reset = .{
             .stream_id = header.stream_id,
@@ -622,8 +641,12 @@ pub const Session = struct {
         self: *Session,
         allocator: Allocator,
         header: frame.Header,
+        priority: frame.Priority,
     ) Error!?Event {
         if (header.stream_id == 0) return self.connectionError(allocator, .protocol_error);
+        if (priority.dependency == header.stream_id) {
+            return self.failStream(allocator, header.stream_id, .protocol_error);
+        }
         return null;
     }
 
@@ -637,7 +660,10 @@ pub const Session = struct {
         if (id == 0) return self.connectionError(allocator, .protocol_error);
 
         const state = self.streams.getPtr(id) orelse {
-            return self.closedOrIdle(allocator, id);
+            if (self.closedReason(id) != null) {
+                return self.failStream(allocator, id, .stream_closed);
+            }
+            return self.connectionError(allocator, .protocol_error);
         };
 
         self.conn_recv.consume(header.length) catch {
@@ -685,16 +711,32 @@ pub const Session = struct {
         const id = header.stream_id;
         if (id == 0) return self.connectionError(allocator, .protocol_error);
 
+        if (headers_frame.priority) |priority| {
+            if (priority.dependency == id) {
+                return self.failStream(allocator, id, .protocol_error);
+            }
+        }
+
         var state = self.streams.getPtr(id);
         if (state == null) {
-            if (self.isClosedStream(id)) {
-                const local_parity: u31 = if (self.options.role == .client) 1 else 0;
-                if (id & 1 != local_parity and id < self.ids.last_remote) {
-                    // A lower remote identifier that was never opened is an
-                    // idle stream, not a closed one (RFC 9113 §5.1.1).
-                    return self.connectionError(allocator, .protocol_error);
+            if (self.closedReason(id)) |reset| {
+                if (reset) return self.failStream(allocator, id, .stream_closed);
+                return self.connectionError(allocator, .stream_closed);
+            }
+            const local_parity: u31 = if (self.options.role == .client) 1 else 0;
+            if (id & 1 == local_parity) {
+                if (id < self.ids.local_next) {
+                    return self.failStream(allocator, id, .stream_closed);
                 }
-                return self.failStream(allocator, id, .stream_closed);
+                return self.connectionError(allocator, .protocol_error);
+            }
+            if (id < self.ids.last_remote) {
+                // A lower remote identifier that was never opened is an
+                // idle stream, not a closed one (RFC 9113 §5.1.1).
+                return self.connectionError(allocator, .protocol_error);
+            }
+            if (id == self.ids.last_remote and id != 0) {
+                return self.connectionError(allocator, .stream_closed);
             }
             self.ids.acceptRemote(id) catch {
                 return self.connectionError(allocator, .protocol_error);
@@ -718,12 +760,16 @@ pub const Session = struct {
         }
 
         const tracked = state.?;
+        const end_stream = header.flags & frame.flags.end_stream != 0;
         const kind: EventKind = if (tracked.recv_head)
             .trailers
         else if (tracked.initiator == .remote)
             .request
         else
             .response;
+        if (kind == .trailers and !end_stream) {
+            return self.failStream(allocator, id, .protocol_error);
+        }
         if (kind != .trailers) tracked.recv_head = true;
 
         tracked.state = stream.transition(tracked.state, .remote, .headers) catch |err| {
@@ -734,7 +780,6 @@ pub const Session = struct {
             };
         };
 
-        const end_stream = header.flags & frame.flags.end_stream != 0;
         if (end_stream) {
             tracked.state = stream.transition(tracked.state, .remote, .end_stream) catch {
                 return self.failStream(allocator, id, .protocol_error);
@@ -846,7 +891,7 @@ pub const Session = struct {
 
     fn maybeRemoveClosed(self: *Session, id: u31) void {
         const state = self.streams.getPtr(id) orelse return;
-        if (state.state == .closed) _ = self.removeStream(id);
+        if (state.state == .closed) _ = self.removeStream(id, false);
     }
 
     pub fn submitRequest(
@@ -1041,7 +1086,7 @@ pub const Session = struct {
         var payload: [4]u8 = undefined;
         mem.writeInt(u32, &payload, @intFromEnum(code), .big);
         try self.appendFrame(allocator, .rst_stream, 0, id, &payload);
-        _ = self.removeStream(id);
+        _ = self.removeStream(id, true);
     }
 
     pub fn submitGoaway(self: *Session, allocator: Allocator, code: frame.ErrorCode) Error!void {
@@ -1123,9 +1168,19 @@ pub const Session = struct {
         try self.release(allocator, id, count);
     }
 
-    fn closedOrIdle(self: *Session, allocator: Allocator, id: u31) Error!?Event {
-        if (self.isClosedStream(id)) return null;
-        return self.connectionError(allocator, .protocol_error);
+    fn rememberClosed(self: *Session, id: u31, reset: bool) void {
+        self.closed[self.closed_pos] = .{ .id = id, .reset = reset };
+        self.closed_pos = (self.closed_pos + 1) % closed_capacity;
+        if (self.closed_len < closed_capacity) self.closed_len += 1;
+    }
+
+    fn closedReason(self: *const Session, id: u31) ?bool {
+        var index: usize = 0;
+        while (index < self.closed_len) : (index += 1) {
+            const closed = self.closed[index];
+            if (closed.id == id) return closed.reset;
+        }
+        return null;
     }
 
     fn isClosedStream(self: *const Session, id: u31) bool {
@@ -1136,8 +1191,9 @@ pub const Session = struct {
         return id <= self.ids.last_remote;
     }
 
-    fn removeStream(self: *Session, id: u31) ?Stream {
+    fn removeStream(self: *Session, id: u31, reset: bool) ?Stream {
         const kv = self.streams.fetchRemove(id) orelse return null;
+        self.rememberClosed(id, reset);
         switch (kv.value.initiator) {
             .local => self.active_local -= 1,
             .remote => self.active_remote -= 1,
@@ -1156,7 +1212,7 @@ pub const Session = struct {
         mem.writeInt(u32, &payload, @intFromEnum(code), .big);
         try self.appendFrame(allocator, .rst_stream, 0, id, &payload);
         if (!existed) return null;
-        _ = self.removeStream(id);
+        _ = self.removeStream(id, true);
         return .{ .reset = .{ .stream_id = id, .code = code, .origin = .local } };
     }
 
@@ -1604,6 +1660,168 @@ test "a small initial window makes submitData accept a prefix" {
             try testing.expectEqualStrings("abcde", d.bytes);
             try testing.expect(d.end_stream);
         },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+fn takeFrame(session: *Session, buf: []u8) !frame.Parsed {
+    const n = session.send(buf);
+    try testing.expect(n > 0);
+    return frame.parse(buf[0..n], frame.default_max_frame_size);
+}
+
+test "a closed stream rejects DATA with STREAM_CLOSED" {
+    var client = try Session.init(testing.allocator, .{ .role = .client });
+    defer client.deinit(testing.allocator);
+    var server = try Session.init(testing.allocator, .{ .role = .server });
+    defer server.deinit(testing.allocator);
+    try handshake(&client, &server, testing.allocator);
+
+    const id = try client.submitRequest(testing.allocator, &request_fields, true);
+    try transfer(&client, &server);
+    _ = (try server.nextEvent(testing.allocator)).?;
+    try server.submitResponse(testing.allocator, id, &response_fields, true);
+    try transfer(&server, &client);
+    _ = (try client.nextEvent(testing.allocator)).?;
+
+    var raw: [32]u8 = undefined;
+    var writer = frame.Writer.init(&raw);
+    try writer.begin(.data, 0, id);
+    try writer.bytes("x");
+    writer.end();
+    _ = server.receive(writer.written());
+    try testing.expect((try server.nextEvent(testing.allocator)) == null);
+
+    var out: [64]u8 = undefined;
+    const parsed = try takeFrame(&server, &out);
+    const body = try frame.body(parsed.header, parsed.payload);
+    try testing.expectEqual(frame.FrameType.rst_stream, parsed.header.type);
+    try testing.expectEqual(frame.ErrorCode.stream_closed, body.rst_stream.error_code);
+}
+
+test "a normal closed stream rejects HEADERS as a connection error" {
+    var client = try Session.init(testing.allocator, .{ .role = .client });
+    defer client.deinit(testing.allocator);
+    var server = try Session.init(testing.allocator, .{ .role = .server });
+    defer server.deinit(testing.allocator);
+    try handshake(&client, &server, testing.allocator);
+
+    const id = try client.submitRequest(testing.allocator, &request_fields, true);
+    try transfer(&client, &server);
+    _ = (try server.nextEvent(testing.allocator)).?;
+    try server.submitResponse(testing.allocator, id, &response_fields, true);
+    try transfer(&server, &client);
+    _ = (try client.nextEvent(testing.allocator)).?;
+
+    var raw: [32]u8 = undefined;
+    var writer = frame.Writer.init(&raw);
+    try writer.begin(.headers, frame.flags.end_headers, id);
+    writer.end();
+    _ = server.receive(writer.written());
+
+    const event = (try server.nextEvent(testing.allocator)).?;
+    switch (event) {
+        .connection_error => |err| try testing.expectEqual(frame.ErrorCode.stream_closed, err.code),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "a reset stream rejects HEADERS with STREAM_CLOSED" {
+    var client = try Session.init(testing.allocator, .{ .role = .client });
+    defer client.deinit(testing.allocator);
+    var server = try Session.init(testing.allocator, .{ .role = .server });
+    defer server.deinit(testing.allocator);
+    try handshake(&client, &server, testing.allocator);
+
+    const id = try client.submitRequest(testing.allocator, &request_fields, true);
+    try transfer(&client, &server);
+    _ = (try server.nextEvent(testing.allocator)).?;
+    try client.submitReset(testing.allocator, id, .cancel);
+    try transfer(&client, &server);
+    _ = (try server.nextEvent(testing.allocator)).?;
+
+    var raw: [32]u8 = undefined;
+    var writer = frame.Writer.init(&raw);
+    try writer.begin(.headers, frame.flags.end_headers, id);
+    writer.end();
+    _ = server.receive(writer.written());
+    try testing.expect((try server.nextEvent(testing.allocator)) == null);
+
+    var out: [64]u8 = undefined;
+    const parsed = try takeFrame(&server, &out);
+    const body = try frame.body(parsed.header, parsed.payload);
+    try testing.expectEqual(frame.FrameType.rst_stream, parsed.header.type);
+    try testing.expectEqual(frame.ErrorCode.stream_closed, body.rst_stream.error_code);
+}
+
+test "a PRIORITY self-dependency is a stream error" {
+    var client = try Session.init(testing.allocator, .{ .role = .client });
+    defer client.deinit(testing.allocator);
+    var server = try Session.init(testing.allocator, .{ .role = .server });
+    defer server.deinit(testing.allocator);
+    try handshake(&client, &server, testing.allocator);
+
+    const id = try client.submitRequest(testing.allocator, &request_fields, false);
+    try transfer(&client, &server);
+    _ = (try server.nextEvent(testing.allocator)).?;
+
+    var raw: [16]u8 = undefined;
+    var writer = frame.Writer.init(&raw);
+    try writer.begin(.priority, 0, id);
+    try writer.int(u32, id);
+    try writer.byte(0);
+    writer.end();
+    _ = server.receive(writer.written());
+
+    const event = (try server.nextEvent(testing.allocator)).?;
+    switch (event) {
+        .reset => |reset| try testing.expectEqual(frame.ErrorCode.protocol_error, reset.code),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "trailers without END_STREAM are a stream error" {
+    var client = try Session.init(testing.allocator, .{ .role = .client });
+    defer client.deinit(testing.allocator);
+    var server = try Session.init(testing.allocator, .{ .role = .server });
+    defer server.deinit(testing.allocator);
+    try handshake(&client, &server, testing.allocator);
+
+    const id = try client.submitRequest(testing.allocator, &request_fields, false);
+    try transfer(&client, &server);
+    _ = (try server.nextEvent(testing.allocator)).?;
+
+    var raw: [16]u8 = undefined;
+    var writer = frame.Writer.init(&raw);
+    try writer.begin(.headers, frame.flags.end_headers, id);
+    writer.end();
+    _ = server.receive(writer.written());
+
+    const event = (try server.nextEvent(testing.allocator)).?;
+    switch (event) {
+        .reset => |reset| try testing.expectEqual(frame.ErrorCode.protocol_error, reset.code),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "a SETTINGS update is visible to the application" {
+    var client = try Session.init(testing.allocator, .{ .role = .client });
+    defer client.deinit(testing.allocator);
+    var server = try Session.init(testing.allocator, .{ .role = .server });
+    defer server.deinit(testing.allocator);
+    try handshake(&client, &server, testing.allocator);
+
+    var raw: [16]u8 = undefined;
+    var writer = frame.Writer.init(&raw);
+    try writer.begin(.settings, 0, 0);
+    try writer.int(u16, @intFromEnum(frame.SettingId.initial_window_size));
+    try writer.int(u32, 100);
+    writer.end();
+    _ = server.receive(writer.written());
+
+    const event = (try server.nextEvent(testing.allocator)).?;
+    switch (event) {
+        .settings => |values| try testing.expectEqual(@as(u32, 100), values.initial_window_size),
         else => return error.TestUnexpectedResult,
     }
 }
