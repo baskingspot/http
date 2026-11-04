@@ -1,4 +1,4 @@
-//! Integration tests for the poll engine.
+//! Integration tests for the readiness engines.
 
 const std = @import("std");
 const testing = std.testing;
@@ -8,7 +8,8 @@ const panic = std.debug.panic;
 
 const http = @import("http");
 const h1 = http.h1;
-const engine = h1.engine.poll;
+const options = @import("engine_options");
+const engine = if (options.epoll) h1.engine.epoll else h1.engine.poll;
 
 const TestApp = struct {
     pub fn handle(_: *TestApp, exchange: *engine.Exchange) anyerror!void {

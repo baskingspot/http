@@ -4,8 +4,8 @@
 
 `h1.engine.blocking` is a blocking HTTP/1 server over `std.Io`. It uses
 `Io.Threaded` and `Io.net`. It serves one connection at a time. Use it for
-tools, tests, and trusted peers. The poll engine is the engine for the admin
-plane.
+tools, tests, and trusted peers. `h1.engine.poll` and `h1.engine.epoll` are the
+readiness engines for the admin plane.
 
 The parser modules stay sans-I/O. The engine owns the transport, the buffers,
 the accept loop, and the handler call. `h1.ServerConn` owns the request state
@@ -88,11 +88,14 @@ gets 501.
 HEAD responses keep Content-Length and omit the body. A 204 or 304 response
 omits Content-Length and the body. A 1xx status is not a final response.
 
-## Poll engine
+## Readiness engines
 
-`h1.engine.poll` is Linux-only for now. It uses `poll(2)` over raw nonblocking
-descriptors. `std.Io` supplies the listener, the clock, and the listener close.
-The connection machine is the same `h1.ServerConn`.
+`h1.engine.poll` and `h1.engine.epoll` are Linux-only for now. They share the
+slot loop and differ only in registration and wait. `h1.engine.poll` builds a
+`pollfd` array on every wait; `h1.engine.epoll` keeps a kernel registration and
+changes it only when a slot's interest changes. `std.Io` supplies the listener,
+the clock, and the listener close. The connection machine is the same
+`h1.ServerConn`.
 
 `Server(Handler)` takes the handler type at comptime. The caller creates it
 with an address, a handler pointer, and a `Config` that holds the allocator,
@@ -101,13 +104,15 @@ backoff. The server allocates all slots and buffers once, in `init`; it does no
 allocation per request.
 
 The methods are `init`, `run`, `stop`, `deinit`, and `port`. `run` blocks in
-`poll`. `stop` writes a stop eventfd; `run` returns after the next wake.
+the wait backend. `stop` writes a stop eventfd; `run` returns after the next
+wake.
 
-The poll set contains:
+The wait set contains:
 
 - The stop eventfd.
 - The listener, only when a slot is free and accept is not backed off.
-- Every active slot, with `POLLIN` for read or drain and `POLLOUT` for write.
+- Every active slot, with read interest for read or drain and write interest
+  for write.
 
 The timeout is the earliest connection deadline or the accept-backoff
 deadline. After each wait, the engine services readable and writable slots and
@@ -130,14 +135,17 @@ a connection just because slots are full.
 The listener is opened with `SO_REUSEADDR` only. It does not set
 `SO_REUSEPORT`, so two processes cannot silently bind the same port.
 
-Epoll and kqueue replace the wait and registration part of this loop. The slot
-state machine does not change. io_uring is a separate completion engine.
+The backend interface is `set`, `remove`, and `wait`. `h1.engine.poll` stores
+the entries and builds a `pollfd` array in `wait`; `h1.engine.epoll` maps each
+owner to an epoll registration. The slot state machine does not change.
+Kqueue will use the same interface. io_uring is a separate completion engine.
 
 ## Future
 
 The remaining evented engines are separate:
 
-- Epoll and kqueue share the poll engine's readiness loop.
+- Kqueue shares the readiness loop. It needs the portable listener, accept,
+  and stop layer; epoll does not.
 - io_uring has its own completion loop.
 - Do not use `std.Io.Evented` for these engines. It is an experimental fiber
   runtime.

@@ -37,6 +37,17 @@ Linux only for now. The same handler as the blocking example runs over the
 poll engine: fixed slots, nonblocking sockets, connection deadlines, accept
 backoff, keep-alive and pipelining, and a stop eventfd.
 
+## Epoll server
+
+```sh
+just example-epoll
+```
+
+Linux only. The same handler and readiness loop as the poll example, with
+epoll doing registration and the wait. The slot state machine is shared; the
+poll engine builds a `pollfd` array on every wait, and this one keeps kernel
+registrations and changes them only when a slot's interest changes.
+
 ## io_uring
 
 ```sh

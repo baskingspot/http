@@ -80,11 +80,12 @@ ready to depend on.
   parsing, framing, keep-alive, pipelining, and policy responses. The blocking
   engine sets every timeout to zero because a blocking syscall cannot enforce
   them; the evented engines are separate.
-- `h1.engine.poll`: a Linux `poll(2)` server with fixed slots, nonblocking
-  sockets, accept backoff, connection deadlines, keep-alive and pipelining, and
-  a stop eventfd. It uses the same comptime handler and `Exchange` as the
-  blocking engine. Epoll and kqueue become backends for this readiness loop;
-  io_uring is separate.
+- `h1.engine.poll` and `h1.engine.epoll`: Linux readiness servers with fixed
+  slots, nonblocking sockets, accept backoff, connection deadlines, keep-alive
+  and pipelining, and a stop eventfd. They share the slot state machine and
+  differ only in registration and wait. Both use the same comptime handler and
+  `Exchange` as the blocking engine. Kqueue becomes the next backend for this
+  readiness loop; io_uring is separate.
 - `prefix_int`: HPACK and QPACK prefix integers (RFC 7541 §5.1), shared by
   both. Up to 32 bits, with the representation's tag bits left to the caller.
 - `huffman`: the RFC 7541 Appendix B Huffman code, shared by HPACK and QPACK.
@@ -133,9 +134,10 @@ ready to depend on.
   and `Content-Length` cannot both frame a request; `h1.framing` applies it.
 
 Ranges, entity tags, dates, media types, and form decoding are next. The parser
-modules remain free of server types. `h1.engine.blocking` and
-`h1.engine.poll` are the servers in the package; the remaining evented engines
-live separately, and the parser modules still have no I/O runtime.
+modules remain free of server types. `h1.engine.blocking`,
+`h1.engine.poll`, and `h1.engine.epoll` are the servers in the package; kqueue
+and io_uring remain separate engines, and the parser modules still have no I/O
+runtime.
 
 ## Usage
 

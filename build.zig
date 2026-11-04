@@ -117,14 +117,20 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_engine_tests.addArgs(args);
     test_step.dependOn(&run_engine_tests.step);
 
-    // The poll engine is Linux-only for now. The test artifact is present on
-    // every target in the source tree, but only Linux gets a build target.
+    // The readiness engines are Linux-only for now. The test artifact is
+    // present on every target in the source tree, but only Linux gets a build
+    // target. Both engines run the same integration suite.
     if (target.result.os.tag == .linux) {
+        const poll_options = b.addOptions();
+        poll_options.addOption(bool, "epoll", false);
         const poll_tests_mod = b.createModule(.{
             .root_source_file = b.path("tests/engine_poll.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "http", .module = mod }},
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "engine_options", .module = poll_options.createModule() },
+            },
         });
         const poll_tests = b.addTest(.{
             .root_module = poll_tests_mod,
@@ -134,6 +140,26 @@ pub fn build(b: *std.Build) void {
         run_poll_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
         if (b.args) |args| run_poll_tests.addArgs(args);
         test_step.dependOn(&run_poll_tests.step);
+
+        const epoll_options = b.addOptions();
+        epoll_options.addOption(bool, "epoll", true);
+        const epoll_tests_mod = b.createModule(.{
+            .root_source_file = b.path("tests/engine_poll.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "engine_options", .module = epoll_options.createModule() },
+            },
+        });
+        const epoll_tests = b.addTest(.{
+            .root_module = epoll_tests_mod,
+            .test_runner = test_runner,
+        });
+        const run_epoll_tests = b.addRunArtifact(epoll_tests);
+        run_epoll_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
+        if (b.args) |args| run_epoll_tests.addArgs(args);
+        test_step.dependOn(&run_epoll_tests.step);
     }
 
     // Fuzzing needs the built-in runner: testingx's main rejects fuzz mode
@@ -203,6 +229,34 @@ pub fn build(b: *std.Build) void {
         const run_poll = b.addRunArtifact(poll);
         if (b.args) |args| run_poll.addArgs(args);
         poll_example_run.dependOn(&run_poll.step);
+    }
+
+    // The epoll example is Linux-only. The steps exist everywhere so
+    // `check-example` is portable; only Linux gets a target to build.
+    const epoll_example_bin = b.step(
+        "example-epoll-bin",
+        "Build the HTTP/1.1 epoll example server",
+    );
+    const epoll_example_run = b.step(
+        "example-epoll",
+        "Run the HTTP/1.1 epoll example server",
+    );
+    if (target.result.os.tag == .linux) {
+        const epoll_mod = b.createModule(.{
+            .root_source_file = b.path("examples/http1_epoll.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "http", .module = mod }},
+        });
+        const epoll = b.addExecutable(.{
+            .name = "http1-epoll",
+            .root_module = epoll_mod,
+        });
+        epoll_example_bin.dependOn(&epoll.step);
+
+        const run_epoll = b.addRunArtifact(epoll);
+        if (b.args) |args| run_epoll.addArgs(args);
+        epoll_example_run.dependOn(&run_epoll.step);
     }
 
     // The io_uring example is Linux-only. The steps exist everywhere so

@@ -71,6 +71,11 @@ example:
 example-poll:
     zig build example-poll
 
+[doc("Run the HTTP/1.1 epoll example server (Linux only)")]
+[group("example")]
+example-epoll:
+    zig build example-epoll
+
 [doc("Run the HTTP/1.1 io_uring example (Linux only)")]
 [group("example")]
 example-uring:
@@ -86,6 +91,7 @@ example-h2:
 check-example:
     zig build example-bin
     zig build example-poll-bin
+    zig build example-epoll-bin
     zig build example-uring-bin
     zig build example-h2-bin
 
