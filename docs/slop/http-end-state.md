@@ -59,11 +59,29 @@ cookie.zig           request cookie pairs, Set-Cookie attributes
 Compression, shared by HTTP/2 and HTTP/3:
 
 ```
-huffman.zig          RFC 7541 Appendix B, also used by QPACK
+huffman.zig          RFC 7541 Appendix B, also used by QPACK unchanged
 prefix_int.zig       HPACK/QPACK prefix integers (not QUIC varints)
 hpack/               static table, dynamic table, decoder, encoder
 qpack/               static table, dynamic table, decoder, encoder
 ```
+
+What QPACK actually shares, checked against RFC 9204:
+
+- The Huffman code is reused without modification (§4.1.2).
+- The prefix integer *format* is reused (§4.1.1), but QPACK requires decoding
+  up to 62 bits, while `prefix_int` returns `u32` for HPACK's 2^32-1 bound.
+  Sharing it means a wider or generic decode path, decided when QPACK lands.
+- The string literal is H + length + bytes, but QPACK allows an N-bit-prefix
+  string starting mid-octet, with N from 2 to 8 (§4.1.2). The Huffman codec is
+  shared; the HPACK string reader is not.
+- The static table is QPACK's own 99 entries, not HPACK's 61. The comptime
+  name-run lookup pattern carries over; the data does not.
+- The dynamic table's storage, accounting (name + value + 32), FIFO eviction,
+  and compaction carry over. The index space does not: QPACK addresses entries
+  by absolute index, Base, and relative index, tracks an insert count, and can
+  block a field section until the required insertions arrive. The HPACK table
+  and decoder cannot be reused as-is.
+- The instruction sets and the encoder/decoder state machines are different.
 
 HPACK and QPACK share the Huffman code and the string-literal shape (H bit +
 7-bit length prefix). They do not share tables or state. QUIC varints (2-bit

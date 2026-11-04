@@ -38,8 +38,11 @@ const huffman = @import("../huffman.zig");
 const prefix_int = @import("../prefix_int.zig");
 const dynamic_table = @import("dynamic_table.zig");
 const DynamicTable = dynamic_table.DynamicTable;
-const Slot = dynamic_table.Slot;
 const static_table = @import("static_table.zig");
+/// The first dynamic index. Static indices are 1..61, dynamic start at 62.
+pub const first_dynamic = static_table.first_dynamic;
+const TableStorage = @import("TableStorage.zig");
+const Slot = TableStorage.Slot;
 
 pub const Error = error{
     /// The block ends inside a representation or a string.
@@ -50,7 +53,7 @@ pub const Error = error{
     InvalidInteger,
     /// A Huffman string that is not a code, holds EOS, or has bad padding.
     InvalidHuffman,
-    /// A dynamic table size update above `table_buf.len`.
+    /// A dynamic table size update above the storage's capacity.
     TableSizeTooLarge,
     /// A dynamic table size update after a field representation (RFC 7541 §4.2).
     TableSizeUpdateNotFirst,
@@ -60,17 +63,14 @@ pub const Error = error{
     OutputTooSmall,
 };
 
-/// The first dynamic index. Static indices are 1..61, dynamic start at 62.
-pub const first_dynamic = static_table.count + 1;
-
 pub const Decoder = struct {
     table: DynamicTable,
 
-    /// `table_buf.len` is the SETTINGS_HEADER_TABLE_SIZE this decoder
-    /// advertises, and so the largest size a peer may ask for. `table_buf`
-    /// needs `dynamic_table.DynamicTable.slotCount(table_buf.len)` slots.
-    pub fn init(table_buf: []u8, slots: []Slot) Decoder {
-        return .{ .table = DynamicTable.init(table_buf, slots) };
+    /// The storage is the SETTINGS_HEADER_TABLE_SIZE this decoder advertises,
+    /// and so the largest size a peer may ask for. `TableStorage.init` sizes it
+    /// from that value.
+    pub fn init(storage: TableStorage) Decoder {
+        return .{ .table = .init(storage) };
     }
 
     /// Decode one complete header block into `out`, copying the bytes into
@@ -103,7 +103,7 @@ pub const Decoder = struct {
         never_indexed: ?[]bool,
     ) Error!Headers {
         assert(!overlaps(block, out_bytes));
-        assert(!overlaps(out_bytes, self.table.buf));
+        assert(!overlaps(out_bytes, self.table.bytes));
 
         var cursor: Cursor = .init(block);
         var fields: usize = 0;
@@ -251,9 +251,8 @@ const request_fields = [_]Header{
 };
 
 test "C.2.1: literal with indexing adds the entry (RFC 7541 §6.2.1)" {
-    var table_buf: [256]u8 = undefined;
-    var slots: [DynamicTable.slotCount(256)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(256) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 256));
 
     var out: [4]Header = undefined;
     var out_bytes: [256]u8 = undefined;
@@ -270,9 +269,8 @@ test "C.2.1: literal with indexing adds the entry (RFC 7541 §6.2.1)" {
 }
 
 test "C.2.2: literal without indexing leaves the table alone (RFC 7541 §6.2.2)" {
-    var table_buf: [256]u8 = undefined;
-    var slots: [DynamicTable.slotCount(256)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(256) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 256));
 
     var out: [4]Header = undefined;
     var out_bytes: [256]u8 = undefined;
@@ -283,9 +281,8 @@ test "C.2.2: literal without indexing leaves the table alone (RFC 7541 §6.2.2)"
 }
 
 test "C.2.3: never indexed leaves the table alone and sets the flag (RFC 7541 §6.2.3)" {
-    var table_buf: [256]u8 = undefined;
-    var slots: [DynamicTable.slotCount(256)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(256) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 256));
 
     var out: [4]Header = undefined;
     var out_bytes: [256]u8 = undefined;
@@ -303,9 +300,8 @@ test "C.2.3: never indexed leaves the table alone and sets the flag (RFC 7541 §
 }
 
 test "C.2.4: an indexed field borrows nothing and returns a copy (RFC 7541 §6.1)" {
-    var table_buf: [256]u8 = undefined;
-    var slots: [DynamicTable.slotCount(256)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(256) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 256));
 
     var out: [4]Header = undefined;
     var out_bytes: [256]u8 = undefined;
@@ -323,9 +319,8 @@ test "C.2.4: an indexed field borrows nothing and returns a copy (RFC 7541 §6.1
 }
 
 test "C.3: three requests on one connection, no Huffman (RFC 7541 Appendix C.3)" {
-    var table_buf: [4096]u8 = undefined;
-    var slots: [DynamicTable.slotCount(4096)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(4096) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 4096));
 
     var out: [8]Header = undefined;
     var out_bytes: [512]u8 = undefined;
@@ -363,9 +358,8 @@ test "C.3: three requests on one connection, no Huffman (RFC 7541 Appendix C.3)"
 }
 
 test "C.4: the same requests with Huffman coding (RFC 7541 Appendix C.4)" {
-    var table_buf: [4096]u8 = undefined;
-    var slots: [DynamicTable.slotCount(4096)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(4096) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 4096));
 
     var out: [8]Header = undefined;
     var out_bytes: [512]u8 = undefined;
@@ -407,9 +401,8 @@ test "C.4: the same requests with Huffman coding (RFC 7541 Appendix C.4)" {
 }
 
 test "C.5: three responses with a 256-byte table, no Huffman (RFC 7541 Appendix C.5)" {
-    var table_buf: [256]u8 = undefined;
-    var slots: [DynamicTable.slotCount(256)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(256) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 256));
 
     var out: [8]Header = undefined;
     var out_bytes: [512]u8 = undefined;
@@ -471,9 +464,8 @@ test "C.5: three responses with a 256-byte table, no Huffman (RFC 7541 Appendix 
 }
 
 test "C.6: the same responses with Huffman coding (RFC 7541 Appendix C.6)" {
-    var table_buf: [256]u8 = undefined;
-    var slots: [DynamicTable.slotCount(256)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(256) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 256));
 
     var out: [8]Header = undefined;
     var out_bytes: [512]u8 = undefined;
@@ -531,9 +523,8 @@ test "C.6: the same responses with Huffman coding (RFC 7541 Appendix C.6)" {
 }
 
 test "a size update is accepted only before the first field (RFC 7541 §4.2)" {
-    var table_buf: [128]u8 = undefined;
-    var slots: [DynamicTable.slotCount(128)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(128) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 128));
 
     var out: [4]Header = undefined;
     var out_bytes: [128]u8 = undefined;
@@ -549,9 +540,8 @@ test "a size update is accepted only before the first field (RFC 7541 §4.2)" {
 }
 
 test "a size update above our advertised size is an error (RFC 7541 §6.3)" {
-    var table_buf: [64]u8 = undefined;
-    var slots: [DynamicTable.slotCount(64)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(64) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 64));
 
     var out: [4]Header = undefined;
     var out_bytes: [128]u8 = undefined;
@@ -564,9 +554,8 @@ test "a size update above our advertised size is an error (RFC 7541 §6.3)" {
 }
 
 test "index 0 and an index past the tables are errors (RFC 7541 §6.1)" {
-    var table_buf: [128]u8 = undefined;
-    var slots: [DynamicTable.slotCount(128)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(128) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 128));
 
     var out: [4]Header = undefined;
     var out_bytes: [128]u8 = undefined;
@@ -579,9 +568,8 @@ test "index 0 and an index past the tables are errors (RFC 7541 §6.1)" {
 }
 
 test "a block that ends before a string is truncated, not out of bounds" {
-    var table_buf: [128]u8 = undefined;
-    var slots: [DynamicTable.slotCount(128)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(128) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 128));
 
     var out: [4]Header = undefined;
     var out_bytes: [128]u8 = undefined;
@@ -593,9 +581,8 @@ test "a block that ends before a string is truncated, not out of bounds" {
 }
 
 test "a truncated block and an oversized integer are errors" {
-    var table_buf: [128]u8 = undefined;
-    var slots: [DynamicTable.slotCount(128)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(128) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 128));
 
     var out: [4]Header = undefined;
     var out_bytes: [128]u8 = undefined;
@@ -612,9 +599,8 @@ test "a truncated block and an oversized integer are errors" {
 }
 
 test "bad Huffman data is an error, and the caller's space is separate" {
-    var table_buf: [128]u8 = undefined;
-    var slots: [DynamicTable.slotCount(128)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(128) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 128));
 
     var out: [4]Header = undefined;
     var out_bytes: [128]u8 = undefined;
@@ -636,9 +622,8 @@ test "bad Huffman data is an error, and the caller's space is separate" {
 }
 
 test "the never-indexed flag is recorded for every field" {
-    var table_buf: [128]u8 = undefined;
-    var slots: [DynamicTable.slotCount(128)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(128) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 128));
 
     var out: [4]Header = undefined;
     var out_bytes: [256]u8 = undefined;
@@ -660,9 +645,8 @@ test "the never-indexed flag is recorded for every field" {
 }
 
 test "every field lives in out_bytes, whatever table it came from" {
-    var table_buf: [256]u8 = undefined;
-    var slots: [DynamicTable.slotCount(256)]Slot = undefined;
-    var decoder = Decoder.init(&table_buf, &slots);
+    var table_memory: TableStorage.Buffer(256) = undefined;
+    var decoder = Decoder.init(try .initBuffer(&table_memory, 256));
 
     var out: [4]Header = undefined;
     var out_bytes: [256]u8 = undefined;
@@ -690,9 +674,8 @@ test "fuzz decoding: arbitrary blocks never overrun the outputs" {
             var block_buf: [128]u8 = undefined;
             const block = block_buf[0..smith.slice(&block_buf)];
 
-            var table_buf: [256]u8 = undefined;
-            var slots: [DynamicTable.slotCount(256)]Slot = undefined;
-            var decoder = Decoder.init(&table_buf, &slots);
+            var table_memory: TableStorage.Buffer(256) = undefined;
+            var decoder = Decoder.init(try .initBuffer(&table_memory, 256));
 
             var out: [8]Header = undefined;
             var out_bytes: [512]u8 = undefined;
@@ -706,7 +689,7 @@ test "fuzz decoding: arbitrary blocks never overrun the outputs" {
                 try testing.expect(within(&out_bytes, header.value));
             }
             try testing.expect(decoder.table.size <= decoder.table.max_size);
-            try testing.expect(decoder.table.used() <= table_buf.len);
+            try testing.expect(decoder.table.used() <= table_memory.len);
         }
     }.run, .{
         .corpus = &.{
@@ -718,4 +701,17 @@ test "fuzz decoding: arbitrary blocks never overrun the outputs" {
             "\xff\xff\xff\xff",
         },
     });
+}
+
+test "an allocated TableStorage decodes" {
+    var storage = try TableStorage.init(testing.allocator, 4096);
+    defer storage.deinit(testing.allocator);
+    var decoder = Decoder.init(storage);
+
+    var out: [4]Header = undefined;
+    var out_bytes: [256]u8 = undefined;
+    const headers = try decoder.decode("\x82", &out, &out_bytes);
+    try testing.expectEqual(@as(usize, 1), headers.items.len);
+    try testing.expectEqualStrings(":method", headers.items[0].name);
+    try testing.expectEqualStrings("GET", headers.items[0].value);
 }

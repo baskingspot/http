@@ -12,6 +12,8 @@
 
 const std = @import("std");
 const testing = std.testing;
+const mem = std.mem;
+
 const http = @import("http");
 const testingx = @import("testingx");
 
@@ -29,9 +31,8 @@ const messages = .{
 };
 
 test "the fixture's blocks decode, in order, on one table" {
-    var table_buf: [4096]u8 = undefined;
-    var slots: [http.hpack.DynamicTable.slotCount(4096)]http.hpack.Slot = undefined;
-    var decoder = http.hpack.Decoder.init(&table_buf, &slots);
+    var table_memory: http.hpack.TableStorage.Buffer(4096) = undefined;
+    var decoder = http.hpack.Decoder.init(try .initBuffer(&table_memory, 4096));
 
     var got: [32]http.Header = undefined;
     var expected: [32]http.Header = undefined;
@@ -53,7 +54,7 @@ test "the fixture's blocks decode, in order, on one table" {
             try testing.expectEqualStrings(a.value, b.value);
             // The only Sensitive field in the generator's lists is
             // `authorization`; nothing else may be never indexed.
-            const sensitive = std.mem.eql(u8, a.name, "authorization");
+            const sensitive = mem.eql(u8, a.name, "authorization");
             try testing.expectEqual(sensitive, never_indexed[index]);
         }
     }
@@ -64,12 +65,12 @@ test "the fixture's blocks decode, in order, on one table" {
 /// cannot contain CR, LF, or NUL, so a line stays the whole value.
 fn parseFields(out: []http.Header, text: []const u8) ![]http.Header {
     var count: usize = 0;
-    var lines = std.mem.splitScalar(u8, text, '\n');
+    var lines = mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
         if (count == out.len) return error.FixtureTooLong;
 
-        const separator = std.mem.find(u8, line, ": ") orelse return error.FixtureSyntax;
+        const separator = mem.find(u8, line, ": ") orelse return error.FixtureSyntax;
         out[count] = .{
             .name = line[0..separator],
             .value = line[separator + 2 ..],

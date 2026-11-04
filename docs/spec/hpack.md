@@ -49,17 +49,99 @@ tables and the decoder.
 ## State
 
 The decoder is one struct the caller owns per connection and direction. The
-dynamic table is its only state; nothing is allocated. The caller supplies a
-byte arena whose length is the SETTINGS_HEADER_TABLE_SIZE this endpoint
-advertises, and `arena.len / 32` slots for the entry metadata. An entry costs
-at least 32 bytes of accounting, so that is the most entries the table can
-hold.
+dynamic table is its only state; the decoder allocates nothing. The table reads
+a `TableStorage`: a byte arena, one 16-byte record per slot, and a parallel
+`[]u32` of name hashes. `TableStorage.init(allocator, max_size)` allocates one
+chunk for all three, sized from the SETTINGS_HEADER_TABLE_SIZE this endpoint
+advertises. `initBuffer(memory, max_size)` wraps a caller's opaque blob for a
+stack or fixed-size server; `TableStorage.Buffer(max_size)` names that blob
+type. A blob shorter than `bytesNeeded(max_size)` is `error.BufferTooSmall`,
+and a maximum beyond `u32` is `error.TooLarge`. The storage
+never grows after init; `setMaxSize` changes only the logical maximum inside it.
+An entry costs at least 32 bytes of accounting, so the table can hold at most
+`arena.len / 32` entries.
 
 The arena is packed against its high end: new entries copy below the live
 ones, and eviction drops the oldest. That leaves gaps that a later insertion
 reclaims by compacting, which moves entries. The decoder copies every field
 into the caller's buffer, so no caller ever sees a pointer into the arena and
 compaction is invisible.
+
+## Lookups
+
+The static table has a fixed key set, so its name lookup is a comptime-built
+`stdx.bounded_array_hash_map.String`. Entries that share a name are adjacent in
+the RFC's order, so the map stores one run per name and an exact lookup scans
+only that run: two entries for `:method`, at most seven for `:status`. The
+dynamic table cannot use a map keyed by slice, because compaction moves the
+name bytes. Its hashes are a separate `[]u32`, so the scan reads four bytes per
+slot; the records stay 16-byte entries and are read once, on a hash match. Below
+32 entries a scalar pass over the hashes beats `findScalar` setup; above it, the
+vectorized `mem.findScalarPos` runs.
+
+On the nine names of the request benchmark, a static `findName` is 4.4 ns
+against 11.1 ns for the 61-entry scan it replaced, and a `find` is 5.7 ns
+against 34.4 ns (`just bench -- --filter=Hpack`). Encoding the nine-field
+request with a warm table and a checksummed output is about 180 ns; reverting the
+static lookup to its scan gives 320 ns. The dynamic split pays at size: a warm
+128-field encode is about 3.4 us, against 6.2 us when the hash shared the
+20-byte record. At nine fields the separate arrays cost a little locality,
+about 180 ns against 157 ns for the shared record; the threshold keeps the
+scalar path below 32 entries.
+
+The hasher was measured too, over the same nine names: Wyhash (what
+`std.hash_map.StringContext` uses) is 40 ns for the nine, XxHash64 59,
+RapidHash 64, XxHash3 67. Wyhash stays.
+
+`stdx.static_map` and `stdx.prefix_map` were considered. `static_map` wraps the
+same `bounded_array_hash_map.Custom` built at comptime, so it is the same
+machine with a nicer literal API; it rejects duplicate keys, which is exactly
+why this table stores a run per name. `prefix_map` is a radix tree, which pays
+per byte and earns its place for longest-prefix queries, not equality on 61
+short names.
+
+For the static table, a struct of arrays was not needed: the comptime map
+answers in one probe, and a SIMD scan over 61 slice descriptors would still read
+all 61. For the dynamic table, the table can reach 128 entries, so the hash
+array is worth splitting out and scanning with vectors.
+
+## Huffman codec
+
+The decoder uses an 8-bit root table; codes of nine bits or more fall through
+to the canonical scan. That covers every lowercase letter, digit, and most
+punctuation in a field value, so the scan is the rare path.
+
+On a 55-byte user agent the encoder is 72 ns (1.3 ns/byte) and the decoder
+166 ns (3.0 ns/byte); an 84-byte cookie is 105 ns and 262 ns. A 10-bit root
+(2 KiB) decoded 178 ns and 284 ns, and a 12-bit root (8 KiB) 181 ns and 283 ns,
+so the larger tables lose to cache. Filling the bit buffer eight bytes at a
+time, and `noalias` plus inlined bit operations, measured neutral. The 8-bit
+root stays; the remaining cost is the serial one-symbol-per-iteration loop, and
+a decoder that emits several symbols per lookup needs a table big enough to
+lose the same cache trade.
+
+## Encoding
+
+`Encoder` writes a block into caller storage. `encodedLen` is the upper bound:
+it charges every field a literal name and a raw value, the largest a field can
+be, so a block that passes the bound cannot run out and the dynamic table is
+never advanced by bytes that were not written.
+
+The default policy indexes every field, turns an exact name-and-value pair
+already in either table into an indexed field, uses the first static or dynamic
+name match otherwise, and Huffman-codes a string only when that is strictly
+shorter. A caller sets a `Mode` per field to opt out (`without_indexing`,
+`never_indexed`), and can turn Huffman off on the encoder.
+
+`setMaxSize` mirrors the peer's SETTINGS_HEADER_TABLE_SIZE. It evicts at once
+and queues the update for the start of the next block. A reduction followed by
+a growth emits the minimum first and the final size second, which is what makes
+the peer's table evict the same entries (§4.2).
+
+The encoder does not reproduce `golang.org/x/net/http2/hpack` byte for byte on
+one point: for a name-only match in the static table, Go picks the last entry
+with that name (`:path` 5) and this encoder picks the first (`:path` 4). Both
+are one-byte indices; the fixture is a decode interop, not an encoder oracle.
 
 ## Interop fixture
 
@@ -74,8 +156,6 @@ not, such as a Sensitive field, long literals, and table size updates.
 
 ## Not here
 
-- An encoder. Its table is `DynamicTable`; what is missing is the insertion
-  policy and how the never-indexed flag travels through re-encoding.
 - Header-list validation: lowercase names, pseudo-headers before fields,
   forbidden connection-specific fields, cookie concatenation. Those are
   RFC 9113 §8.2 and §8.3 rules and belong in `h2`, after decoding.
