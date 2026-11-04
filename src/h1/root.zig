@@ -347,7 +347,7 @@ fn scanTarget(cursor: *Cursor) Error![]const u8 {
 /// and is rejected. Validation is the field-value or reason-phrase character
 /// set; the caller decides whether to trim OWS. The scan stops at CR and
 /// rejects an invalid byte in the same pass.
-fn scanLine(cursor: *Cursor) Error![]const u8 {
+inline fn scanLine(cursor: *Cursor) Error![]const u8 {
     const start = cursor.pos;
     var index: usize = start;
 
@@ -379,10 +379,39 @@ fn scanLine(cursor: *Cursor) Error![]const u8 {
     return error.Incomplete;
 }
 
+/// `HTTP/1.0` and `HTTP/1.1` as little-endian `u64`s, for the common case.
+const http_1_0 = littleEndianU64("HTTP/1.0");
+const http_1_1 = littleEndianU64("HTTP/1.1");
+
+fn littleEndianU64(comptime text: []const u8) u64 {
+    var value: u64 = 0;
+    for (text, 0..) |byte, index| {
+        value |= @as(u64, byte) << @as(u6, @intCast(8 * index));
+    }
+    return value;
+}
+
 /// `HTTP-version` from RFC 9112 §2.3: `%s"HTTP" "/" DIGIT "." DIGIT`, exactly
 /// one digit each and case-sensitive. Returns the wire pair; `effectiveVersion`
 /// applies the recipient rule.
 fn parseVersion(cursor: *Cursor) Error!WireVersion {
+    // The two versions this parser implements are one 8-byte compare. Anything
+    // else, including 1.2 through 1.9, falls through to the general parser.
+    if (cursor.has(8)) {
+        const chunk = mem.readVarInt(u64, cursor.buf[@intCast(cursor.pos)..][0..8], .little);
+        if (chunk == http_1_0) {
+            cursor.pos += 8;
+            return .{ .major = 1, .minor = 0 };
+        }
+        if (chunk == http_1_1) {
+            cursor.pos += 8;
+            return .{ .major = 1, .minor = 1 };
+        }
+    }
+    return parseVersionSlow(cursor);
+}
+
+fn parseVersionSlow(cursor: *Cursor) Error!WireVersion {
     // RFC 9112 §2.3: the name is case-sensitive. A little-endian read of the
     // five bytes is one compare instead of five branches.
     const http_prefix: u40 = 'H' |
