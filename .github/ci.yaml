@@ -1,7 +1,5 @@
-# Linux is the gate. macOS runs the kqueue suite while the backend settles;
-# flip blocking to true once the runner is green.
+# Linux and macOS are both gates. macOS runs the kqueue suite.
 jobs:
   - recipe: ci
   - recipe: ci
     runners: [macos-26]
-    blocking: false
