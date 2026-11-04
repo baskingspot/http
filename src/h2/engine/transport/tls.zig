@@ -131,7 +131,12 @@ pub const Transport = struct {
         pub fn next(self: *SlotImpl) anyerror!Event {
             const event = self.server.next() catch |err| switch (err) {
                 error.Closed => return .closed,
-                else => return err,
+                else => {
+                    // A local fatal error prepared an alert. Drain it before
+                    // the slot closes; the retry returns the original error.
+                    if (self.server.sendBuffer().len != 0) return .need_output;
+                    return err;
+                },
             };
             return switch (event) {
                 .need_input => .need_input,
