@@ -153,7 +153,7 @@ pub fn request(fields: Headers) Error!RequestHead {
             // RFC 8441: extended CONNECT carries scheme, path, and authority.
             if (scheme == null or path == null) return error.MissingPseudo;
             if (authority == null) return error.MissingPseudo;
-            if (!validPath(path.?, method_token)) return error.InvalidPath;
+            if (!validPath(path.?, method_enum)) return error.InvalidPath;
         } else {
             // RFC 9113 §8.5: CONNECT omits scheme and path.
             if (scheme != null) return error.InvalidScheme;
@@ -163,7 +163,7 @@ pub fn request(fields: Headers) Error!RequestHead {
     } else {
         if (protocol != null) return error.InvalidProtocol;
         if (scheme == null or path == null) return error.MissingPseudo;
-        if (!validPath(path.?, method_token)) return error.InvalidPath;
+        if (!validPath(path.?, method_enum)) return error.InvalidPath;
     }
 
     if (scheme) |s| {
@@ -222,11 +222,12 @@ pub fn response(fields: Headers) Error!ResponseHead {
         if (field.name.len != 0 and field.name[0] == ':') {
             if (seen_regular) return error.PseudoAfterField;
             switch (try Pseudo.fromString(field.name)) {
-                .@":status" => {},
+                .@":status" => {
+                    if (status != null) return error.DuplicatePseudo;
+                    status = try parseStatus(field.value);
+                },
                 else => return error.UnknownPseudo,
             }
-            if (status != null) return error.DuplicatePseudo;
-            status = try parseStatus(field.value);
         } else {
             try validateFieldName(field.name);
             try validateRegularField(field);
@@ -286,10 +287,10 @@ fn parseStatus(value: []const u8) Error!Status {
     return Status.parse(code) orelse error.InvalidStatus;
 }
 
-fn validPath(path: []const u8, method_token: []const u8) bool {
+fn validPath(path: []const u8, method: ?Method) bool {
     if (path.len == 0) return false;
     if (path[0] == '/') return true;
-    return mem.eql(u8, path, "*") and mem.eql(u8, method_token, "OPTIONS");
+    return method == .OPTIONS and mem.eql(u8, path, "*");
 }
 
 fn validToken(token: []const u8) bool {
