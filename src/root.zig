@@ -18,6 +18,7 @@ pub const Headers = @import("header.zig").Headers;
 pub const Method = @import("method.zig").Method;
 pub const method = @import("method.zig");
 pub const prefix_int = @import("prefix_int.zig");
+pub const response = @import("response.zig");
 pub const Status = @import("status.zig").Status;
 pub const status = @import("status.zig");
 pub const token_list = @import("token_list.zig");
@@ -38,6 +39,7 @@ test {
     _ = hpack;
     _ = huffman;
     _ = prefix_int;
+    _ = response;
     _ = encoding;
     _ = token_list;
     _ = transfer_encoding;

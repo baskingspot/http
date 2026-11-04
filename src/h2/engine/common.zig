@@ -31,10 +31,6 @@ pub const ResponseOptions = struct {
     headers: []const Header = &.{},
 };
 
-/// The maximum response fields, including `:status`, `content-length`, and
-/// any content type. The engine builds them in the exchange, not the arena.
-pub const max_response_headers = 16;
-
 pub const Exchange = struct {
     /// The engine's stream slot. Stable until `complete`, then reused.
     id: usize,
@@ -43,19 +39,15 @@ pub const Exchange = struct {
     /// Per-stream storage for the request and any handler allocations.
     arena: Allocator,
     response: ?Response = null,
-    status_text: [3]u8 = undefined,
-    length_text: [20]u8 = undefined,
-    fields: [max_response_headers]Header = undefined,
 
     pub const Response = struct {
-        fields: []const Header,
+        options: ResponseOptions,
         body: []const u8,
     };
 
     pub const RespondError = error{
         AlreadyResponded,
         InvalidResponse,
-        TooManyHeaders,
     };
 
     /// Record the response. The engine sends the HEADERS and pumps `body` under
@@ -68,37 +60,13 @@ pub const Exchange = struct {
     ) RespondError!void {
         if (self.response != null) return error.AlreadyResponded;
 
-        const code = options.status.code();
-        const status_text = std.fmt.bufPrint(&self.status_text, "{d:0>3}", .{code}) catch {
-            return error.InvalidResponse;
-        };
-        if (status_text.len != 3) return error.InvalidResponse;
-        const length_text = std.fmt.bufPrint(
-            &self.length_text,
-            "{d}",
-            .{body.len},
-        ) catch unreachable;
-
-        const extra: usize = if (options.content_type != null) 1 else 0;
-        const count = 2 + extra + options.headers.len;
-        if (count > max_response_headers) return error.TooManyHeaders;
-        const fields = self.fields[0..count];
-        var index: usize = 0;
-        fields[index] = .{ .name = ":status", .value = status_text };
-        index += 1;
-        if (options.content_type) |content_type| {
-            fields[index] = .{ .name = "content-type", .value = content_type };
-            index += 1;
-        }
-        fields[index] = .{ .name = "content-length", .value = length_text };
-        index += 1;
-        for (options.headers) |header| {
-            fields[index] = header;
-            index += 1;
-        }
-
-        _ = head.response(.{ .items = fields }) catch return error.InvalidResponse;
-        self.response = .{ .fields = fields, .body = body };
+        _ = head.validateResponse(.{
+            .status = options.status,
+            .content_type = options.content_type,
+            .content_length = body.len,
+            .headers = options.headers,
+        }) catch return error.InvalidResponse;
+        self.response = .{ .options = options, .body = body };
     }
 };
 

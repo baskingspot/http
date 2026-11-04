@@ -26,6 +26,8 @@ const hpack = @import("../hpack/root.zig");
 const Headers = @import("../header.zig").Headers;
 const Header = @import("../header.zig").Header;
 const head = @import("head.zig");
+const response_mod = @import("../response.zig");
+const Response = response_mod.Response;
 
 /// The largest frame payload this session writes. The peer must accept at
 /// least this much, and it keeps the queue's frame buffer small.
@@ -977,7 +979,7 @@ pub const Session = struct {
         self: *Session,
         allocator: Allocator,
         id: u31,
-        fields: []const Header,
+        value: Response,
         end_stream: bool,
     ) Error!void {
         if (self.options.role != .server) return error.WrongRole;
@@ -985,7 +987,7 @@ pub const Session = struct {
 
         const state = self.streams.getPtr(id) orelse return error.UnknownStream;
         if (state.sent_head) return error.InvalidHead;
-        _ = head.response(.{ .items = fields }) catch return error.InvalidHead;
+        _ = head.validateResponse(value) catch return error.InvalidHead;
 
         var next = stream.transition(state.state, .local, .headers) catch {
             return error.StreamClosed;
@@ -996,12 +998,12 @@ pub const Session = struct {
             };
         }
 
-        const upper = self.encoder.encodedLen(fields);
+        const upper = self.encoder.encodedLenResponse(value);
         if (upper > self.send_block.len) return error.HeaderBlockTooLarge;
         const reserve = upper + 9 * headerFrameCount(upper);
         try self.checkBudget(reserve);
         try self.out.ensure(allocator, reserve);
-        const block = self.encoder.encode(fields, self.send_block) catch {
+        const block = self.encoder.encodeResponse(value, self.send_block) catch {
             return error.HeaderBlockTooLarge;
         };
 
@@ -1473,10 +1475,6 @@ const request_fields = [_]Header{
     .{ .name = ":path", .value = "/" },
 };
 
-const response_fields = [_]Header{
-    .{ .name = ":status", .value = "200" },
-};
-
 test "a client and server complete the settings handshake" {
     var client = try Session.init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
@@ -1554,7 +1552,7 @@ test "a request and response cross the session" {
         else => return error.TestUnexpectedResult,
     }
 
-    try server.submitResponse(testing.allocator, id, &response_fields, true);
+    try server.submitResponse(testing.allocator, id, .{ .status = .ok }, true);
     try transfer(&server, &client);
 
     const response_event = (try client.nextEvent(testing.allocator)).?;
@@ -1582,7 +1580,7 @@ test "DATA respects flow control and carries END_STREAM" {
     try transfer(&client, &server);
     _ = (try server.nextEvent(testing.allocator)).?;
 
-    try server.submitResponse(testing.allocator, id, &response_fields, false);
+    try server.submitResponse(testing.allocator, id, .{ .status = .ok }, false);
     try transfer(&server, &client);
     _ = (try client.nextEvent(testing.allocator)).?;
 
@@ -1613,7 +1611,7 @@ test "trailers end the response" {
     try transfer(&client, &server);
     _ = (try server.nextEvent(testing.allocator)).?;
 
-    try server.submitResponse(testing.allocator, id, &response_fields, false);
+    try server.submitResponse(testing.allocator, id, .{ .status = .ok }, false);
     try transfer(&server, &client);
     _ = (try client.nextEvent(testing.allocator)).?;
 
@@ -1665,7 +1663,7 @@ test "release returns DATA bytes to both windows" {
     const id = try client.submitRequest(testing.allocator, &request_fields, true);
     try transfer(&client, &server);
     _ = (try server.nextEvent(testing.allocator)).?;
-    try server.submitResponse(testing.allocator, id, &response_fields, false);
+    try server.submitResponse(testing.allocator, id, .{ .status = .ok }, false);
     try transfer(&server, &client);
     _ = (try client.nextEvent(testing.allocator)).?;
 
@@ -1764,7 +1762,7 @@ test "a small initial window makes submitData accept a prefix" {
     const id = try client.submitRequest(testing.allocator, &request_fields, true);
     try transfer(&client, &server);
     _ = (try server.nextEvent(testing.allocator)).?;
-    try server.submitResponse(testing.allocator, id, &response_fields, false);
+    try server.submitResponse(testing.allocator, id, .{ .status = .ok }, false);
     try transfer(&server, &client);
     _ = (try client.nextEvent(testing.allocator)).?;
 
@@ -1813,7 +1811,7 @@ test "a closed stream rejects DATA with STREAM_CLOSED" {
     const id = try client.submitRequest(testing.allocator, &request_fields, true);
     try transfer(&client, &server);
     _ = (try server.nextEvent(testing.allocator)).?;
-    try server.submitResponse(testing.allocator, id, &response_fields, true);
+    try server.submitResponse(testing.allocator, id, .{ .status = .ok }, true);
     try transfer(&server, &client);
     _ = (try client.nextEvent(testing.allocator)).?;
 
@@ -1898,7 +1896,7 @@ test "a normal closed stream rejects HEADERS as a connection error" {
     const id = try client.submitRequest(testing.allocator, &request_fields, true);
     try transfer(&client, &server);
     _ = (try server.nextEvent(testing.allocator)).?;
-    try server.submitResponse(testing.allocator, id, &response_fields, true);
+    try server.submitResponse(testing.allocator, id, .{ .status = .ok }, true);
     try transfer(&server, &client);
     _ = (try client.nextEvent(testing.allocator)).?;
 

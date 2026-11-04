@@ -30,6 +30,8 @@ const TableStorage = @import("TableStorage.zig");
 const Slot = TableStorage.Slot;
 const DynamicTable = dynamic_table.DynamicTable;
 const static_table = @import("static_table.zig");
+const response_mod = @import("../response.zig");
+const Response = response_mod.Response;
 
 pub const Error = error{
     /// The destination buffer is smaller than `encodedLen`.
@@ -79,14 +81,7 @@ pub const Encoder = struct {
     /// An upper bound on the block `encode` writes, pending size updates
     /// included. Size `out` with this.
     pub fn encodedLen(self: *const Encoder, headers: []const Header) usize {
-        var total: usize = 0;
-
-        if (self.pending_min) |min| {
-            total += prefix_int.encodedLen(@intCast(min), 5);
-            if (min != self.table.max_size) {
-                total += prefix_int.encodedLen(@intCast(self.table.max_size), 5);
-            }
-        }
+        var total: usize = self.pendingLen();
 
         for (headers) |header| {
             // A literal with a new name, raw bytes: the largest a field can
@@ -117,13 +112,7 @@ pub const Encoder = struct {
         if (out.len < self.encodedLen(headers)) return error.NoSpace;
 
         var pos: usize = 0;
-        if (self.pending_min) |min| {
-            writeInt(out, &pos, @intCast(min), 5, 0x20);
-            if (min != self.table.max_size) {
-                writeInt(out, &pos, @intCast(self.table.max_size), 5, 0x20);
-            }
-            self.pending_min = null;
-        }
+        self.writePending(out, &pos);
 
         for (headers, 0..) |header, index| {
             const mode: Mode = if (modes) |list| list[index] else .incremental;
@@ -132,6 +121,90 @@ pub const Encoder = struct {
 
         assert(pos <= out.len);
         return out[0..pos];
+    }
+
+    /// An upper bound on `encodeResponse` with the default incremental mode.
+    pub fn encodedLenResponse(self: *const Encoder, response: Response) usize {
+        var total = self.pendingLen();
+        total += fieldBound(":status", 3);
+        if (response.content_type) |value| {
+            total += fieldBound("content-type", value.len);
+        }
+        if (response.content_length != null) {
+            total += fieldBound("content-length", 20);
+        }
+        for (response.headers) |header| {
+            total += fieldBound(header.name, header.value.len);
+        }
+        return total;
+    }
+
+    /// Encode a typed response. The status and content-length text are made
+    /// here and live only for the call; the dynamic table copies what it
+    /// indexes. The extra headers and content type are borrowed from the
+    /// caller.
+    pub fn encodeResponse(
+        self: *Encoder,
+        response: Response,
+        out: []u8,
+    ) Error![]const u8 {
+        if (out.len < self.encodedLenResponse(response)) return error.NoSpace;
+
+        var pos: usize = 0;
+        self.writePending(out, &pos);
+
+        const status_text = response.status.text();
+        self.writeField(out, &pos, .{
+            .name = ":status",
+            .value = status_text[0..],
+        }, .incremental);
+
+        if (response.content_type) |value| {
+            self.writeField(out, &pos, .{
+                .name = "content-type",
+                .value = value,
+            }, .incremental);
+        }
+
+        if (response.content_length) |length| {
+            var length_buf: [20]u8 = undefined;
+            const text = std.fmt.bufPrint(&length_buf, "{d}", .{length}) catch unreachable;
+            self.writeField(out, &pos, .{
+                .name = "content-length",
+                .value = text,
+            }, .incremental);
+        }
+
+        for (response.headers) |header| {
+            self.writeField(out, &pos, header, .incremental);
+        }
+        return out[0..pos];
+    }
+
+    fn pendingLen(self: *const Encoder) usize {
+        var total: usize = 0;
+        if (self.pending_min) |min| {
+            total += prefix_int.encodedLen(@intCast(min), 5);
+            if (min != self.table.max_size) {
+                total += prefix_int.encodedLen(@intCast(self.table.max_size), 5);
+            }
+        }
+        return total;
+    }
+
+    fn writePending(self: *Encoder, out: []u8, pos: *usize) void {
+        if (self.pending_min) |min| {
+            writeInt(out, pos, @intCast(min), 5, 0x20);
+            if (min != self.table.max_size) {
+                writeInt(out, pos, @intCast(self.table.max_size), 5, 0x20);
+            }
+            self.pending_min = null;
+        }
+    }
+
+    fn fieldBound(name: []const u8, value_len: usize) usize {
+        return 1 + prefix_int.encodedLen(@intCast(name.len), 7) + name.len +
+            prefix_int.encodedLen(@intCast(value_len), 7) + value_len;
     }
 
     fn writeField(self: *Encoder, out: []u8, pos: *usize, header: Header, mode: Mode) void {
@@ -590,4 +663,33 @@ test "encodedLen is an upper bound" {
     const bound = encoder.encodedLen(&response_fields);
     const block = try encoder.encode(&response_fields, &block_buf);
     try testing.expect(bound >= block.len);
+}
+
+test "encodeResponse writes typed status, content type, and length" {
+    var encoder_memory: TableStorage.Buffer(4096) = undefined;
+    var encoder = Encoder.init(try .initBuffer(&encoder_memory, 4096));
+    var decoder_memory: TableStorage.Buffer(4096) = undefined;
+    var dec = decoder.Decoder.init(try .initBuffer(&decoder_memory, 4096));
+
+    const response: Response = .{
+        .status = .ok,
+        .content_type = "text/plain",
+        .content_length = 5,
+        .headers = &.{.{ .name = "x-check", .value = "done" }},
+    };
+    var block_buf: [256]u8 = undefined;
+    const block = try encoder.encodeResponse(response, &block_buf);
+
+    var fields_buf: [8]Header = undefined;
+    var bytes_buf: [256]u8 = undefined;
+    const fields = try dec.decode(block, &fields_buf, &bytes_buf);
+    try testing.expectEqual(@as(usize, 4), fields.items.len);
+    try testing.expectEqualStrings(":status", fields.items[0].name);
+    try testing.expectEqualStrings("200", fields.items[0].value);
+    try testing.expectEqualStrings("content-type", fields.items[1].name);
+    try testing.expectEqualStrings("text/plain", fields.items[1].value);
+    try testing.expectEqualStrings("content-length", fields.items[2].name);
+    try testing.expectEqualStrings("5", fields.items[2].value);
+    try testing.expectEqualStrings("x-check", fields.items[3].name);
+    try testing.expectEqualStrings("done", fields.items[3].value);
 }

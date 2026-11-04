@@ -24,6 +24,7 @@ const Event = session_mod.Event;
 const head = @import("../head.zig");
 const Header = @import("../../header.zig").Header;
 const Headers = @import("../../header.zig").Headers;
+const response_mod = @import("../../response.zig");
 
 const common = @import("common.zig");
 pub const Exchange = common.Exchange;
@@ -338,14 +339,20 @@ fn pumpAll(
     var progressed = false;
     for (slots) |*slot| {
         if (!slot.used or !slot.handler_called) continue;
-        const response = slot.exchange.response orelse continue;
+        const reply = slot.exchange.response orelse continue;
+        const response: response_mod.Response = .{
+            .status = reply.options.status,
+            .content_type = reply.options.content_type,
+            .content_length = reply.body.len,
+            .headers = reply.options.headers,
+        };
 
         if (!slot.headers_sent) {
-            const end = response.body.len == 0;
+            const end = reply.body.len == 0;
             session.submitResponse(
                 config.allocator,
                 slot.stream_id,
-                response.fields,
+                response,
                 end,
             ) catch |err| switch (err) {
                 error.WouldBlock => continue,
@@ -364,11 +371,11 @@ fn pumpAll(
             }
         }
 
-        while (slot.body_offset < response.body.len) {
+        while (slot.body_offset < reply.body.len) {
             const accepted = session.submitData(
                 config.allocator,
                 slot.stream_id,
-                response.body[slot.body_offset..],
+                reply.body[slot.body_offset..],
                 true,
             ) catch |err| switch (err) {
                 error.UnknownStream, error.StreamClosed => {
@@ -383,7 +390,7 @@ fn pumpAll(
             progressed = true;
         }
 
-        if (slot.body_offset == response.body.len) {
+        if (slot.body_offset == reply.body.len) {
             finishSlot(slot, handler, config, true);
             progressed = true;
         }

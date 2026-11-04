@@ -125,7 +125,9 @@ ready to depend on.
   SETTINGS, streams, HPACK, flow control, CONTINUATION assembly, and the
   outbound queue. `receive` and `send` move bytes; `nextEvent` returns decoded
   requests, responses, DATA, trailers, resets, and GOAWAY; the `submit*`
-  methods queue frames, and `submitSettings` sends a local SETTINGS change. The
+  methods queue frames, `submitResponse` takes a typed
+  `http.response.Response` (status and content length stay values until the
+  encoder writes them), and `submitSettings` sends a local SETTINGS change. The
   allocator is per call and never stored. Stream
   records and output chunks come from fixed-record pools, so a
   `FixedBufferAllocator` gives the connection a fixed ceiling. The h2c example

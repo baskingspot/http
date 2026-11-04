@@ -24,6 +24,7 @@ const Header = @import("../header.zig").Header;
 const Headers = @import("../header.zig").Headers;
 const Method = @import("../method.zig").Method;
 const Status = @import("../status.zig").Status;
+const response_mod = @import("../response.zig");
 
 pub const Error = error{
     /// A field name is empty, has a colon, or is not lowercase tchar.
@@ -52,6 +53,8 @@ pub const Error = error{
     InvalidProtocol,
     /// A connection-specific field is present, or `TE` is not `trailers`.
     ForbiddenField,
+    /// An outbound response put `content-length` in the extra fields.
+    DuplicateContentLength,
 };
 
 pub const RequestHead = struct {
@@ -170,6 +173,22 @@ pub fn trailers(fields: Headers) Error!Headers {
         try validateRegularField(field);
     }
     return fields;
+}
+
+/// Validate the typed outbound response. The status is in range, the content
+/// type is a legal field value, and every extra field is a regular field with
+/// no connection-specific semantics.
+pub fn validateResponse(value: response_mod.Response) Error!void {
+    const code = value.status.code();
+    if (code < 100 or code > 999) return error.InvalidStatus;
+    if (value.content_type) |content_type| try validateValue(content_type);
+
+    for (value.headers) |field| {
+        try validateValue(field.value);
+        try validateFieldName(field.name);
+        try validateRegularField(field);
+        if (mem.eql(u8, field.name, "content-length")) return error.DuplicateContentLength;
+    }
 }
 
 pub fn response(fields: Headers) Error!ResponseHead {
@@ -569,4 +588,25 @@ test "fuzz field sections never overrun the input" {
         "GET",
         "GET / HTTP/1.1",
     } });
+}
+
+test "outbound response validation" {
+    try validateResponse(.{ .status = .ok });
+    try validateResponse(.{
+        .status = .ok,
+        .content_type = "text/plain",
+        .content_length = 5,
+        .headers = &.{.{ .name = "x-check", .value = "done" }},
+    });
+    try testing.expectError(error.DuplicateContentLength, validateResponse(.{
+        .status = .ok,
+        .headers = &.{.{ .name = "content-length", .value = "5" }},
+    }));
+    try testing.expectError(error.InvalidStatus, validateResponse(.{
+        .status = @enumFromInt(99),
+    }));
+    try testing.expectError(error.InvalidFieldName, validateResponse(.{
+        .status = .ok,
+        .headers = &.{.{ .name = ":status", .value = "200" }},
+    }));
 }

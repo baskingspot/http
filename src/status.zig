@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+const assert = std.debug.assert;
 
 pub const Status = enum(u10) {
     @"continue" = 100, // RFC 9110 §15.2.1
@@ -91,6 +92,19 @@ pub const Status = enum(u10) {
     };
 
     /// The three-digit wire value.
+    /// The three ASCII digits of the wire status. The status must be 100..999;
+    /// `h2.head.validateResponse` enforces that before encoding.
+    pub fn text(self: Status) [3]u8 {
+        const value = self.code();
+        assert(value >= 100);
+        assert(value < 1000);
+        return .{
+            @intCast('0' + (value / 100) % 10),
+            @intCast('0' + (value / 10) % 10),
+            @intCast('0' + value % 10),
+        };
+    }
+
     pub fn code(self: Status) u16 {
         return @intFromEnum(self);
     }
@@ -231,4 +245,10 @@ test "phrase is the canonical spelling, null when unnamed" {
     try testing.expectEqualStrings("OK", Status.ok.phrase().?);
     try testing.expectEqualStrings("I'm a teapot", Status.teapot.phrase().?);
     try testing.expect(Status.parse(599).?.phrase() == null);
+}
+
+test "text is the three wire digits" {
+    try testing.expectEqualStrings("200", &Status.ok.text());
+    try testing.expectEqualStrings("404", &Status.not_found.text());
+    try testing.expectEqualStrings("500", &Status.internal_server_error.text());
 }

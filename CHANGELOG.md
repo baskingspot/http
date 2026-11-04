@@ -46,7 +46,9 @@ All notable changes to http are recorded here. The format follows
   bytes, `nextEvent` yields requests, responses, DATA, trailers, resets,
   SETTINGS, and GOAWAY, and `submit*` queues frames. SETTINGS, the stream table,
   HPACK, flow control, CONTINUATION assembly, and the outbound queue are
-  inside; sockets, TLS, and the event loop are not. The allocator is per call;
+  inside; sockets, TLS, and the event loop are not. `submitResponse` takes a
+  typed `http.response.Response`; the status and content length stay values
+  until the HPACK encoder writes them. The allocator is per call;
   stream records and output chunks come from `std.heap.MemoryPool`, so a
   `FixedBufferAllocator` sets a fixed ceiling. `submitData` returns the prefix
   flow control accepts, and `release` returns consumed bytes to both windows.

@@ -10,6 +10,7 @@ pub const head = @import("head.zig");
 pub const header_block = @import("header_block.zig");
 pub const session = @import("session.zig");
 pub const Session = session.Session;
+pub const Response = @import("../response.zig").Response;
 pub const settings = @import("settings.zig");
 pub const stream = @import("stream.zig");
 
