@@ -278,6 +278,25 @@ pub fn build(b: *std.Build) void {
     b.step("example", "Run the HTTP/1.1 example server")
         .dependOn(&run_example.step);
 
+    // The HTTP/1 client example is driven by the Go interop recipe.
+    const interop_client_mod = b.createModule(.{
+        .root_source_file = b.path("examples/http1_client.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "http", .module = mod }},
+    });
+    const interop_client = b.addExecutable(.{
+        .name = "http1-client",
+        .root_module = interop_client_mod,
+    });
+    b.step("interop-client-bin", "Build the HTTP/1 client interop example")
+        .dependOn(&interop_client.step);
+
+    const run_interop_client = b.addRunArtifact(interop_client);
+    if (b.args) |args| run_interop_client.addArgs(args);
+    b.step("interop-client", "Run the HTTP/1 client against the Go interop server")
+        .dependOn(&run_interop_client.step);
+
     // The h2c example: the frame codec and HPACK over blocking sockets.
     const h2_example_mod = b.createModule(.{
         .root_source_file = b.path("examples/http2_server.zig"),

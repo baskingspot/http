@@ -104,4 +104,6 @@ the adapter can offer one above `ClientConn`.
 
 Status 2026-11-05: `ClientConn` implements response heads, Content-Length,
 chunked, close-delimited, no-body, interim 1xx, keep-alive leftovers, and the
-body limit. The blocking adapter and Go interop lane are next.
+body limit. `h1.client.blocking.fetch` is the one-request adapter, and
+`just interop` checks it against a Go `net/http` server. Connection reuse in
+the adapter and a full test matrix are next.

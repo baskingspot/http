@@ -28,6 +28,11 @@ All notable changes to http are recorded here. The format follows
   `Exchange.arena` is the engine-owned allocator; it is reset to
   `Config.arena_retain_bytes` after completion.
 
+- `h1.client.blocking`: the first client adapter. `fetch` writes a request,
+  drives `ClientConn`, and copies the body into caller-owned storage. It has
+  no allocator and no connection reuse. `just interop` checks it against a Go
+  `net/http` server for Content-Length, chunked, and request-body echo.
+
 - `h1.engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
   connection at a time; `serve` drives one stream. The handler is the shared
   `Handler` vtable with `handle`, `complete`, and `report_error`. A handler

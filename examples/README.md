@@ -74,3 +74,14 @@ The server answers the first request with a chunked response; the client parses
 the response head and decodes the body. This is the useful stress test for the
 API: the parser sees a buffer that may hold a head, a body, and the next
 request, and the head slices go stale as soon as the buffer is reused.
+
+## HTTP/1 client interop
+
+```sh
+just interop
+```
+
+Builds `tools/http1-interop`, starts its Go `net/http` server on
+127.0.0.1:8091, and runs `examples/http1_client.zig` against the
+Content-Length, chunked, and request-body echo routes. The client uses
+`h1.client.blocking.fetch` with caller-owned buffers.

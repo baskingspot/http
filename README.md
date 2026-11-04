@@ -80,6 +80,11 @@ ready to depend on.
   close-delimited bodies, interim 1xx responses, keep-alive leftovers, and a
   caller-owned body limit. It allocates nothing and does not own a socket.
 
+- `h1.client.blocking`: a blocking one-request client over `std.Io.net`. It
+  writes a request with `h1.Writer`, drives `h1.ClientConn`, and copies the body
+  into caller-owned storage. It allocates nothing and does not reuse the
+  connection. `just interop` runs it against a Go `net/http` server.
+
 - `h1.engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
   connection at a time; `serve` drives one stream. The handler formats a
   response body with the exchange arena, and the connection machine handles

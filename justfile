@@ -120,6 +120,7 @@ lint:
     oxfmt --check README.md AGENTS.md .github
     actionlint
     zizmor .
+    test -z "$(gofmt -l tools)"
     just --fmt --check
 
 [doc("Format everything lint checks")]
@@ -181,6 +182,25 @@ check-example:
     zig build example-h2-bin
     zig build example-h2-readiness-bin
     zig build example-h2-tls-bin
+    zig build interop-client-bin
+
+[doc("Run the HTTP/1 client against a Go net/http server")]
+[group("test")]
+interop:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p .zig-cache
+    go build -C tools/http1-interop -o "$PWD/.zig-cache/http1-interop" .
+    .zig-cache/http1-interop >/tmp/http1-interop.log 2>&1 &
+    server_pid=$!
+    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    for _ in {1..50}; do
+        if curl -fsS http://127.0.0.1:8091/ >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.1
+    done
+    zig build interop-client
 
 [doc("Build and start the readiness example, run h2spec strict, and stop it")]
 [group("test")]
@@ -190,4 +210,4 @@ conformance-ci:
 
 [doc("Everything CI runs")]
 [group("ci")]
-ci: test lint check-example conformance-ci
+ci: test lint interop check-example conformance-ci
