@@ -3,6 +3,8 @@
 const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
+const mem = std.mem;
+const panic = std.debug.panic;
 
 const http = @import("http");
 const h1 = http.h1;
@@ -11,8 +13,8 @@ const engine = h1.engine.poll;
 const TestApp = struct {
     pub fn handle(_: *TestApp, exchange: *engine.Exchange) anyerror!void {
         const target = exchange.request.head.target;
-        if (std.mem.eql(u8, target, "/no-response")) return;
-        if (std.mem.eql(u8, target, "/big")) {
+        if (mem.eql(u8, target, "/no-response")) return;
+        if (mem.eql(u8, target, "/big")) {
             @memset(exchange.response_body, 'x');
             try exchange.respond(.{ .status = .ok }, exchange.response_body);
             return;
@@ -74,8 +76,9 @@ const Harness = struct {
         self.stop();
         self.server.deinit();
         if (self.result) |err| {
-            std.debug.panic("poll server failed: {s}", .{@errorName(err)});
+            panic("poll server failed: {s}", .{@errorName(err)});
         }
+        self.* = undefined;
     }
 
     fn runServer(self: *Harness) void {
@@ -106,7 +109,7 @@ fn readHead(stream: Io.net.Stream, io: Io, out: []u8) ![]u8 {
             error.EndOfStream => return error.EndOfStream,
             else => return err,
         };
-        if (std.mem.find(u8, out[0..used], "\r\n\r\n")) |end| {
+        if (mem.find(u8, out[0..used], "\r\n\r\n")) |end| {
             return out[0 .. end + 4];
         }
     }
@@ -144,9 +147,9 @@ test "poll serves pipelined requests" {
 
     var response: [2048]u8 = undefined;
     const got = try readAll(stream, h.io, &response);
-    try testing.expectEqual(2, std.mem.count(u8, got, "HTTP/1.1 200 OK"));
-    try testing.expect(std.mem.find(u8, got, "/one 0\n") != null);
-    try testing.expect(std.mem.find(u8, got, "/two 0\n") != null);
+    try testing.expectEqual(2, mem.count(u8, got, "HTTP/1.1 200 OK"));
+    try testing.expect(mem.find(u8, got, "/one 0\n") != null);
+    try testing.expect(mem.find(u8, got, "/two 0\n") != null);
 }
 
 test "poll sends 100 Continue before reading the body" {
@@ -171,8 +174,8 @@ test "poll sends 100 Continue before reading the body" {
     try send(stream, h.io, "hello");
     var response: [2048]u8 = undefined;
     const got = try readAll(stream, h.io, &response);
-    try testing.expect(std.mem.find(u8, got, "HTTP/1.1 200 OK") != null);
-    try testing.expect(std.mem.find(u8, got, "/ 5\n") != null);
+    try testing.expect(mem.find(u8, got, "HTTP/1.1 200 OK") != null);
+    try testing.expect(mem.find(u8, got, "/ 5\n") != null);
 }
 
 test "poll closes an idle connection" {
@@ -189,7 +192,7 @@ test "poll closes an idle connection" {
 
     var response: [512]u8 = undefined;
     const got = try readAll(stream, h.io, &response);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 408 Request Timeout\r\n"));
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 408 Request Timeout\r\n"));
 }
 
 test "poll stalled mid-head does not block another connection" {
@@ -207,8 +210,8 @@ test "poll stalled mid-head does not block another connection" {
 
     var response: [1024]u8 = undefined;
     const got = try readAll(other, h.io, &response);
-    try testing.expect(std.mem.find(u8, got, "HTTP/1.1 200 OK") != null);
-    try testing.expect(std.mem.find(u8, got, "/ 0\n") != null);
+    try testing.expect(mem.find(u8, got, "HTTP/1.1 200 OK") != null);
+    try testing.expect(mem.find(u8, got, "/ 0\n") != null);
 }
 
 test "poll closes a stalled mid-head at the head deadline" {
@@ -226,7 +229,7 @@ test "poll closes a stalled mid-head at the head deadline" {
 
     var response: [512]u8 = undefined;
     const got = try readAll(stream, h.io, &response);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 408 Request Timeout\r\n"));
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 408 Request Timeout\r\n"));
 }
 
 test "poll reads a POST body split across writes" {
@@ -246,8 +249,8 @@ test "poll reads a POST body split across writes" {
 
     var response: [1024]u8 = undefined;
     const got = try readAll(stream, h.io, &response);
-    try testing.expect(std.mem.find(u8, got, "HTTP/1.1 200 OK") != null);
-    try testing.expect(std.mem.find(u8, got, "/ 5\n") != null);
+    try testing.expect(mem.find(u8, got, "HTTP/1.1 200 OK") != null);
+    try testing.expect(mem.find(u8, got, "/ 5\n") != null);
 }
 
 test "poll stop ends the loop with a client mid-request" {
@@ -289,8 +292,8 @@ test "poll full slots leave a new connection in the backlog" {
 
     var response: [1024]u8 = undefined;
     const got = try readAll(waiting, h.io, &response);
-    try testing.expect(std.mem.find(u8, got, "HTTP/1.1 200 OK") != null);
-    try testing.expect(std.mem.find(u8, got, "/ 0\n") != null);
+    try testing.expect(mem.find(u8, got, "HTTP/1.1 200 OK") != null);
+    try testing.expect(mem.find(u8, got, "/ 0\n") != null);
 }
 
 test "poll answers a handler that forgets to respond" {
@@ -309,7 +312,7 @@ test "poll answers a handler that forgets to respond" {
 
     var response: [1024]u8 = undefined;
     const got = try readAll(stream, h.io, &response);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 500 Internal Server Error\r\n"));
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 500 Internal Server Error\r\n"));
 }
 
 test "poll listener does not set SO_REUSEPORT" {
@@ -342,7 +345,7 @@ test "poll a slow reader hits the write deadline" {
         stream.socket.handle,
         std.posix.SOL.SOCKET,
         std.posix.SO.RCVBUF,
-        std.mem.asBytes(&receive_buffer),
+        mem.asBytes(&receive_buffer),
     );
 
     try send(
@@ -355,7 +358,7 @@ test "poll a slow reader hits the write deadline" {
 
     var response: [4096]u8 = undefined;
     const got = try readAll(stream, h.io, &response);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(got.len < 4 * 1024 * 1024);
 }
 

@@ -8,6 +8,8 @@
 const std = @import("std");
 const Io = std.Io;
 const testing = std.testing;
+const mem = std.mem;
+
 const h1 = @import("../root.zig");
 const Header = @import("../../header.zig").Header;
 
@@ -77,10 +79,11 @@ pub fn serve(
 ) !void {
     // `readVec` writes straight into the ServerConn request buffer. A nonzero
     // reader buffer would accept bytes outside that buffer.
-    var read_buffer: [0]u8 = .{};
-    var reader = stream.reader(io, &read_buffer);
+    var stream_reader = stream.reader(io, &.{});
+    const reader = &stream_reader.interface;
     var write_buffer: [1024]u8 = undefined;
-    var writer = stream.writer(io, &write_buffer);
+    var stream_writer = stream.writer(io, &write_buffer);
+    const writer = &stream_writer.interface;
 
     var conn: h1.ServerConn = .init(.{
         .request_buffer = config.request_buffer,
@@ -106,7 +109,7 @@ pub fn serve(
                     Handler,
                     io,
                     &conn,
-                    &writer,
+                    writer,
                     handler,
                     config,
                     request,
@@ -118,7 +121,7 @@ pub fn serve(
                 }
             },
             .need_more => {
-                if (try writePending(io, &conn, &writer)) |done| {
+                if (try writePending(io, &conn, writer)) |done| {
                     switch (done) {
                         .read, .keep_alive => event = conn.advance(now(io)),
                         .close, .close_after_drain => return,
@@ -128,12 +131,12 @@ pub fn serve(
                     const dst = conn.recvBuffer();
                     if (dst.len == 0) return error.NoBuffer;
                     var iovecs: [1][]u8 = .{dst};
-                    const n = reader.interface.readVec(&iovecs) catch |err| switch (err) {
+                    const n = reader.readVec(&iovecs) catch |err| switch (err) {
                         error.EndOfStream => {
                             switch (conn.eof(now(io))) {
                                 .closed => return,
                                 .reject => {
-                                    _ = try writePending(io, &conn, &writer);
+                                    _ = try writePending(io, &conn, writer);
                                     return;
                                 },
                                 else => unreachable,
@@ -145,7 +148,7 @@ pub fn serve(
                 }
             },
             .reject => {
-                _ = try writePending(io, &conn, &writer);
+                _ = try writePending(io, &conn, writer);
                 return;
             },
             .closed => return,
@@ -157,7 +160,7 @@ fn handleRequest(
     comptime Handler: type,
     io: Io,
     conn: *h1.ServerConn,
-    writer: *Io.net.Stream.Writer,
+    writer: *Io.Writer,
     handler: *Handler,
     config: Config,
     request: h1.ServerConn.Request,
@@ -185,15 +188,15 @@ fn report(comptime Handler: type, handler: *Handler, err: anyerror) void {
 fn writePending(
     io: Io,
     conn: *h1.ServerConn,
-    writer: *Io.net.Stream.Writer,
+    writer: *Io.Writer,
 ) !?h1.ServerConn.Done {
     while (true) {
         const slices = conn.sendSlices();
         if (slices.head.len == 0 and slices.body.len == 0) return null;
 
         var vec: [2][]const u8 = .{ slices.head, slices.body };
-        try writer.interface.writeVecAll(&vec);
-        try writer.interface.flush();
+        try writer.writeVecAll(&vec);
+        try writer.flush();
 
         switch (conn.sent(slices.head.len + slices.body.len, now(io))) {
             .more => continue,
@@ -223,26 +226,28 @@ const TestClient = struct {
 
         var read_buffer: [256]u8 = undefined;
         var write_buffer: [256]u8 = undefined;
-        var reader = stream.reader(self.io, &read_buffer);
-        var writer = stream.writer(self.io, &write_buffer);
+        var stream_reader = stream.reader(self.io, &read_buffer);
+        const reader = &stream_reader.interface;
+        var stream_writer = stream.writer(self.io, &write_buffer);
+        const writer = &stream_writer.interface;
 
-        try writer.interface.writeAll(
+        try writer.writeAll(
             "GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
         );
-        try writer.interface.flush();
+        try writer.flush();
 
         var response: [1024]u8 = undefined;
         var used: usize = 0;
         while (used < response.len) {
             var iovecs: [1][]u8 = .{response[used..]};
-            used += reader.interface.readVec(&iovecs) catch |err| switch (err) {
+            used += reader.readVec(&iovecs) catch |err| switch (err) {
                 error.EndOfStream => break,
                 else => return err,
             };
         }
 
-        try testing.expect(std.mem.find(u8, response[0..used], "HTTP/1.1 200 OK") != null);
-        try testing.expect(std.mem.find(u8, response[0..used], "hello\n") != null);
+        try testing.expect(mem.find(u8, response[0..used], "HTTP/1.1 200 OK") != null);
+        try testing.expect(mem.find(u8, response[0..used], "hello\n") != null);
     }
 };
 

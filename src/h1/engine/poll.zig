@@ -17,8 +17,8 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 
-const h1 = @import("../root.zig");
 const Header = @import("../../header.zig").Header;
+const h1 = @import("../root.zig");
 pub const Exchange = @import("common.zig").Exchange;
 
 comptime {
@@ -50,6 +50,15 @@ const Slot = struct {
     response_head: []u8,
     response_body: []u8,
     drain: []u8,
+
+    fn initConn(self: *Slot, config: Config) void {
+        self.conn = .init(.{
+            .request_buffer = self.request,
+            .headers = self.headers,
+            .response_buffer = self.response_head,
+            .limits = limits(config),
+        });
+    }
 };
 
 const PollOwner = union(enum) {
@@ -266,7 +275,7 @@ pub fn Server(comptime Handler: type) type {
                 const fd: linux.fd_t = @intCast(rc);
                 slot.fd = fd;
                 slot.state = .read;
-                initSlotConn(slot, self.config);
+                slot.initConn(self.config);
                 slot.conn.start(now);
                 self.active += 1;
             }
@@ -478,7 +487,7 @@ fn makeSlot(allocator: Allocator, config: Config) !Slot {
     errdefer allocator.free(drain);
 
     return .{
-        .conn = initConn(.{
+        .conn = .init(.{
             .request_buffer = request,
             .headers = headers,
             .response_buffer = response_head,
@@ -490,19 +499,6 @@ fn makeSlot(allocator: Allocator, config: Config) !Slot {
         .response_body = response_body,
         .drain = drain,
     };
-}
-
-fn initSlotConn(slot: *Slot, config: Config) void {
-    slot.conn = initConn(.{
-        .request_buffer = slot.request,
-        .headers = slot.headers,
-        .response_buffer = slot.response_head,
-        .limits = limits(config),
-    });
-}
-
-fn initConn(config: h1.ServerConn.Config) h1.ServerConn {
-    return .init(config);
 }
 
 fn limits(config: Config) h1.ServerConn.Limits {

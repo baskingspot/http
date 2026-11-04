@@ -7,6 +7,8 @@
 const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
+const mem = std.mem;
+const panic = std.debug.panic;
 
 const http = @import("http");
 const engine = http.h1.engine.blocking;
@@ -58,7 +60,7 @@ const Harness = struct {
     fn init(self: *Harness, config: engine.Config) !void {
         self.io = testing.io;
         self.handler = .{};
-        const address = try Io.net.IpAddress.parseLiteral("127.0.0.1:0");
+        const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
         self.listener = try address.listen(self.io, .{
             .mode = .stream,
             .reuse_address = true,
@@ -71,15 +73,16 @@ const Harness = struct {
             .handler = &self.handler,
             .config = config,
         };
-        self.thread = try std.Thread.spawn(.{}, Server.run, .{&self.server});
+        self.thread = try .spawn(.{}, Server.run, .{&self.server});
     }
 
     fn deinit(self: *Harness) void {
         self.thread.join();
         self.listener.deinit(self.io);
         if (self.server.result) |err| {
-            std.debug.panic("server failed: {s}", .{@errorName(err)});
+            panic("server failed: {s}", .{@errorName(err)});
         }
+        self.* = undefined;
     }
 
     fn connect(self: *Harness) !Io.net.Stream {
@@ -118,7 +121,7 @@ const Client = struct {
                 error.EndOfStream => return error.EndOfStream,
                 else => return err,
             };
-            if (std.mem.find(u8, out[0..used], "\r\n\r\n")) |end| {
+            if (mem.find(u8, out[0..used], "\r\n\r\n")) |end| {
                 return out[0 .. end + 4];
             }
         }
@@ -141,11 +144,11 @@ const Client = struct {
 const TestApp = struct {
     pub fn handle(_: *TestApp, exchange: *engine.Exchange) anyerror!void {
         const target = exchange.request.head.target;
-        if (std.mem.eql(u8, target, "/204")) {
+        if (mem.eql(u8, target, "/204")) {
             try exchange.respond(.{ .status = .no_content }, "");
             return;
         }
-        if (std.mem.eql(u8, target, "/304")) {
+        if (mem.eql(u8, target, "/304")) {
             try exchange.respond(.{ .status = .not_modified }, "");
             return;
         }
@@ -181,9 +184,9 @@ test "keep-alive and pipelined requests" {
 
     var response: [2048]u8 = undefined;
     const got = try client.readAll(&response);
-    try testing.expectEqual(2, std.mem.count(u8, got, "HTTP/1.1 200 OK"));
-    try testing.expect(std.mem.find(u8, got, "/one 0\n") != null);
-    try testing.expect(std.mem.find(u8, got, "/two 0\n") != null);
+    try testing.expectEqual(2, mem.count(u8, got, "HTTP/1.1 200 OK"));
+    try testing.expect(mem.find(u8, got, "/one 0\n") != null);
+    try testing.expect(mem.find(u8, got, "/two 0\n") != null);
 }
 
 test "HEAD keeps Content-Length and drops the body" {
@@ -201,9 +204,9 @@ test "HEAD keeps Content-Length and drops the body" {
 
     var response: [2048]u8 = undefined;
     const got = try client.readAll(&response);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
-    try testing.expect(std.mem.find(u8, got, "Content-Length: 4") != null);
-    try testing.expect(std.mem.find(u8, got, "/ 0\n") == null);
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(mem.find(u8, got, "Content-Length: 4") != null);
+    try testing.expect(mem.find(u8, got, "/ 0\n") == null);
 }
 
 test "Expect: 100-continue" {
@@ -229,8 +232,8 @@ test "Expect: 100-continue" {
     try client.send("hello");
     var response: [2048]u8 = undefined;
     const got = try client.readAll(&response);
-    try testing.expect(std.mem.find(u8, got, "HTTP/1.1 200 OK") != null);
-    try testing.expect(std.mem.find(u8, got, "/ 5\n") != null);
+    try testing.expect(mem.find(u8, got, "HTTP/1.1 200 OK") != null);
+    try testing.expect(mem.find(u8, got, "/ 5\n") != null);
 }
 
 test "HTTP/1.0 has no Host and no 100 Continue" {
@@ -251,9 +254,9 @@ test "HTTP/1.0 has no Host and no 100 Continue" {
 
     var response: [2048]u8 = undefined;
     const got = try client.readAll(&response);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.0 200 OK\r\n"));
-    try testing.expect(std.mem.find(u8, got, "100 Continue") == null);
-    try testing.expect(std.mem.find(u8, got, "/ 5\n") != null);
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.0 200 OK\r\n"));
+    try testing.expect(mem.find(u8, got, "100 Continue") == null);
+    try testing.expect(mem.find(u8, got, "/ 5\n") != null);
 }
 
 test "missing Host is 400" {
@@ -271,7 +274,7 @@ test "missing Host is 400" {
 
     var response: [2048]u8 = undefined;
     const got = try client.readAll(&response);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 400 Bad Request\r\n"));
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 400 Bad Request\r\n"));
 }
 
 test "body over the limit is 413" {
@@ -291,7 +294,7 @@ test "body over the limit is 413" {
 
     var response: [2048]u8 = undefined;
     const got = try client.readAll(&response);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 413 Payload Too Large\r\n"));
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 413 Payload Too Large\r\n"));
 }
 
 test "chunked request is 501" {
@@ -311,7 +314,7 @@ test "chunked request is 501" {
 
     var response: [2048]u8 = undefined;
     const got = try client.readAll(&response);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 501 Not Implemented\r\n"));
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 501 Not Implemented\r\n"));
 }
 
 test "bad Expect is 417" {
@@ -331,7 +334,7 @@ test "bad Expect is 417" {
 
     var response: [2048]u8 = undefined;
     const got = try client.readAll(&response);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 417 Expectation Failed\r\n"));
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 417 Expectation Failed\r\n"));
 }
 
 test "duplicate Host is 400" {
@@ -351,7 +354,7 @@ test "duplicate Host is 400" {
 
     var response: [2048]u8 = undefined;
     const got = try client.readAll(&response);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 400 Bad Request\r\n"));
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 400 Bad Request\r\n"));
 }
 
 test "Transfer-Encoding with Content-Length is 400" {
@@ -372,7 +375,7 @@ test "Transfer-Encoding with Content-Length is 400" {
 
     var response: [2048]u8 = undefined;
     const got = try client.readAll(&response);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 400 Bad Request\r\n"));
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 400 Bad Request\r\n"));
 }
 
 test "a full request buffer is 431" {
@@ -392,7 +395,7 @@ test "a full request buffer is 431" {
 
     var response: [2048]u8 = undefined;
     const got = try client.readAll(&response);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 431 Request Header Fields Too Large\r\n"));
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 431 Request Header Fields Too Large\r\n"));
 }
 
 test "unsupported version is 505" {
@@ -410,7 +413,7 @@ test "unsupported version is 505" {
 
     var response: [2048]u8 = undefined;
     const got = try client.readAll(&response);
-    try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 505 HTTP Version Not Supported\r\n"));
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 505 HTTP Version Not Supported\r\n"));
 }
 
 test "204 and 304 omit Content-Length and the body" {
@@ -431,9 +434,9 @@ test "204 and 304 omit Content-Length and the body" {
 
     var response: [2048]u8 = undefined;
     const got = try client.readAll(&response);
-    try testing.expect(std.mem.find(u8, got, "HTTP/1.1 204 No Content\r\n") != null);
-    try testing.expect(std.mem.find(u8, got, "HTTP/1.1 304 Not Modified\r\n") != null);
-    try testing.expect(std.mem.find(u8, got, "Content-Length") == null);
+    try testing.expect(mem.find(u8, got, "HTTP/1.1 204 No Content\r\n") != null);
+    try testing.expect(mem.find(u8, got, "HTTP/1.1 304 Not Modified\r\n") != null);
+    try testing.expect(mem.find(u8, got, "Content-Length") == null);
 }
 
 test "a body split across writes" {
@@ -454,6 +457,6 @@ test "a body split across writes" {
 
     var response: [2048]u8 = undefined;
     const got = try client.readAll(&response);
-    try testing.expect(std.mem.find(u8, got, "HTTP/1.1 200 OK") != null);
-    try testing.expect(std.mem.find(u8, got, "/ 5\n") != null);
+    try testing.expect(mem.find(u8, got, "HTTP/1.1 200 OK") != null);
+    try testing.expect(mem.find(u8, got, "/ 5\n") != null);
 }
