@@ -153,6 +153,11 @@ check-example:
     zig build example-h2-bin
     zig build example-h2-readiness-bin
 
+[doc("Build and start the readiness example, run h2spec strict, and stop it")]
+[group("test")]
+conformance-ci:
+    just conformance-run-readiness -S -o 2
+
 [doc("Everything CI runs")]
 [group("ci")]
-ci: test lint check-example
+ci: test lint check-example conformance-ci

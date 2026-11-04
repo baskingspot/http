@@ -7,6 +7,7 @@
 //! around this type.
 
 const std = @import("std");
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
@@ -33,6 +34,10 @@ pub const Options = struct {
     body_bytes: usize = 64 * 1024,
     arena_retain_bytes: usize = 4 * 1024,
     session: SessionOptions = .{ .role = .server },
+    /// Time from accept until the first request head; zero disables.
+    head_timeout: Io.Duration = .zero,
+    /// Time from a request head to its END_STREAM; zero disables.
+    body_timeout: Io.Duration = .zero,
 };
 
 const Slot = struct {
@@ -48,6 +53,7 @@ const Slot = struct {
     handler_called: bool = false,
     headers_sent: bool = false,
     body_offset: usize = 0,
+    body_deadline: ?Io.Timestamp = null,
     exchange: Exchange = undefined,
 };
 
@@ -58,6 +64,9 @@ pub const Connection = struct {
     slots: []Slot,
     body_bytes: usize,
     arena_retain_bytes: usize,
+    head_timeout: Io.Duration,
+    body_timeout: Io.Duration,
+    head_deadline: ?Io.Timestamp,
 
     pub fn init(options: Options) !Connection {
         var session_options = options.session;
@@ -78,6 +87,9 @@ pub const Connection = struct {
             .slots = slots,
             .body_bytes = options.body_bytes,
             .arena_retain_bytes = options.arena_retain_bytes,
+            .head_timeout = options.head_timeout,
+            .body_timeout = options.body_timeout,
+            .head_deadline = null,
         };
     }
 
@@ -105,15 +117,38 @@ pub const Connection = struct {
         return self.session.hasPendingOutput();
     }
 
+    /// Queue a GOAWAY and leave the connection open for its active streams.
+    pub fn beginDrain(self: *Connection) !void {
+        if (self.session.isClosed()) return;
+        try self.session.submitGoaway(self.allocator, .no_error);
+    }
+
+    /// Arm the connection-level head deadline. A zero timeout leaves it unset.
+    pub fn start(self: *Connection, now: Io.Timestamp) void {
+        if (self.head_timeout.nanoseconds > 0) {
+            self.head_deadline = now.addDuration(self.head_timeout);
+        }
+    }
+
+    /// The earliest head or body deadline, if any.
+    pub fn deadline(self: *const Connection) ?Io.Timestamp {
+        var at = self.head_deadline;
+        for (self.slots) |*slot| {
+            if (!slot.used) continue;
+            if (slot.body_deadline) |body_deadline| at = earliest(at, body_deadline);
+        }
+        return at;
+    }
+
     /// Deliver every complete event currently buffered, start the handlers
     /// whose requests are complete, and queue as much response output as flow
     /// control accepts. Returns whether anything happened.
-    pub fn drive(self: *Connection) !bool {
+    pub fn drive(self: *Connection, now: Io.Timestamp) !bool {
         if (self.session.isClosed()) return false;
 
         var progressed = false;
         while (try self.session.nextEvent(self.allocator)) |event| {
-            try self.processEvent(event);
+            try self.processEvent(event, now);
             progressed = true;
             if (self.session.isClosed()) break;
         }
@@ -125,7 +160,7 @@ pub const Connection = struct {
         return progressed;
     }
 
-    fn processEvent(self: *Connection, event: Event) !void {
+    fn processEvent(self: *Connection, event: Event, now: Io.Timestamp) !void {
         switch (event) {
             .request => |request| {
                 const slot = allocSlot(self.slots) orelse {
@@ -145,6 +180,11 @@ pub const Connection = struct {
                 slot.handler_called = false;
                 slot.headers_sent = false;
                 slot.body_offset = 0;
+                slot.body_deadline = null;
+                self.head_deadline = null;
+                if (!request.end_stream and self.body_timeout.nanoseconds > 0) {
+                    slot.body_deadline = now.addDuration(self.body_timeout);
+                }
 
                 slot.request_head = copyHead(
                     slot.arena.allocator(),
@@ -231,7 +271,10 @@ pub const Connection = struct {
                         @intCast(data.bytes.len),
                     );
                 }
-                if (data.end_stream) slot.request_complete = true;
+                if (data.end_stream) {
+                    slot.request_complete = true;
+                    slot.body_deadline = null;
+                }
             },
 
             .trailers => |trailers| {
@@ -249,6 +292,7 @@ pub const Connection = struct {
                     return err;
                 };
                 slot.request_complete = trailers.end_stream;
+                if (trailers.end_stream) slot.body_deadline = null;
             },
 
             .reset => |reset| {
@@ -389,6 +433,7 @@ pub const Connection = struct {
         slot.handler_called = false;
         slot.headers_sent = false;
         slot.body_offset = 0;
+        slot.body_deadline = null;
         slot.exchange = undefined;
     }
 
@@ -398,6 +443,11 @@ pub const Connection = struct {
         }
     }
 };
+
+fn earliest(a: ?Io.Timestamp, b: Io.Timestamp) Io.Timestamp {
+    const at = a orelse return b;
+    return if (at.nanoseconds <= b.nanoseconds) at else b;
+}
 
 fn findSlot(slots: []Slot, stream_id: u31) ?*Slot {
     for (slots) |*slot| {

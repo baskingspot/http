@@ -34,7 +34,11 @@ pub const Config = struct {
     idle_timeout: Io.Duration = .zero,
     write_timeout: Io.Duration = .zero,
     total_timeout: Io.Duration = .zero,
+    head_timeout: Io.Duration = .zero,
+    body_timeout: Io.Duration = .zero,
     accept_backoff: Io.Duration = .fromMilliseconds(50),
+    /// How long a stop waits for active streams to finish before closing.
+    drain_timeout: Io.Duration = .fromSeconds(5),
 };
 
 const State = enum { free, read, write };
@@ -66,7 +70,9 @@ pub fn Server(comptime Wait: type) type {
         slots: []Slot,
         wait: Wait,
         active: usize,
-        accept_paused_until: ?Io.Timestamp = null,
+        accept_paused_until: ?Io.Timestamp,
+        draining: bool,
+        drain_deadline: ?Io.Timestamp,
 
         pub fn init(
             io: Io,
@@ -116,6 +122,8 @@ pub fn Server(comptime Wait: type) type {
                 .wait = waiter,
                 .active = 0,
                 .accept_paused_until = null,
+                .draining = false,
+                .drain_deadline = null,
             };
         }
 
@@ -142,6 +150,7 @@ pub fn Server(comptime Wait: type) type {
 
         pub fn run(self: *Self) !void {
             while (true) {
+                if (self.draining and self.active == 0) return;
                 const now = clock(self.io);
                 try self.expire(now);
 
@@ -160,12 +169,42 @@ pub fn Server(comptime Wait: type) type {
 
                 const after = clock(self.io);
                 for (ready) |event| switch (event.owner) {
-                    .stop => return,
+                    .stop => {
+                        if (!self.draining) {
+                            self.beginDrain(after) catch |err| {
+                                self.handler.vtable.report_error(self.handler.ptr, err);
+                                self.draining = true;
+                            };
+                        }
+                    },
                     .listener => {
                         if (event.flags.contains(.readable)) try self.acceptAll(after);
                     },
                     .slot => |index| self.handleSlot(index, event.flags, after),
                 };
+            }
+        }
+
+        fn beginDrain(self: *Self, now: Io.Timestamp) !void {
+            self.draining = true;
+            self.accept_paused_until = null;
+            self.wait.remove(.listener);
+            if (self.config.drain_timeout.nanoseconds > 0) {
+                self.drain_deadline = now.addDuration(self.config.drain_timeout);
+            }
+
+            for (self.slots, 0..) |*slot, index| {
+                if (slot.state == .free) continue;
+                slot.conn.beginDrain() catch |err| {
+                    self.handler.vtable.report_error(self.handler.ptr, err);
+                    self.closeSlot(index);
+                    continue;
+                };
+                if (slot.state == .read) {
+                    self.transition(index, .write, now);
+                } else if (slot.write_started == null) {
+                    slot.write_started = now;
+                }
             }
         }
 
@@ -201,12 +240,15 @@ pub fn Server(comptime Wait: type) type {
                     .body_bytes = self.config.body_bytes,
                     .arena_retain_bytes = self.config.arena_retain_bytes,
                     .session = self.config.session,
+                    .head_timeout = self.config.head_timeout,
+                    .body_timeout = self.config.body_timeout,
                 }) catch |err| {
                     P.close(fd);
                     slot.state = .free;
                     self.handler.vtable.report_error(self.handler.ptr, err);
                     continue;
                 };
+                slot.conn.start(now);
                 slot.state = .read;
                 self.active += 1;
                 try self.wait.set(.{ .slot = index }, fd, .initOne(.read));
@@ -257,7 +299,7 @@ pub fn Server(comptime Wait: type) type {
                     if (consumed == 0) break;
                     offset += consumed;
                 }
-                _ = slot.conn.drive() catch |err| {
+                _ = slot.conn.drive(now) catch |err| {
                     self.handler.vtable.report_error(self.handler.ptr, err);
                     self.closeSlot(index);
                     return;
@@ -291,7 +333,7 @@ pub fn Server(comptime Wait: type) type {
                     slot.out_start = 0;
                     slot.out_end = slot.conn.send(slot.out_buffer);
                     if (slot.out_end == 0) {
-                        _ = slot.conn.drive() catch |err| {
+                        _ = slot.conn.drive(now) catch |err| {
                             self.handler.vtable.report_error(self.handler.ptr, err);
                             self.closeSlot(index);
                             return;
@@ -364,6 +406,17 @@ pub fn Server(comptime Wait: type) type {
         }
 
         fn expire(self: *Self, now: Io.Timestamp) !void {
+            if (self.draining) {
+                if (self.drain_deadline) |until| {
+                    if (now.durationTo(until).nanoseconds <= 0) {
+                        for (self.slots, 0..) |*slot, index| {
+                            if (slot.state != .free) self.closeSlot(index);
+                        }
+                        self.drain_deadline = null;
+                    }
+                }
+            }
+
             if (self.accept_paused_until) |until| {
                 if (now.durationTo(until).nanoseconds <= 0) {
                     self.accept_paused_until = null;
@@ -397,11 +450,15 @@ pub fn Server(comptime Wait: type) type {
                     start.addDuration(self.config.write_timeout),
                 );
             }
+            if (slot.conn.deadline()) |at| {
+                deadline = earliest(deadline, at);
+            }
             return deadline;
         }
 
         fn pollTimeout(self: *const Self, now: Io.Timestamp) i32 {
             var deadline: ?Io.Timestamp = self.accept_paused_until;
+            if (self.drain_deadline) |at| deadline = earliest(deadline, at);
             for (self.slots) |*slot| {
                 if (slot.state == .free) continue;
                 if (self.slotDeadline(slot)) |at| {

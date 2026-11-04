@@ -95,14 +95,14 @@ pub fn serve(
     var out_buffer: [4096]u8 = undefined;
 
     while (true) {
-        _ = conn.drive() catch |err| {
+        _ = conn.drive(Io.Timestamp.zero) catch |err| {
             flush(&conn, w, &out_buffer) catch |flush_err| {
                 _ = @errorName(flush_err);
             };
             return err;
         };
         try flush(&conn, w, &out_buffer);
-        if (try conn.drive()) continue;
+        if (try conn.drive(Io.Timestamp.zero)) continue;
         if (conn.isClosed()) {
             try flush(&conn, w, &out_buffer);
             return;
@@ -124,7 +124,7 @@ pub fn serve(
             }
             offset += consumed;
 
-            _ = conn.drive() catch |err| {
+            _ = conn.drive(Io.Timestamp.zero) catch |err| {
                 flush(&conn, w, &out_buffer) catch |flush_err| {
                     _ = @errorName(flush_err);
                 };

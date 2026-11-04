@@ -209,3 +209,114 @@ test "an idle deadline closes the connection" {
     };
     try testing.expectEqual(@as(usize, 0), n);
 }
+
+test "a head deadline closes a silent connection" {
+    var harness: Harness = undefined;
+    try harness.initWithConfig(.{
+        .allocator = testing.allocator,
+        .max_connections = 4,
+        .max_streams = 4,
+        .body_bytes = 1024,
+        .head_timeout = .fromMilliseconds(50),
+    });
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var buf: [16]u8 = undefined;
+    var vecs: [1][]u8 = .{&buf};
+    const n = reader.interface.readVec(&vecs) catch |err| switch (err) {
+        error.EndOfStream => return,
+        error.ReadFailed => return err,
+    };
+    try testing.expectEqual(@as(usize, 0), n);
+}
+
+test "a body deadline closes a request that never ends" {
+    var harness: Harness = undefined;
+    try harness.initWithConfig(.{
+        .allocator = testing.allocator,
+        .max_connections = 4,
+        .max_streams = 4,
+        .body_bytes = 1024,
+        .body_timeout = .fromMilliseconds(50),
+    });
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+    const r = &reader.interface;
+    const w = &writer.interface;
+
+    var session = try http.h2.Session.init(testing.allocator, .{
+        .role = .client,
+        .max_streams = 4,
+    });
+    defer session.deinit(testing.allocator);
+
+    try flush(&session, w);
+    try handshake(&session, r, w);
+    _ = try session.submitRequest(testing.allocator, &request_fields, false);
+    try flush(&session, w);
+
+    try testing.expect((try nextEvent(&session, r)) == null);
+}
+
+test "stop sends GOAWAY and drains the connection" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+    const r = &reader.interface;
+    const w = &writer.interface;
+
+    var session = try http.h2.Session.init(testing.allocator, .{
+        .role = .client,
+        .max_streams = 4,
+    });
+    defer session.deinit(testing.allocator);
+
+    try flush(&session, w);
+    try handshake(&session, r, w);
+    _ = try session.submitRequest(testing.allocator, &request_fields, true);
+    try flush(&session, w);
+
+    var saw_data = false;
+    while (!saw_data) {
+        const event = try nextEvent(&session, r) orelse return error.EndOfStream;
+        switch (event) {
+            .data => |data| {
+                try testing.expect(data.end_stream);
+                saw_data = true;
+            },
+            .settings => try flush(&session, w),
+            .connection_error => return error.ConnectionError,
+            else => {},
+        }
+    }
+
+    harness.server.engine.requestStop();
+    while (true) {
+        const event = try nextEvent(&session, r) orelse return error.EndOfStream;
+        switch (event) {
+            .goaway => |goaway| {
+                try testing.expectEqual(http.h2.frame.ErrorCode.no_error, goaway.code);
+                return;
+            },
+            .settings => try flush(&session, w),
+            else => {},
+        }
+    }
+}
