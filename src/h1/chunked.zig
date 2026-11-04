@@ -103,10 +103,8 @@ pub const Decoder = struct {
         }
         if (digits == 0) return error.Invalid;
 
-        if (!line.atEnd()) {
-            if (line.peek() != ';') return error.Invalid;
-            try skipExtensions(&line);
-        }
+        skipOws(&line);
+        if (!line.atEnd()) try skipExtensions(&line);
 
         self.remaining = value;
         self.state = if (value == 0) .trailers else .data;

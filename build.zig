@@ -60,6 +60,23 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // The picohttpparser case table. It lives outside the package for the same
+    // reason as the interop fixture: it imports `http` and is not shipped.
+    const corpus_mod = b.createModule(.{
+        .root_source_file = b.path("tests/h1_corpus.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "http", .module = mod }},
+    });
+    const corpus_tests = b.addTest(.{
+        .root_module = corpus_mod,
+        .test_runner = test_runner,
+    });
+    const run_corpus = b.addRunArtifact(corpus_tests);
+    run_corpus.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
+    if (b.args) |args| run_corpus.addArgs(args);
+    test_step.dependOn(&run_corpus.step);
+
     // Fuzzing needs the built-in runner: testingx's main rejects fuzz mode
     // because the fuzzer speaks a private protocol. `just fuzz` drives this.
     const fuzz_tests = b.addTest(.{ .root_module = mod });
