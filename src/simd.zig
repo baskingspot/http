@@ -42,7 +42,7 @@ pub fn first(
     if (comptime (available and lanes_in_order)) {
         while (index + Block.width <= bytes.len) : (index += Block.width) {
             const lanes: Block.Vec = bytes[index..][0..Block.width].*;
-            const hits = mask(lanes);
+            const hits = @call(.always_inline, mask, .{lanes});
             if (@reduce(.Or, hits)) {
                 const bits: Block.Mask = @bitCast(hits);
                 return index + @as(usize, @ctz(bits));
