@@ -21,6 +21,13 @@ All notable changes to http are recorded here. The format follows
   policy responses. Every timeout is zero: a blocking syscall cannot enforce
   the connection deadlines. Evented engines are separate.
 
+- `h2.head.request` and `h2.head.response`: field-section validation and the
+  two heads. Pseudo-headers are ordered, deduplicated, and checked per
+  direction; `:method`, `:scheme`, `:path`, `:authority`, `:protocol`, and
+  `:status` follow RFC 9113 §8.3. Field names are lowercase `tchar`, values
+  reject controls and edge whitespace, and the connection-specific fields are
+  rejected. The regular fields come back as `Headers`; cookie lines are not
+  combined.
 - `Status`: the status codes as an open enum. Named codes are constants; any
   other three-digit code is still a value. `Status.code()`, `Status.class()`,
   `Status.phrase()`, and `Status.parse()` work on the wire number, and the
@@ -102,9 +109,21 @@ All notable changes to http are recorded here. The format follows
   or not EOS's prefix.
 - `hpack.static_table`: the 61 predefined fields from RFC 7541 Appendix A, as
   `Header` values with static storage.
-- `hpack.DynamicTable`: the per-connection table over a caller-owned arena and
-  slot array, with the RFC 7541 §4.1 size accounting, §4.4 eviction, and
-  compaction.
+- `hpack.TableStorage`: the dynamic table's byte arena, slot records, and
+  parallel hash array. `init(allocator, max_size)` allocates one chunk for all
+  three from a runtime SETTINGS_HEADER_TABLE_SIZE. `initBuffer(memory, max_size)`
+  wraps a caller blob and returns `error.BufferTooSmall` when it is too short;
+  `TableStorage.Buffer(max_size)` is the blob type.
+- `hpack.DynamicTable`: the per-connection table over `TableStorage`, with the
+  RFC 7541 §4.1 size accounting, §4.4 eviction, compaction, and
+  `find`/`findName` over a contiguous hash array.
+- `hpack.static_table.find` and `hpack.static_table.findName`: name and
+  name-and-value lookup over a comptime map, instead of a 61-entry scan.
+- `hpack.Encoder` and `hpack.Mode`: header block encoding for HTTP/2.
+  Incremental indexing is the default, an exact name and value reuse an
+  indexed field, and Huffman is chosen only when it is strictly shorter.
+  `setMaxSize` follows a SETTINGS change and emits the size update, including
+  the minimum-first pair RFC 7541 §4.2 needs after a reduction and a growth.
 - `hpack.Decoder`: header block decoding for HTTP/2. Decoded fields are copied
   into a caller-owned buffer, so a field never borrows a dynamic-table entry.
   `decode` returns `Headers`; `decodeFlags` also records the RFC 7541 §6.2.3

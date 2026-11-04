@@ -92,11 +92,26 @@ ready to depend on.
   the EOS prefix padding. An eight-bit root table covers every letter and
   digit, so the canonical scan is the rare path.
 - `hpack`: HPACK for HTTP/2. `static_table` is the RFC's 61 fields,
-  `DynamicTable` is the per-connection table over caller-owned storage, and
-  `hpack.Decoder` turns one complete header block into `Header` values copied
-  into the caller's buffer. `decodeFlags` also records the RFC 7541 §6.2.3
-  never-indexed flag for an intermediary that re-encodes. The Appendix C
-  request and response sequences are the tests. There is no encoder yet.
+  `DynamicTable` is the per-connection table; `TableStorage` is its bytes,
+  slot records, and hash array, either allocated once from an allocator or
+  wrapped over a caller byte buffer. `hpack.Decoder` turns one complete header block
+  into `Header` values copied into the caller's buffer, and `hpack.Encoder`
+  writes one. `decodeFlags`
+  records the RFC 7541 §6.2.3 never-indexed flag, and `encodeModes` takes one
+  `Mode` per field. The encoder indexes by default, reuses an exact pair as an
+  indexed field, Huffman-codes only when that is strictly shorter, and sends
+  the table size update a SETTINGS change requires. The Appendix C request and
+  response sequences are the tests.
+- `h2.frame`: sans-I/O HTTP/2 framing (RFC 9113 §4, §6). `parse` takes the
+  bytes so far and returns the frame header and a typed payload; `Writer`
+  fills a caller buffer and patches the 24-bit length. Frame syntax only:
+  stream state, settings, and CONTINUATION assembly belong above it. h2c and
+  h2 over TLS share it.
+- `h2.head`: request and response heads over the field list HPACK produced
+  (RFC 9113 §8.2, §8.3). Pseudo-headers are extracted and validated, the
+  regular fields come back as `Headers`, and CONNECT and extended CONNECT are
+  handled. Malformed sections are a stream error PROTOCOL_ERROR. Cookie lines
+  are not combined; the caller owns that storage.
 - `content_length`: `Content-Length` parsing and combination. Repeated values
   must agree, a comma list of identical values is accepted, and non-digits,
   conflicts, and overflow are errors. `null` means the field was absent.
@@ -131,6 +146,12 @@ const length = try http.content_length.parse(&.{ "42", "42" }); // 42
 `nix develop` provides the toolchain. `just ci` runs what CI runs, `just bench`
 runs the benchmarks, `just fuzz` drives the fuzz targets with the built-in
 runner, and `just example` runs the HTTP/1.1 server example.
+
+`just example-h2` runs a primitive h2c server on `127.0.0.1:8081`. Poke it with
+`curl -v --http2-prior-knowledge http://127.0.0.1:8081/`, or with the devshell's
+`nghttp -v http://127.0.0.1:8081/` to see the frames. It handles the preface,
+SETTINGS, PING, HEADERS through `h2.head`, and a fixed 200 response; flow
+control and stream state are not there yet.
 
 ## License
 

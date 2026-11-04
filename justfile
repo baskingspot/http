@@ -66,12 +66,18 @@ example-poll:
 example-uring:
     zig build example-uring
 
-[doc("Build the HTTP/1.1 examples without running them")]
+[doc("Run the primitive HTTP/2 h2c example server on 127.0.0.1:8081")]
+[group("example")]
+example-h2:
+    zig build example-h2
+
+[doc("Build the HTTP/1.1 and HTTP/2 examples without running them")]
 [group("example")]
 check-example:
     zig build example-bin
     zig build example-poll-bin
     zig build example-uring-bin
+    zig build example-h2-bin
 
 [doc("Everything CI runs")]
 [group("ci")]

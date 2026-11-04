@@ -164,6 +164,25 @@ pub fn build(b: *std.Build) void {
     b.step("example", "Run the HTTP/1.1 example server")
         .dependOn(&run_example.step);
 
+    // The h2c example: the frame codec and HPACK over blocking sockets.
+    const h2_example_mod = b.createModule(.{
+        .root_source_file = b.path("examples/http2_server.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "http", .module = mod }},
+    });
+    const h2_example = b.addExecutable(.{
+        .name = "http2-server",
+        .root_module = h2_example_mod,
+    });
+    b.step("example-h2-bin", "Build the HTTP/2 h2c example server")
+        .dependOn(&h2_example.step);
+
+    const run_h2_example = b.addRunArtifact(h2_example);
+    if (b.args) |args| run_h2_example.addArgs(args);
+    b.step("example-h2", "Run the HTTP/2 h2c example server")
+        .dependOn(&run_h2_example.step);
+
     // The poll example is Linux-only for now. The steps exist everywhere so
     // `check-example` is portable; only Linux gets a target to build.
     const poll_example_bin = b.step("example-poll-bin", "Build the HTTP/1.1 poll example server");

@@ -10,6 +10,7 @@ pub const content_length = @import("content_length.zig");
 pub const engine = @import("engine/root.zig");
 pub const encoding = @import("encoding.zig");
 pub const h1 = @import("h1/root.zig");
+pub const h2 = @import("h2/root.zig");
 pub const hpack = @import("hpack/root.zig");
 pub const huffman = @import("huffman.zig");
 pub const Cursor = @import("Cursor.zig");
@@ -35,6 +36,7 @@ test {
     _ = content_length;
     _ = engine;
     _ = h1;
+    _ = h2;
     _ = hpack;
     _ = huffman;
     _ = prefix_int;
