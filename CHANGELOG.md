@@ -31,10 +31,22 @@ All notable changes to http are recorded here. The format follows
   `RequestHead.method` is `?Method` and `method_token` keeps the exact wire
   bytes; `ResponseHead.status` is `Status`; `version` is the effective version
   after RFC 9110 §6.2 and `wire_version` keeps the wire pair. Both heads carry
-  `Headers`. Both
-  report `error.Incomplete` until a whole head arrives, take `last_len` for a
-  resumable completeness check, and reject bare LF, obs-fold, and whitespace
-  before the colon.
+  `Headers`. Both report `error.Incomplete` until a whole head arrives, take
+  `last_len` for a resumable completeness check, and reject bare LF, obs-fold,
+  and whitespace before the colon.
+- `h1.framing.request` and `h1.framing.response`: body framing per RFC 9112
+  §6.3. The result is `.none`, `.length`, `.chunked`, `.close`, or `.tunnel`.
+  TE with CL, TE on an HTTP/1.0 message, and a request whose final coding is
+  not `chunked` are errors.
+- `transfer_encoding.summarize`: the `Transfer-Encoding` coding list in field
+  order, with the final coding, a seen/last `chunked` flag, parameter parsing
+  (including quoted values), and rejection of repeated or parameterized
+  `chunked`.
+- `content_length.Parser`: `Content-Length` accumulation one field line at a
+  time for a caller that already has a field view. `parse` remains the slice
+  form.
+- `Version` and `WireVersion`: the effective version and the exact wire pair,
+  exported at the package root and from `h1`.
 - `content_length.parse`: `Content-Length` parsing and duplicate
   combination. Conflicting values, non-digits, and overflow are errors;
   `null` means the field was absent.

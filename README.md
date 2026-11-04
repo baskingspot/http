@@ -21,6 +21,10 @@ ready to depend on.
   `contains(field, token)` tests membership without allocating; `iterator`
   yields trimmed elements. Empty elements are ignored, and the comparison
   folds ASCII case.
+- `transfer_encoding`: `Transfer-Encoding` parsing. `summarize` walks the
+  field lines in order and returns the final coding, whether `chunked`
+  appeared, and whether it was last. Repeated `chunked` and parameters on it
+  are errors. Parameters are parsed, including quoted values with commas.
 - `Method`: the conventional nine request methods as a local enum.
   `Method.token(.GET)` is `"GET"`, and `Method.parse("GET")` is exact and
   case-sensitive. An unlisted token stays a slice and `parse` returns null.
@@ -44,15 +48,19 @@ ready to depend on.
   head arrives, and take `last_len` so a client trickling bytes cannot force a
   rescan. Strict where RFC 9112 allows leniency: bare LF, obs-fold, whitespace
   before the colon, and lenient start-line whitespace are rejected.
+  `h1.framing` decides the body from a head: `.none`, `.length`, `.chunked`,
+  `.close`, or `.tunnel` (RFC 9112 §6.3). It rejects TE with CL, TE on an
+  HTTP/1.0 message, and a request whose final coding is not `chunked`.
 - `content_length`: `Content-Length` parsing and combination. Repeated values
   must agree, a comma list of identical values is accepted, and non-digits,
-  conflicts, and overflow are errors. `null` means the field was absent. The
-  caller owns the rule that `Transfer-Encoding` and `Content-Length` cannot
-  both frame a request.
+  conflicts, and overflow are errors. `null` means the field was absent.
+  `content_length.Parser` feeds one field line at a time for a caller that
+  already has a field view. The caller owns the rule that `Transfer-Encoding`
+  and `Content-Length` cannot both frame a request; `h1.framing` applies it.
 
 Ranges, entity tags, dates, media types, and form decoding are next. No server,
 no middleware, and no message or connection types: those depend on an I/O
-runtime, and this package stops at the message head.
+runtime, and this package stops at the message head and its framing.
 
 ## Usage
 

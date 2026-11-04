@@ -129,8 +129,6 @@ Ordered by what blocks a usable HTTP/1.1 message parser.
 | Area | RFC 9112 | State | What is missing |
 | --- | --- | --- | --- |
 | Field section as its own entry point | §5 | private | `parseHeaders` is embedded in the head parser. Trailers and callers that already parsed a start line need a public field-section parser. |
-| Transfer-Encoding field | §6.1 | none | Coding list with parameters, `chunked` must be final, no parameters on `chunked`. `token_list` cannot do this. |
-| Message body framing | §6.3 | none | The ordered rules: no body for HEAD/1xx/204/304, tunnel for CONNECT 2xx, TE overrides CL, chunked final, otherwise CL, otherwise close for a response and none for a request. `content_length.parse` exists but h1 does not call it. |
 | Chunked decoding | §7.1 | none | Resumable state machine, chunk-size overflow, chunk extensions (parse and ignore), last-chunk, data spans reads. |
 | Trailer section | §7.1.2, RFC 9110 §6.5.1 | none | Parse field lines after the last chunk; do not merge fields that are not mergeable. |
 | Persistence | §9.3 | none | HTTP/1.1 default persistent, HTTP/1.0 default close, `Connection: close` / `keep-alive` tokens. `Headers.containsToken` is the building block. |
@@ -142,20 +140,18 @@ Ordered by what blocks a usable HTTP/1.1 message parser.
 Fixed during this review: `scanLine` searched only for `\r`, so a bare LF in
 a field value or reason phrase returned `Incomplete` and waited for more
 bytes. It now stops at the first control byte and rejects anything that is not
-CR, in the same pass. `just test` has 64 tests, including the new cases. The
-bench now wires hparse 0.2.0 in as a lazy, dev-only dependency and builds every
-imported module at ReleaseFast.
+CR, in the same pass. `Transfer-Encoding` parsing and the RFC 9112 §6.3 body
+decision now live in `transfer_encoding` and `h1.framing`. `just test` has 77
+tests, including the new cases. The bench wires hparse 0.2.0 in as a lazy,
+dev-only dependency and builds every imported module at ReleaseFast.
 
 ## Recommended order
 
 1. Expose the field-section parser. It is the trailer parser.
-2. Add `h1.framing`: a pure decision over `Headers`, version, method, and
-   status. This connects `content_length` to h1 and is the gate for every
-   body-reading API.
-3. Add the chunked decoder over the framing result.
-4. Add trailers on top of the field-section parser.
-5. Add the persistence helper.
-6. Port the picohttpparser corpus with the deliberate divergences marked.
+2. Add the chunked decoder over the framing result.
+3. Add trailers on top of the field-section parser.
+4. Add the persistence helper.
+5. Port the picohttpparser corpus with the deliberate divergences marked.
 
-Framing first is deliberate: chunked, trailers, and persistence all need to
-know whether there is a body before they mean anything.
+Framing is in place. Chunked is next because it is the only framing result that
+needs a state machine.

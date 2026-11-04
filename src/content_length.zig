@@ -26,10 +26,14 @@ const ows = @import("ows.zig");
 
 pub const Error = error{ Invalid, Conflicting, Overflow };
 
-/// The one length named by the field, or `null` when the field is absent.
-pub fn parse(values: []const []const u8) Error!?u64 {
-    var length: ?u64 = null;
-    for (values) |value| {
+/// A streaming `Content-Length` accumulator. `feed` one field line at a time
+/// when the caller already has a field view; `parse` is the slice form.
+pub const Parser = struct {
+    length: ?u64 = null,
+
+    /// Add one field line. Repetition is allowed only when every value is the
+    /// same decimal number.
+    pub fn feed(self: *Parser, value: []const u8) Error!void {
         if (value.len == 0) return error.Invalid;
 
         var digits_seen = false;
@@ -46,18 +50,39 @@ pub fn parse(values: []const []const u8) Error!?u64 {
                     return error.Overflow;
                 },
             };
-            if (length) |existing| {
+            if (self.length) |existing| {
                 if (existing != parsed) {
                     @branchHint(.unlikely);
                     return error.Conflicting;
                 }
             } else {
-                length = parsed;
+                self.length = parsed;
             }
         }
         if (!digits_seen) return error.Invalid;
     }
-    return length;
+
+    /// The combined length, or `null` when no field line was fed.
+    pub fn finish(self: Parser) ?u64 {
+        return self.length;
+    }
+};
+
+/// The one length named by the field, or `null` when the field is absent.
+pub fn parse(values: []const []const u8) Error!?u64 {
+    var parser: Parser = .{};
+    for (values) |value| try parser.feed(value);
+    return parser.finish();
+}
+
+test "Parser: feed one line at a time" {
+    var parser: Parser = .{};
+    try testing.expectEqual(@as(?u64, null), parser.finish());
+    try parser.feed("42");
+    try testing.expectEqual(@as(?u64, 42), parser.finish());
+    try parser.feed("42");
+    try testing.expectEqual(@as(?u64, 42), parser.finish());
+    try testing.expectError(error.Conflicting, parser.feed("43"));
 }
 
 test "parse: one value" {

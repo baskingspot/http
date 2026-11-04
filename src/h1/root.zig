@@ -34,17 +34,13 @@ const Header = @import("../header.zig").Header;
 const Headers = @import("../header.zig").Headers;
 const Method = @import("../method.zig").Method;
 const Status = @import("../status.zig").Status;
+const version_mod = @import("../version.zig");
 
-/// The two decimal digits from the start-line, exactly as sent.
-/// RFC 9112 §2.3: `HTTP-version = HTTP-name "/" DIGIT "." DIGIT`.
-pub const WireVersion = packed struct(u16) {
-    major: u8,
-    minor: u8,
-};
+pub const WireVersion = version_mod.WireVersion;
+pub const Version = version_mod.Version;
+const effectiveVersion = version_mod.effective;
 
-/// The version this parser processes a message as. A message with major
-/// version 1 and a higher minor version is processed as 1.1 (RFC 9110 §6.2).
-pub const Version = enum { @"HTTP/1.0", @"HTTP/1.1" };
+pub const framing = @import("framing.zig");
 
 pub const Error = error{
     /// The buffer ends before the head does. Read more and retry.
@@ -399,19 +395,21 @@ fn parseVersion(cursor: *Cursor) Error!WireVersion {
     // else, including 1.2 through 1.9, falls through to the general parser.
     if (cursor.has(8)) {
         const chunk = mem.readVarInt(u64, cursor.buf[@intCast(cursor.pos)..][0..8], .little);
-        if (chunk == http_1_0) {
-            cursor.pos += 8;
-            return .{ .major = 1, .minor = 0 };
-        }
+        // 1.1 is the common case; 1.0 is next.
         if (chunk == http_1_1) {
             cursor.pos += 8;
             return .{ .major = 1, .minor = 1 };
+        }
+        if (chunk == http_1_0) {
+            cursor.pos += 8;
+            return .{ .major = 1, .minor = 0 };
         }
     }
     return parseVersionSlow(cursor);
 }
 
 fn parseVersionSlow(cursor: *Cursor) Error!WireVersion {
+    @branchHint(.unlikely);
     // RFC 9112 §2.3: the name is case-sensitive. A little-endian read of the
     // five bytes is one compare instead of five branches.
     const http_prefix: u40 = 'H' |
@@ -429,17 +427,6 @@ fn parseVersionSlow(cursor: *Cursor) Error!WireVersion {
     const minor = try cursor.expectDigit();
 
     return .{ .major = major, .minor = minor };
-}
-
-/// RFC 9110 §6.2: a recipient that implements major version 1 and receives a
-/// higher minor version processes the message as its highest supported minor.
-/// The wire pair stays in `wire_version`; this is the effective version.
-fn effectiveVersion(wire: WireVersion) Error!Version {
-    return switch (wire) {
-        .{ .major = 1, .minor = 0 } => .@"HTTP/1.0",
-        .{ .major = 1, .minor = 1 } => .@"HTTP/1.1",
-        else => if (wire.major == 1) .@"HTTP/1.1" else error.UnsupportedVersion,
-    };
 }
 
 /// RFC 9112 §4: `status-code = 3DIGIT`.
