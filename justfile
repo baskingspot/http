@@ -105,29 +105,6 @@ conformance-run-tls *ARGS:
     fi
     h2spec -t -k -h 127.0.0.1 -p 8443 {{ ARGS }}
 
-[doc("Build and run the TLS readiness example, run h2spec, then stop it; port 8443 must be free")]
-[group("test")]
-conformance-run-tls-readiness *ARGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    zig build example-h2-tls-readiness >/tmp/http2-tls-readiness-conformance.log 2>&1 &
-    build_pid=$!
-    trap 'pkill -f http2-tls-readiness 2>/dev/null || true; kill "$build_pid" 2>/dev/null || true' EXIT
-    ready=0
-    for _ in {1..50}; do
-        if (exec 3<>/dev/tcp/127.0.0.1/8443) 2>/dev/null; then
-            exec 3>&-
-            ready=1
-            break
-        fi
-        sleep 0.1
-    done
-    if [ "$ready" -ne 1 ]; then
-        echo "http2-tls-readiness did not start on 127.0.0.1:8443" >&2
-        exit 1
-    fi
-    h2spec -t -k -h 127.0.0.1 -p 8443 {{ ARGS }}
-
 [doc("Run h2load against the example on 127.0.0.1:8081 (start `just example-h2` first)")]
 [group("test")]
 load *ARGS:
@@ -194,11 +171,6 @@ example-h2-readiness:
 example-h2-tls:
     zig build example-h2-tls
 
-[doc("Run the readiness HTTP/2 TLS example server on 127.0.0.1:8443")]
-[group("example")]
-example-h2-tls-readiness:
-    zig build example-h2-tls-readiness
-
 [doc("Build the HTTP/1.1 and HTTP/2 examples without running them")]
 [group("example")]
 check-example:
@@ -210,7 +182,6 @@ check-example:
     zig build example-h2-bin
     zig build example-h2-readiness-bin
     zig build example-h2-tls-bin
-    zig build example-h2-tls-readiness-bin
     zig build example-h1-tls-bin
     zig build example-h1-tls-client-bin
     zig build interop-client-bin
@@ -269,7 +240,7 @@ interop-tls:
 [group("test")]
 conformance-ci:
     just conformance-run-readiness -S -o 2
-    just conformance-run-tls-readiness -S -o 2
+    just conformance-run-tls -S -o 2
 
 [doc("Everything CI runs")]
 [group("ci")]
