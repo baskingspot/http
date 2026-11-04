@@ -35,21 +35,19 @@ const fmt = std.fmt;
 const math = std.math;
 const builtin = @import("builtin");
 
+const Cursor = @import("../Cursor.zig");
 const Header = @import("../header.zig").Header;
 const Headers = @import("../header.zig").Headers;
 const Method = @import("../method.zig").Method;
 const Status = @import("../status.zig").Status;
-const Cursor = @import("../Cursor.zig");
 const version_mod = @import("../version.zig");
-
 pub const WireVersion = version_mod.WireVersion;
 pub const Version = version_mod.Version;
 const effectiveVersion = version_mod.effective;
-
 pub const chunked = @import("chunked.zig");
 pub const framing = @import("framing.zig");
-pub const Writer = @import("writer.zig").Writer;
 pub const persistent = @import("persistence.zig").persistent;
+pub const Writer = @import("Writer.zig");
 
 pub const Error = error{
     /// The buffer ends before the head does. Read more and retry.

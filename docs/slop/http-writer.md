@@ -90,7 +90,7 @@ slice cannot express.
 
 ## Recommendation
 
-A is implemented in `src/h1/writer.zig` as `h1.Writer`, which carries a
+A is implemented in `src/h1/Writer.zig` as `h1.Writer`, which carries a
 caller-owned `*std.Io.Writer`: request and status lines, fields, `endFields`,
 `contentLength`, `body`, and `chunked`/`chunk`/`lastChunk`. The blocking example
 uses the connection's writer; the io_uring example uses a fixed buffer writer
