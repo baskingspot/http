@@ -14,12 +14,12 @@ const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
 
-const simd = @import("../simd.zig");
 const Header = @import("../header.zig").Header;
 const Method = @import("../method.zig").Method;
+const simd = @import("../simd.zig");
 const Status = @import("../status.zig").Status;
 const Version = @import("../version.zig").Version;
-const h1 = @import("root.zig");
+const syntax = @import("syntax.zig");
 
 const Writer = @This();
 
@@ -170,63 +170,34 @@ pub fn assumeLastChunk(self: Writer, trailers: []const Header) Error!void {
     try self.writer.writeAll("\r\n");
 }
 
-const width = simd.Block.width;
-const Vec = simd.Block.Vec;
-const vector_ok = simd.available;
-
 /// The tchar set is scattered, and the writer uses this on short field names
 /// and method tokens. The scalar table wins there; a vector mask is a
 /// follow-up only if a profile says otherwise.
 fn validTchar(bytes: []const u8) bool {
-    for (bytes) |byte| if (!h1.isTchar(byte)) return false;
+    for (bytes) |byte| if (!syntax.isTchar(byte)) return false;
     return true;
 }
 
 fn validFieldValue(bytes: []const u8) bool {
-    var index: usize = 0;
-    if (comptime vector_ok) {
-        while (index + width <= bytes.len) : (index += width) {
-            const lanes: Vec = bytes[index..][0..width].*;
-            const ctl = (lanes < @as(Vec, @splat(0x20))) &
-                (lanes != @as(Vec, @splat('\t')));
-            const del = lanes == @as(Vec, @splat(0x7f));
-            if (@reduce(.Or, ctl | del)) return false;
-        }
-    }
-    while (index < bytes.len) : (index += 1) {
-        if (!h1.isFieldValueByte(bytes[index])) return false;
-    }
-    return true;
+    return simd.first(bytes, 0, syntax.fieldValueMask, syntax.fieldValueStop) == null;
 }
 
 fn validTarget(bytes: []const u8) bool {
-    var index: usize = 0;
-    if (comptime vector_ok) {
-        while (index + width <= bytes.len) : (index += width) {
-            const lanes: Vec = bytes[index..][0..width].*;
-            const bad = (lanes < @as(Vec, @splat(0x21))) |
-                (lanes > @as(Vec, @splat(0x7e)));
-            if (@reduce(.Or, bad)) return false;
-        }
-    }
-    while (index < bytes.len) : (index += 1) {
-        if (!h1.isTargetByte(bytes[index])) return false;
-    }
-    return true;
+    return simd.first(bytes, 0, syntax.targetMask, syntax.targetStop) == null;
 }
 
 fn scalarFieldValue(bytes: []const u8) bool {
-    for (bytes) |byte| if (!h1.isFieldValueByte(byte)) return false;
+    for (bytes) |byte| if (!syntax.isFieldValueByte(byte)) return false;
     return true;
 }
 
 fn scalarTarget(bytes: []const u8) bool {
-    for (bytes) |byte| if (!h1.isTargetByte(byte)) return false;
+    for (bytes) |byte| if (!syntax.isTargetByte(byte)) return false;
     return true;
 }
 
 test "vector validation agrees with the scalar tables" {
-    var buffer: [width + 3]u8 = undefined;
+    var buffer: [simd.Block.width + 3]u8 = undefined;
     for (0..256) |value| {
         for (0..buffer.len) |at| {
             @memset(&buffer, 'a');

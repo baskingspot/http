@@ -35,10 +35,11 @@ const fmt = std.fmt;
 const math = std.math;
 
 const Cursor = @import("../Cursor.zig");
-const simd = @import("../simd.zig");
 const Header = @import("../header.zig").Header;
 const Headers = @import("../header.zig").Headers;
 const Method = @import("../method.zig").Method;
+const simd = @import("../simd.zig");
+const syntax = @import("syntax.zig");
 const Status = @import("../status.zig").Status;
 const version_mod = @import("../version.zig");
 pub const WireVersion = version_mod.WireVersion;
@@ -161,7 +162,7 @@ pub fn parseRequest(
 }
 
 fn parseRequestInner(buf: []const u8, storage: []Header) Error!ParsedRequest {
-    var cursor = Cursor.init(buf);
+    var cursor: Cursor = .init(buf);
     // RFC 9112 §2.2: a server SHOULD ignore empty lines before the request-line.
     try skipLeadingEmptyLines(&cursor);
 
@@ -210,7 +211,7 @@ pub fn parseResponse(
 }
 
 fn parseResponseInner(buf: []const u8, storage: []Header) Error!ParsedResponse {
-    var cursor = Cursor.init(buf);
+    var cursor: Cursor = .init(buf);
     const wire_version = try parseVersion(&cursor);
     const version = try effectiveVersion(wire_version);
     try expect(&cursor, ' ');
@@ -259,7 +260,7 @@ pub fn parseFieldSection(
         state.searched = @intCast(buf.len);
         return error.Incomplete;
     }
-    var cursor = Cursor.init(buf);
+    var cursor: Cursor = .init(buf);
     const headers = parseHeaders(&cursor, storage) catch |err| {
         if (err == error.Incomplete) state.searched = @intCast(buf.len);
         return err;
@@ -310,43 +311,25 @@ fn headComplete(buf: []const u8, last_len: u32) bool {
     return findHeadEnd(buf, start) != null;
 }
 
-/// The shared byte width. `lanes_in_order` is false on a big-endian target, so
-/// the mask bit order below stays lane 0 = low bit.
-const width = simd.Block.width;
-const Vec = simd.Block.Vec;
-const Mask = simd.Block.Mask;
-const vector_scans = simd.lanes_in_order;
-
 /// The first index of `CRLF CRLF` at or after `start`, or null. The vector
-/// path scans for CR and checks the three following bytes; the scalar path
-/// covers the tail and every target without vectors.
+/// path finds CR candidates; the scalar reference is kept for the tests.
 fn findHeadEnd(buf: []const u8, start: u32) ?u32 {
-    if (comptime !vector_scans) return findHeadEndScalar(buf, @intCast(start));
-
     var index: usize = start;
-    while (index + width <= buf.len) : (index += width) {
-        const chunk: Vec = buf[index..][0..width].*;
-        var mask: Mask = @bitCast(chunk == @as(Vec, @splat('\r')));
-        while (mask != 0) : (mask &= mask - 1) {
-            const at = index + @as(usize, @ctz(mask));
-            if (at + 4 <= buf.len and
-                buf[at + 1] == '\n' and
-                buf[at + 2] == '\r' and
-                buf[at + 3] == '\n')
-            {
-                return @intCast(at);
-            }
+    while (simd.first(buf, index, syntax.crMask, syntax.crStop)) |at| {
+        if (at + 4 <= buf.len and
+            buf[at + 1] == '\n' and
+            buf[at + 2] == '\r' and
+            buf[at + 3] == '\n')
+        {
+            return @intCast(at);
         }
+        index = at + 1;
     }
-    return findHeadEndScalarFrom(buf, index);
+    return null;
 }
 
 fn findHeadEndScalar(buf: []const u8, start: usize) ?u32 {
-    return findHeadEndScalarFrom(buf, start);
-}
-
-fn findHeadEndScalarFrom(buf: []const u8, from: usize) ?u32 {
-    var index = from;
+    var index = start;
     while (index + 4 <= buf.len) : (index += 1) {
         if (buf[index] == '\r' and
             buf[index + 1] == '\n' and
@@ -390,7 +373,7 @@ fn scanToken(cursor: *Cursor, delimiter: u8) Error![]const u8 {
             cursor.pos = index;
             return cursor.slice(start, index);
         }
-        if (!tchar_table[byte]) return error.Invalid;
+        if (!syntax.tchar_table[byte]) return error.Invalid;
     }
     return error.Incomplete;
 }
@@ -401,33 +384,11 @@ fn scanToken(cursor: *Cursor, delimiter: u8) Error![]const u8 {
 /// US-ASCII in the same pass.
 fn scanTarget(cursor: *Cursor) Error![]const u8 {
     const start = cursor.pos;
-    var index: usize = start;
-
-    if (comptime vector_scans) {
-        while (index + width <= cursor.buf.len) : (index += width) {
-            const chunk: Vec = cursor.buf[index..][0..width].*;
-            const bad = (chunk < @as(Vec, @splat(0x21))) |
-                (chunk > @as(Vec, @splat(0x7e)));
-            if (@reduce(.Or, bad)) {
-                const mask: Mask = @bitCast(bad);
-                const at = index + @as(usize, @ctz(mask));
-                if (cursor.buf[at] != ' ' or at == start) return error.Invalid;
-                cursor.pos = @intCast(at);
-                return cursor.slice(start, @intCast(at));
-            }
-        }
-    }
-
-    while (index < cursor.buf.len) : (index += 1) {
-        const byte = cursor.buf[index];
-        if (byte == ' ') {
-            if (index == start) return error.Invalid;
-            cursor.pos = @intCast(index);
-            return cursor.slice(start, @intCast(index));
-        }
-        if (!target_table[byte]) return error.Invalid;
-    }
-    return error.Incomplete;
+    const at = simd.first(cursor.buf, start, syntax.targetMask, syntax.targetStop) orelse
+        return error.Incomplete;
+    if (cursor.buf[at] != ' ' or at == start) return error.Invalid;
+    cursor.pos = @intCast(at);
+    return cursor.slice(start, @intCast(at));
 }
 
 /// One line up to, but not including, its CR. A bare LF is not a terminator
@@ -436,34 +397,11 @@ fn scanTarget(cursor: *Cursor) Error![]const u8 {
 /// rejects an invalid byte in the same pass.
 inline fn scanLine(cursor: *Cursor) Error![]const u8 {
     const start = cursor.pos;
-    var index: usize = start;
-
-    if (comptime vector_scans) {
-        while (index + width <= cursor.buf.len) : (index += width) {
-            const chunk: Vec = cursor.buf[index..][0..width].*;
-            const ctl = (chunk < @as(Vec, @splat(0x20))) &
-                (chunk != @as(Vec, @splat('\t')));
-            const del = chunk == @as(Vec, @splat(0x7f));
-            const stop = ctl | del;
-            if (@reduce(.Or, stop)) {
-                const mask: Mask = @bitCast(stop);
-                const at = index + @as(usize, @ctz(mask));
-                if (cursor.buf[at] != '\r') return error.Invalid;
-                cursor.pos = @intCast(at);
-                return cursor.slice(start, @intCast(at));
-            }
-        }
-    }
-
-    while (index < cursor.buf.len) : (index += 1) {
-        const byte = cursor.buf[index];
-        if (byte == '\r') {
-            cursor.pos = @intCast(index);
-            return cursor.slice(start, @intCast(index));
-        }
-        if (!field_value_table[byte]) return error.Invalid;
-    }
-    return error.Incomplete;
+    const at = simd.first(cursor.buf, start, syntax.lineMask, syntax.lineStop) orelse
+        return error.Incomplete;
+    if (cursor.buf[at] != '\r') return error.Invalid;
+    cursor.pos = @intCast(at);
+    return cursor.slice(start, @intCast(at));
 }
 
 /// `HTTP/1.0` and `HTTP/1.1` as little-endian `u64`s, for the common case.
@@ -582,35 +520,6 @@ fn parseHeaders(cursor: *Cursor, storage: []Header) Error!Headers {
         count += 1;
     }
 }
-
-/// `tchar` from RFC 9110 §5.6.2.
-pub fn isTchar(byte: u8) bool {
-    return switch (byte) {
-        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
-        '0'...'9', 'A'...'Z', 'a'...'z' => true,
-        else => false,
-    };
-}
-
-/// RFC 9110 §5.5: `field-vchar` (VCHAR or obs-text), SP, and HTAB.
-pub fn isFieldValueByte(byte: u8) bool {
-    return byte == '\t' or (byte >= 0x20 and byte != 0x7f);
-}
-
-/// RFC 9112 §3.2: printable US-ASCII, and SP is the delimiter.
-pub fn isTargetByte(byte: u8) bool {
-    return byte >= 0x21 and byte <= 0x7e;
-}
-
-fn makeTable(comptime predicate: fn (u8) bool) [256]bool {
-    var table: [256]bool = undefined;
-    for (0..256) |index| table[index] = predicate(@intCast(index));
-    return table;
-}
-
-const tchar_table = makeTable(isTchar);
-const field_value_table = makeTable(isFieldValueByte);
-const target_table = makeTable(isTargetByte);
 
 const typical =
     "GET /metrics?x=1 HTTP/1.1\r\n" ++
@@ -928,7 +837,7 @@ test "incomplete: every strict prefix of a valid response" {
 }
 
 test "head terminator: every placement, vector and scalar (RFC 9112 §2.1)" {
-    var buf: [4 * width + 8]u8 = undefined;
+    var buf: [4 * simd.Block.width + 8]u8 = undefined;
     for (0..buf.len - 3) |at| {
         @memset(&buf, 'a');
         @memcpy(buf[at..][0..4], "\r\n\r\n");
@@ -951,13 +860,13 @@ test "head terminator: every placement, vector and scalar (RFC 9112 §2.1)" {
 }
 
 test "target scanner: every byte at every position (RFC 9112 §3.2)" {
-    var buf: [width + 3]u8 = undefined;
+    var buf: [simd.Block.width + 3]u8 = undefined;
     for (0..256) |value| {
         for (0..buf.len) |at| {
             @memset(&buf, 'a');
             buf[at] = @intCast(value);
 
-            var cursor = Cursor.init(&buf);
+            var cursor: Cursor = .init(&buf);
             const byte: u8 = @intCast(value);
 
             if (byte == ' ') {
@@ -968,7 +877,7 @@ test "target scanner: every byte at every position (RFC 9112 §3.2)" {
                     try testing.expectEqual(at, target.len);
                     try testing.expectEqual(at, @as(usize, cursor.pos));
                 }
-            } else if (!target_table[byte]) {
+            } else if (!syntax.target_table[byte]) {
                 try testing.expectError(error.Invalid, scanTarget(&cursor));
             } else {
                 try testing.expectError(error.Incomplete, scanTarget(&cursor));
@@ -978,20 +887,20 @@ test "target scanner: every byte at every position (RFC 9112 §3.2)" {
 }
 
 test "line scanner: every byte at every position (RFC 9110 §5.5)" {
-    var buf: [width + 3]u8 = undefined;
+    var buf: [simd.Block.width + 3]u8 = undefined;
     for (0..256) |value| {
         for (0..buf.len) |at| {
             @memset(&buf, 'a');
             buf[at] = @intCast(value);
 
-            var cursor = Cursor.init(&buf);
+            var cursor: Cursor = .init(&buf);
             const byte: u8 = @intCast(value);
 
             if (byte == '\r') {
                 const line = try scanLine(&cursor);
                 try testing.expectEqual(at, line.len);
                 try testing.expectEqual(at, @as(usize, cursor.pos));
-            } else if (!field_value_table[byte]) {
+            } else if (!syntax.field_value_table[byte]) {
                 try testing.expectError(error.Invalid, scanLine(&cursor));
             } else {
                 try testing.expectError(error.Incomplete, scanLine(&cursor));
