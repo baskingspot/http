@@ -1,0 +1,26 @@
+# HTTP/1.1 server example
+
+```sh
+just example
+curl -v http://127.0.0.1:8080/
+```
+
+The server is deliberately small and single-connection. It shows the shape the
+library expects:
+
+- `h1.parseRequest` over a `std.Io.net.Stream.Reader`, with `last_len` and
+  `error.Incomplete`.
+- `h1.framing.request` to decide the body, then `readSliceAll` for a known
+  length.
+- `h1.persistent` for the connection decision.
+- `Headers.containsToken`, `Method.token`, `Status.phrase`, and `Version` in the
+  response.
+
+Two lifetimes matter. The head borrows both the header storage and the reader's
+buffer, so the target is copied and keep-alive is computed before the body read;
+the read may rebase the buffer. The response body is written before the loop
+returns to the next head.
+
+A chunked request gets 501 until the decoder lands. A body over 64 KiB gets 413.
+There are no timeouts, no concurrency, and no TLS; those belong to the server
+above this package.

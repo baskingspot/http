@@ -68,6 +68,26 @@ pub fn build(b: *std.Build) void {
     b.step("fuzz", "Fuzz the parsers (built-in test runner)")
         .dependOn(&run_fuzz_tests.step);
 
+    // The example is a real program, not a test. `check-example` builds it in
+    // CI; `example` runs it. It is developer-only, like the bench.
+    const example_mod = b.createModule(.{
+        .root_source_file = b.path("examples/http1_server.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "http", .module = mod }},
+    });
+    const example = b.addExecutable(.{
+        .name = "http1-server",
+        .root_module = example_mod,
+    });
+    b.step("example-bin", "Build the HTTP/1.1 example server")
+        .dependOn(&example.step);
+
+    const run_example = b.addRunArtifact(example);
+    if (b.args) |args| run_example.addArgs(args);
+    b.step("example", "Run the HTTP/1.1 example server")
+        .dependOn(&run_example.step);
+
     if (b.lazyImport(@This(), "testingx")) |testingx| {
         const dep = testingx_dep orelse unreachable;
         // hparse is fetched by the same lazy pass. If it is still null, the

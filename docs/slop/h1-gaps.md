@@ -131,7 +131,6 @@ Ordered by what blocks a usable HTTP/1.1 message parser.
 | Field section as its own entry point | §5 | private | `parseHeaders` is embedded in the head parser. Trailers and callers that already parsed a start line need a public field-section parser. |
 | Chunked decoding | §7.1 | none | Resumable state machine, chunk-size overflow, chunk extensions (parse and ignore), last-chunk, data spans reads. |
 | Trailer section | §7.1.2, RFC 9110 §6.5.1 | none | Parse field lines after the last chunk; do not merge fields that are not mergeable. |
-| Persistence | §9.3 | none | HTTP/1.1 default persistent, HTTP/1.0 default close, `Connection: close` / `keep-alive` tokens. `Headers.containsToken` is the building block. |
 | Request-target form | §3.2 | chars only | origin / absolute / authority / asterisk. Deliberately routing policy today; revisit when a router consumes it. |
 | Host rules | §3.2 | not enforced | Exactly one Host in an HTTP/1.1 request. Server policy today. |
 | Interim responses | RFC 9110 §15.2 | caller loop | `parseResponse` returns the first head. `Status.class()` identifies 1xx, but the contract for "keep reading for the final response" is not documented. |
@@ -140,18 +139,18 @@ Ordered by what blocks a usable HTTP/1.1 message parser.
 Fixed during this review: `scanLine` searched only for `\r`, so a bare LF in
 a field value or reason phrase returned `Incomplete` and waited for more
 bytes. It now stops at the first control byte and rejects anything that is not
-CR, in the same pass. `Transfer-Encoding` parsing and the RFC 9112 §6.3 body
-decision now live in `transfer_encoding` and `h1.framing`. `just test` has 77
-tests, including the new cases. The bench wires hparse 0.2.0 in as a lazy,
-dev-only dependency and builds every imported module at ReleaseFast.
+CR, in the same pass. `Transfer-Encoding` parsing, the RFC 9112 §6.3 body
+decision, and the §9.3 persistence rule now live in `transfer_encoding`,
+`h1.framing`, and `h1.persistent`. `just test` passes, including the new cases.
+The bench wires hparse 0.2.0 in as a lazy, dev-only dependency and builds every
+imported module at ReleaseFast.
 
 ## Recommended order
 
 1. Expose the field-section parser. It is the trailer parser.
 2. Add the chunked decoder over the framing result.
 3. Add trailers on top of the field-section parser.
-4. Add the persistence helper.
-5. Port the picohttpparser corpus with the deliberate divergences marked.
+4. Port the picohttpparser corpus with the deliberate divergences marked.
 
-Framing is in place. Chunked is next because it is the only framing result that
-needs a state machine.
+Framing and persistence are in place. Chunked is next because it is the only
+framing result that needs a state machine.

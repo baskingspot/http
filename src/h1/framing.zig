@@ -2,7 +2,7 @@
 //!
 //! The head is parsed; this decides how many octets follow it. The decision is
 //! pure: it reads the field section and the request context, and returns a
-//! `Body`. It does not read the body.
+//! `RequestBody` or a `ResponseBody`. It does not read the body.
 //!
 //! Order matters. The no-body rules for HEAD, 1xx, 204, and 304 come first,
 //! then the CONNECT tunnel rule, then the Transfer-Encoding and
@@ -20,15 +20,26 @@ const transfer_encoding = @import("../transfer_encoding.zig");
 const version_mod = @import("../version.zig");
 const Version = version_mod.Version;
 
-pub const Body = union(enum) {
-    /// No body. A request with no framing fields, or a response that the
-    /// request method or status forbids a body for.
+/// The body framing of a request. A request is never close-delimited or a
+/// tunnel.
+pub const RequestBody = union(enum) {
+    /// No body. A request with no framing fields.
     none,
     /// A body of exactly this many octets.
     length: u64,
     /// The chunked transfer coding.
     chunked,
-    /// The body ends when the connection closes. Responses only.
+};
+
+/// The body framing of a response.
+pub const ResponseBody = union(enum) {
+    /// No body, because the request method or status forbids one.
+    none,
+    /// A body of exactly this many octets.
+    length: u64,
+    /// The chunked transfer coding.
+    chunked,
+    /// The body ends when the connection closes.
     close,
     /// A successful CONNECT response: the connection becomes a tunnel.
     tunnel,
@@ -48,7 +59,7 @@ pub const Error = error{
 };
 
 /// The body framing for a request head.
-pub fn request(version: Version, headers: Headers) Error!Body {
+pub fn request(version: Version, headers: Headers) Error!RequestBody {
     const te = try transfer(headers);
     const cl = try content(headers);
 
@@ -76,7 +87,7 @@ pub fn response(
     status: Status,
     request_method: ?Method,
     headers: Headers,
-) Error!Body {
+) Error!ResponseBody {
     // Rule 1: these responses never have a body, whatever the fields say.
     if (request_method == .HEAD or
         status.class() == .informational or
@@ -140,18 +151,18 @@ fn section(items: []const Header) Headers {
 }
 
 test "request: no framing fields means no body" {
-    try testing.expectEqualDeep(Body.none, try request(.@"HTTP/1.1", section(&.{})));
-    try testing.expectEqualDeep(Body.none, try request(.@"HTTP/1.0", section(&.{})));
+    try testing.expectEqualDeep(RequestBody.none, try request(.@"HTTP/1.1", section(&.{})));
+    try testing.expectEqualDeep(RequestBody.none, try request(.@"HTTP/1.0", section(&.{})));
 }
 
 test "request: Content-Length" {
-    try testing.expectEqualDeep(Body{ .length = 42 }, try request(.@"HTTP/1.1", section(&.{
+    try testing.expectEqualDeep(RequestBody{ .length = 42 }, try request(.@"HTTP/1.1", section(&.{
         .{ .name = "Content-Length", .value = "42" },
     })));
-    try testing.expectEqualDeep(Body{ .length = 0 }, try request(.@"HTTP/1.0", section(&.{
+    try testing.expectEqualDeep(RequestBody{ .length = 0 }, try request(.@"HTTP/1.0", section(&.{
         .{ .name = "content-length", .value = "0" },
     })));
-    try testing.expectEqualDeep(Body{ .length = 42 }, try request(.@"HTTP/1.1", section(&.{
+    try testing.expectEqualDeep(RequestBody{ .length = 42 }, try request(.@"HTTP/1.1", section(&.{
         .{ .name = "Content-Length", .value = "42, 42" },
     })));
 }
@@ -160,12 +171,12 @@ test "request: chunked" {
     const chunked = section(&.{
         .{ .name = "Transfer-Encoding", .value = "chunked" },
     });
-    try testing.expectEqualDeep(Body.chunked, try request(.@"HTTP/1.1", chunked));
+    try testing.expectEqualDeep(RequestBody.chunked, try request(.@"HTTP/1.1", chunked));
 
     const gzip_chunked = section(&.{
         .{ .name = "Transfer-Encoding", .value = "gzip, chunked" },
     });
-    try testing.expectEqualDeep(Body.chunked, try request(.@"HTTP/1.1", gzip_chunked));
+    try testing.expectEqualDeep(RequestBody.chunked, try request(.@"HTTP/1.1", gzip_chunked));
 }
 
 test "request: a final coding other than chunked is rejected" {
@@ -232,14 +243,23 @@ test "response: no body for HEAD, 1xx, 204, and 304" {
         .{ .name = "Content-Length", .value = "42" },
     });
 
-    try testing.expectEqualDeep(Body.none, try response(.@"HTTP/1.1", .ok, .HEAD, te));
-    try testing.expectEqualDeep(Body.none, try response(.@"HTTP/1.1", .ok, .HEAD, cl));
-    try testing.expectEqualDeep(Body.none, try response(.@"HTTP/1.1", .@"continue", null, te));
-    try testing.expectEqualDeep(Body.none, try response(.@"HTTP/1.1", .no_content, null, te));
-    try testing.expectEqualDeep(Body.none, try response(.@"HTTP/1.1", .not_modified, null, te));
+    try testing.expectEqualDeep(ResponseBody.none, try response(.@"HTTP/1.1", .ok, .HEAD, te));
+    try testing.expectEqualDeep(ResponseBody.none, try response(.@"HTTP/1.1", .ok, .HEAD, cl));
+    try testing.expectEqualDeep(
+        ResponseBody.none,
+        try response(.@"HTTP/1.1", .@"continue", null, te),
+    );
+    try testing.expectEqualDeep(
+        ResponseBody.none,
+        try response(.@"HTTP/1.1", .no_content, null, te),
+    );
+    try testing.expectEqualDeep(
+        ResponseBody.none,
+        try response(.@"HTTP/1.1", .not_modified, null, te),
+    );
 
     // The no-body rule comes before the HTTP/1.0 faulty-framing rule.
-    try testing.expectEqualDeep(Body.none, try response(.@"HTTP/1.0", .ok, .HEAD, te));
+    try testing.expectEqualDeep(ResponseBody.none, try response(.@"HTTP/1.0", .ok, .HEAD, te));
 }
 
 test "response: CONNECT tunnel" {
@@ -250,11 +270,14 @@ test "response: CONNECT tunnel" {
         .{ .name = "Content-Length", .value = "42" },
     });
 
-    try testing.expectEqualDeep(Body.tunnel, try response(.@"HTTP/1.1", .ok, .CONNECT, te));
-    try testing.expectEqualDeep(Body.tunnel, try response(.@"HTTP/1.1", .created, .CONNECT, cl));
+    try testing.expectEqualDeep(ResponseBody.tunnel, try response(.@"HTTP/1.1", .ok, .CONNECT, te));
+    try testing.expectEqualDeep(
+        ResponseBody.tunnel,
+        try response(.@"HTTP/1.1", .created, .CONNECT, cl),
+    );
 
     // A non-2xx response to CONNECT is not a tunnel.
-    try testing.expectEqualDeep(Body{ .length = 42 }, try response(
+    try testing.expectEqualDeep(ResponseBody{ .length = 42 }, try response(
         .@"HTTP/1.1",
         .not_found,
         .CONNECT,
@@ -266,20 +289,29 @@ test "response: normal framing" {
     const cl = section(&.{
         .{ .name = "Content-Length", .value = "42" },
     });
-    try testing.expectEqualDeep(Body{ .length = 42 }, try response(.@"HTTP/1.1", .ok, .GET, cl));
+    try testing.expectEqualDeep(
+        ResponseBody{ .length = 42 },
+        try response(.@"HTTP/1.1", .ok, .GET, cl),
+    );
 
     const chunked = section(&.{
         .{ .name = "Transfer-Encoding", .value = "gzip, chunked" },
     });
-    try testing.expectEqualDeep(Body.chunked, try response(.@"HTTP/1.1", .ok, .GET, chunked));
+    try testing.expectEqualDeep(
+        ResponseBody.chunked,
+        try response(.@"HTTP/1.1", .ok, .GET, chunked),
+    );
 
     // A final coding that is not chunked is close-delimited.
     const gzip = section(&.{
         .{ .name = "Transfer-Encoding", .value = "chunked, gzip" },
     });
-    try testing.expectEqualDeep(Body.close, try response(.@"HTTP/1.1", .ok, .GET, gzip));
+    try testing.expectEqualDeep(ResponseBody.close, try response(.@"HTTP/1.1", .ok, .GET, gzip));
 
-    try testing.expectEqualDeep(Body.close, try response(.@"HTTP/1.1", .ok, .GET, section(&.{})));
+    try testing.expectEqualDeep(
+        ResponseBody.close,
+        try response(.@"HTTP/1.1", .ok, .GET, section(&.{})),
+    );
 }
 
 test "response: conflicts and HTTP/1.0" {

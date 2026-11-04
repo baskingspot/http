@@ -48,9 +48,10 @@ ready to depend on.
   head arrives, and take `last_len` so a client trickling bytes cannot force a
   rescan. Strict where RFC 9112 allows leniency: bare LF, obs-fold, whitespace
   before the colon, and lenient start-line whitespace are rejected.
-  `h1.framing` decides the body from a head: `.none`, `.length`, `.chunked`,
-  `.close`, or `.tunnel` (RFC 9112 §6.3). It rejects TE with CL, TE on an
-  HTTP/1.0 message, and a request whose final coding is not `chunked`.
+  `h1.framing` decides the body from a head: a request is `.none`, `.length`,
+  or `.chunked`; a response adds `.close` and `.tunnel` (RFC 9112 §6.3).
+  `h1.persistent` applies the §9.3 connection rule. It rejects TE with CL, TE
+  on an HTTP/1.0 message, and a request whose final coding is not `chunked`.
 - `content_length`: `Content-Length` parsing and combination. Repeated values
   must agree, a comma list of identical values is accepted, and non-digits,
   conflicts, and overflow are errors. `null` means the field was absent.
@@ -82,8 +83,8 @@ const length = try http.content_length.parse(&.{ "42", "42" }); // 42
 ## Work on it
 
 `nix develop` provides the toolchain. `just ci` runs what CI runs, `just bench`
-runs the benchmarks, and `just fuzz` drives the fuzz targets with the built-in
-runner.
+runs the benchmarks, `just fuzz` drives the fuzz targets with the built-in
+runner, and `just example` runs the HTTP/1.1 server example.
 
 ## License
 

@@ -3,6 +3,7 @@
         "build.zig",
         "src",
         "bench",
+        "examples",
     },
 
     .rules = .{

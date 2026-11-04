@@ -29,7 +29,7 @@ bench-smoke:
 [group("lint")]
 lint:
     ziglint
-    zig fmt --check src bench build.zig build.zig.zon
+    zig fmt --check src bench examples build.zig build.zig.zon
     nix fmt -- --ci
     oxfmt --check README.md AGENTS.md .github
     actionlint
@@ -39,11 +39,21 @@ lint:
 [doc("Format everything lint checks")]
 [group("lint")]
 fmt:
-    zig fmt src bench build.zig build.zig.zon
+    zig fmt src bench examples build.zig build.zig.zon
     nix fmt
     oxfmt README.md AGENTS.md .github
     just --fmt
 
+[doc("Run the HTTP/1.1 example server on 127.0.0.1:8080")]
+[group("example")]
+example:
+    zig build example
+
+[doc("Build the HTTP/1.1 example server without running it")]
+[group("example")]
+check-example:
+    zig build example-bin
+
 [doc("Everything CI runs")]
 [group("ci")]
-ci: test lint
+ci: test lint check-example

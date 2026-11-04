@@ -41,6 +41,7 @@ pub const Version = version_mod.Version;
 const effectiveVersion = version_mod.effective;
 
 pub const framing = @import("framing.zig");
+pub const persistent = @import("persistence.zig").persistent;
 
 pub const Error = error{
     /// The buffer ends before the head does. Read more and retry.

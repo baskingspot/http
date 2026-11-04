@@ -35,9 +35,13 @@ All notable changes to http are recorded here. The format follows
   `last_len` for a resumable completeness check, and reject bare LF, obs-fold,
   and whitespace before the colon.
 - `h1.framing.request` and `h1.framing.response`: body framing per RFC 9112
-  §6.3. The result is `.none`, `.length`, `.chunked`, `.close`, or `.tunnel`.
-  TE with CL, TE on an HTTP/1.0 message, and a request whose final coding is
-  not `chunked` are errors.
+  §6.3. A request returns `RequestBody`: `.none`, `.length`, or `.chunked`. A
+  response returns `ResponseBody`, which adds `.close` and `.tunnel`. TE with
+  CL, TE on an HTTP/1.0 message, and a request whose final coding is not
+  `chunked` are errors.
+- `h1.persistent`: the RFC 9112 §9.3 connection decision from the version and
+  the `Connection` tokens. HTTP/1.1 persists by default; HTTP/1.0 persists
+  only with `keep-alive`; `close` wins.
 - `transfer_encoding.summarize`: the `Transfer-Encoding` coding list in field
   order, with the final coding, a seen/last `chunked` flag, parameter parsing
   (including quoted values), and rejection of repeated or parameterized
