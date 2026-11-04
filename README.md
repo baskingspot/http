@@ -2,10 +2,11 @@
 
 Pure HTTP field-value parsers: content negotiation, ranges, entity tags, dates, and media types.
 
-No server and no I/O runtime. Parse a header value, negotiate a content coding,
-compare validators. The parsers take borrowed slices and fill caller-owned
-storage. `h1.ServerConn` is a sans-I/O connection state machine; the engine
-owns the socket, the clock, and the buffers.
+The parser modules are sans-I/O. Parse a header value, negotiate a content
+coding, compare validators. The parsers take borrowed slices and fill
+caller-owned storage. `h1.ServerConn` is a sans-I/O connection state machine;
+`engine.blocking` owns the socket, the clock, and the handler loop over
+`std.Io`. Evented engines are separate.
 
 This project is incubating. It is unstable, its API will change, and it is not
 ready to depend on.
@@ -73,6 +74,12 @@ ready to depend on.
   request body, keeps the leftover for a pipelined request, queues policy
   errors, and writes a response through a caller head buffer. It owns no
   memory and does no I/O.
+- `engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
+  connection at a time; `serve` drives one stream. The handler formats a
+  response body into per-connection scratch, and the connection machine handles
+  parsing, framing, keep-alive, pipelining, and policy responses. The blocking
+  engine sets every timeout to zero because a blocking syscall cannot enforce
+  them; the evented engines are separate.
 - `prefix_int`: HPACK and QPACK prefix integers (RFC 7541 §5.1), shared by
   both. Up to 32 bits, with the representation's tag bits left to the caller.
 - `huffman`: the RFC 7541 Appendix B Huffman code, shared by HPACK and QPACK.
