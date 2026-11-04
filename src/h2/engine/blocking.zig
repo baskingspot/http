@@ -67,7 +67,7 @@ pub fn run(
     }
 }
 
-/// Serve one connection until the peer closes or the session fails.
+/// Serve one connection over a transport stream.
 pub fn serve(
     io: Io,
     stream: Io.net.Stream,
@@ -77,6 +77,22 @@ pub fn serve(
     if (config.read_buffer.len == 0 or config.write_buffer.len == 0) {
         return error.NoBuffer;
     }
+
+    var reader = stream.reader(io, &.{});
+    var writer = stream.writer(io, config.write_buffer);
+    try serveIo(&reader.interface, &writer.interface, handler, config);
+}
+
+/// Serve one connection over an already-open reader/writer pair. This is the
+/// TLS seam: a `tls_std` server hands its reader and writer here, and the h2
+/// session runs over decrypted bytes.
+pub fn serveIo(
+    reader: *Io.Reader,
+    writer: *Io.Writer,
+    handler: Handler,
+    config: Config,
+) !void {
+    if (config.read_buffer.len == 0) return error.NoBuffer;
 
     var conn = try Connection.init(.{
         .allocator = config.allocator,
@@ -88,28 +104,24 @@ pub fn serve(
     });
     defer conn.deinit();
 
-    var reader = stream.reader(io, &.{});
-    var writer = stream.writer(io, config.write_buffer);
-    const r = &reader.interface;
-    const w = &writer.interface;
     var out_buffer: [4096]u8 = undefined;
 
     while (true) {
         _ = conn.drive(Io.Timestamp.zero) catch |err| {
-            flush(&conn, w, &out_buffer) catch |flush_err| {
+            flush(&conn, writer, &out_buffer) catch |flush_err| {
                 _ = @errorName(flush_err);
             };
             return err;
         };
-        try flush(&conn, w, &out_buffer);
+        try flush(&conn, writer, &out_buffer);
         if (try conn.drive(Io.Timestamp.zero)) continue;
         if (conn.isClosed()) {
-            try flush(&conn, w, &out_buffer);
+            try flush(&conn, writer, &out_buffer);
             return;
         }
 
         var vecs: [1][]u8 = .{config.read_buffer};
-        const n = r.readVec(&vecs) catch |err| switch (err) {
+        const n = reader.readVec(&vecs) catch |err| switch (err) {
             error.EndOfStream => return,
             error.ReadFailed => return err,
         };
@@ -119,19 +131,19 @@ pub fn serve(
         while (offset < n) {
             const consumed = conn.receive(config.read_buffer[offset..n]);
             if (consumed == 0) {
-                if (conn.isClosed()) try flush(&conn, w, &out_buffer);
+                if (conn.isClosed()) try flush(&conn, writer, &out_buffer);
                 return error.InputFull;
             }
             offset += consumed;
 
             _ = conn.drive(Io.Timestamp.zero) catch |err| {
-                flush(&conn, w, &out_buffer) catch |flush_err| {
+                flush(&conn, writer, &out_buffer) catch |flush_err| {
                     _ = @errorName(flush_err);
                 };
                 return err;
             };
             if (conn.isClosed()) {
-                try flush(&conn, w, &out_buffer);
+                try flush(&conn, writer, &out_buffer);
                 return;
             }
         }

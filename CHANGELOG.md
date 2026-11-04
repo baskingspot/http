@@ -80,6 +80,11 @@ All notable changes to http are recorded here. The format follows
   Linux; kqueue is macOS. The wait backends and platform edge live in
   `src/transport`, shared with the h1 engines. `just ci` runs the strict h2spec
   conformance suite against the readiness example.
+- `h2.engine.blocking.serveIo`: the blocking engine can run over an existing
+  `*std.Io.Reader`/`*std.Io.Writer` pair instead of a socket. The
+  `examples/http2_tls.zig` server uses it with `baskingspot/tls`'s blocking
+  `tls_std` integration and ALPN `h2`; `just conformance-run-tls` runs h2spec
+  over TLS. TLS on the readiness engines is not wired yet.
 - `Status`: the status codes as an open enum. Named codes are constants; any
   other three-digit code is still a value. `Status.code()`, `Status.class()`,
   `Status.phrase()`, and `Status.parse()` work on the wire number, and the

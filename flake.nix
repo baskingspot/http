@@ -43,6 +43,9 @@
               pkgs.gopls
               pkgs.h2spec
               pkgs.nghttp2
+              pkgs.openssl.dev
+              pkgs.openssl.out
+              pkgs.pkg-config
               # ziglint with the target std's doc comments, so the deprecation
               # rule checks the oldest API surface this repo supports.
               config.packages."ziglint-0-16"

@@ -326,6 +326,44 @@ pub fn build(b: *std.Build) void {
         h2_readiness_example_run.dependOn(&run_h2_readiness.step);
     }
 
+    // The TLS h2 example is Linux and macOS only. It imports tls and the
+    // blocking tls_std integration from baskingspot/tls.
+    const h2_tls_example_bin = b.step(
+        "example-h2-tls-bin",
+        "Build the HTTP/2 TLS example server",
+    );
+    const h2_tls_example_run = b.step(
+        "example-h2-tls",
+        "Run the HTTP/2 TLS example server",
+    );
+    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+        const tls_dep = b.dependency("tls", .{
+            .target = target,
+            .optimize = optimize,
+        });
+        const h2_tls_mod = b.createModule(.{
+            .root_source_file = b.path("examples/http2_tls.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "tls", .module = tls_dep.module("tls") },
+                .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
+            },
+        });
+        h2_tls_mod.link_libc = true;
+        h2_tls_mod.linkSystemLibrary("crypto", .{});
+        const h2_tls = b.addExecutable(.{
+            .name = "http2-tls",
+            .root_module = h2_tls_mod,
+        });
+        h2_tls_example_bin.dependOn(&h2_tls.step);
+
+        const run_h2_tls = b.addRunArtifact(h2_tls);
+        if (b.args) |args| run_h2_tls.addArgs(args);
+        h2_tls_example_run.dependOn(&run_h2_tls.step);
+    }
+
     // The poll example is Linux-only for now. The steps exist everywhere so
     // `check-example` is portable; only Linux gets a target to build.
     const poll_example_bin = b.step("example-poll-bin", "Build the HTTP/1.1 poll example server");

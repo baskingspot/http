@@ -196,12 +196,12 @@ runner, and `just example` runs the HTTP/1.1 server example.
 `just example-h2` runs an h2c server on `127.0.0.1:8081`, driven by
 `h2.engine.blocking`. Poke it with `curl -v --http2-prior-knowledge
 http://127.0.0.1:8081/`, or with the devshell's `nghttp -v
-http://127.0.0.1:8081/` to see the frames. It handles the preface, SETTINGS,
-PING, HPACK, flow control, and a fixed 200 response over a real session loop;
-the socket, TLS, and handler live outside the library. `just conformance-run`
-starts its own example, runs h2spec, and stops it (pass `-S` for strict);
-`just conformance` targets an example you already started, and `just load`
-runs h2load.
+http://127.0.0.1:8081/` to see the frames. `just example-h2-tls` runs the same
+engine over TLS 1.3 on `https://127.0.0.1:8443/`, using the blocking `tls_std`
+integration from `baskingspot/tls` and ALPN `h2`. `just conformance-run` and
+`just conformance-run-tls` start their own example, run h2spec, and stop it
+(pass `-S` for strict); `just conformance` targets an example you already
+started, and `just load` runs h2load.
 
 ## License
 
