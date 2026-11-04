@@ -7,13 +7,14 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
-- `h1.engine.poll` and `h1.engine.epoll`: Linux HTTP/1 readiness engines. They
-  share fixed slots, nonblocking descriptors, accept backoff, connection
-  deadlines, keep-alive and pipelining, and a stop eventfd. The handler is the
-  shared `Handler` vtable, the same as the blocking engine. The wait and
-  registration live in a backend; the slot state machine is shared. Kqueue is
-  next; io_uring is separate. `Config.tcp_defer_accept` sets Linux
-  `TCP_DEFER_ACCEPT`. A wait that returns `SystemResources` backs off and
+- `h1.engine.poll`, `h1.engine.epoll`, and `h1.engine.kqueue`: HTTP/1
+  readiness engines. Poll and epoll are Linux; kqueue is macOS. They share
+  fixed slots, nonblocking descriptors, accept backoff, connection deadlines,
+  keep-alive and pipelining, and a stop descriptor (eventfd on Linux, pipe on
+  macOS). The handler is the shared `Handler` vtable, the same as the blocking
+  engine. The wait, registration, and platform edge live in a backend; the slot
+  state machine is shared. io_uring is separate. `Config.tcp_defer_accept` sets
+  Linux `TCP_DEFER_ACCEPT`. A wait that returns `SystemResources` backs off and
   retries.
 
 - `Exchange.id` and `Handler.VTable.complete`: the engine reports when the

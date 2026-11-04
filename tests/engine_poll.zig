@@ -3,14 +3,19 @@
 const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
-const linux = std.os.linux;
+const builtin = @import("builtin");
 const mem = std.mem;
 const panic = std.debug.panic;
 
 const http = @import("http");
 const h1 = http.h1;
 const options = @import("engine_options");
-const engine = if (options.epoll) h1.engine.epoll else h1.engine.poll;
+const engine = if (options.kqueue)
+    h1.engine.kqueue
+else if (options.epoll)
+    h1.engine.epoll
+else
+    h1.engine.poll;
 
 const TestApp = struct {
     complete_count: usize = 0,
@@ -499,6 +504,7 @@ test "poll reports exchange completion" {
 }
 
 test "poll listener honors TCP_DEFER_ACCEPT" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     var app: TestApp = .{};
     const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
     var server = try PollServer.init(testing.io, address, app.handler(), .{
@@ -509,15 +515,15 @@ test "poll listener honors TCP_DEFER_ACCEPT" {
     defer server.deinit();
 
     var value: u32 = 0;
-    var len: linux.socklen_t = @sizeOf(u32);
-    const rc = linux.getsockopt(
-        server.listener.socket.handle,
-        linux.IPPROTO.TCP,
-        linux.TCP.DEFER_ACCEPT,
+    var len: std.posix.socklen_t = @sizeOf(u32);
+    const rc = std.posix.system.getsockopt(
+        server.listener.fd,
+        6, // IPPROTO_TCP
+        9, // TCP_DEFER_ACCEPT
         mem.asBytes(&value),
         &len,
     );
-    try testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+    try testing.expectEqual(std.posix.E.SUCCESS, std.posix.errno(rc));
     try testing.expectEqual(@as(u32, 1), value);
 }
 

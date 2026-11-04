@@ -5,8 +5,10 @@ const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
 const types = @import("wait.zig");
+const platform = @import("platform_linux.zig");
 
 pub const Wait = struct {
+    pub const Platform = platform;
     allocator: Allocator,
     entries: []Entry,
     pollfds: []posix.pollfd,

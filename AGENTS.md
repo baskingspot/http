@@ -20,10 +20,10 @@ Zig 0.16 only. The flake is the tool contract, from `baskingspot/nix`: `nix deve
 - No server in the parser modules and no `std.http` message types. The parsers
   import no socket and no allocator. `h1.ServerConn` and `h2.Session` are the
   sans-I/O connection state machines; `src/h1/engine/blocking.zig` and
-  `src/h2/engine/blocking.zig` are the blocking servers over `std.Io`, and
-  `src/h1/engine/poll.zig` is the Linux readiness server. Epoll and
-  kqueue are future backends for the poll loop; io_uring is separate. The
-  parser modules still import no socket.
+  `src/h2/engine/blocking.zig` are the blocking servers over `std.Io`.
+  `src/h1/engine/readiness.zig` is the shared readiness loop; poll and epoll
+  are its Linux backends and kqueue is its macOS backend. io_uring is
+  separate. The parser modules still import no socket.
 - One byte cursor. `src/Cursor.zig` is the file-as-struct `Cursor` every
   parser walks with; do not add a second one or a local position type. It
   knows nothing about error vocabularies, so `Incomplete` (h1) and `Truncated`

@@ -4,8 +4,8 @@
 
 `h1.engine.blocking` is a blocking HTTP/1 server over `std.Io`. It uses
 `Io.Threaded` and `Io.net`. It serves one connection at a time. Use it for
-tools, tests, and trusted peers. `h1.engine.poll` and `h1.engine.epoll` are the
-readiness engines for the admin plane.
+tools, tests, and trusted peers. `h1.engine.poll`, `h1.engine.epoll`, and
+`h1.engine.kqueue` are the readiness engines for the admin plane.
 
 The parser modules stay sans-I/O. The engine owns the transport, the buffers,
 the accept loop, and the handler call. `h1.ServerConn` owns the request state
@@ -121,12 +121,13 @@ omits Content-Length and the body. A 1xx status is not a final response.
 
 ## Readiness engines
 
-`h1.engine.poll` and `h1.engine.epoll` are Linux-only for now. They share the
-slot loop and differ only in registration and wait. `h1.engine.poll` builds a
-`pollfd` array on every wait; `h1.engine.epoll` keeps a kernel registration and
-changes it only when a slot's interest changes. `std.Io` supplies the listener,
-the clock, and the listener close. The connection machine is the same
-`h1.ServerConn`.
+`h1.engine.poll` and `h1.engine.epoll` are Linux. `h1.engine.kqueue` is macOS
+for now. They share the slot loop and differ in registration, wait, and the
+platform edge. `h1.engine.poll` builds a `pollfd` array on every wait;
+`h1.engine.epoll` keeps a kernel registration and changes it only when a
+slot's interest changes; `h1.engine.kqueue` keeps read and write filters in
+kqueue. `std.Io` supplies the clock. The platform edge owns the listener and
+the stop descriptor. The connection machine is the same `h1.ServerConn`.
 
 `Server` is a plain type, not a generic over the handler. The caller creates
 it with an address, a `Handler`, and a `Config` that holds the allocator, the
@@ -136,12 +137,12 @@ and the accept backoff. The server allocates all slots and buffers once, in
 arena.
 
 The methods are `init`, `run`, `stop`, `deinit`, and `port`. `run` blocks in
-the wait backend. `stop` writes a stop eventfd; `run` returns after the next
-wake.
+the wait backend. `stop` writes the stop descriptor (eventfd on Linux, pipe on
+macOS); `run` returns after the next wake.
 
 The wait set contains:
 
-- The stop eventfd.
+- The stop descriptor.
 - The listener, only when a slot is free and accept is not backed off.
 - Every active slot, with read interest for read or drain and write interest
   for write.
@@ -155,7 +156,7 @@ than exiting.
 
 The listener option `tcp_defer_accept` sets Linux `TCP_DEFER_ACCEPT` with a
 one-second timeout. It is off by default; enable it when the server wants the
-listener to wake only after the peer sends data.
+listener to wake only after the peer sends data. Other platforms ignore it.
 
 A read feeds `recvBuffer` and `received`. A request calls the handler vtable.
 A write sends `sendSlices` and calls `sent`. After 100 Continue the slot
@@ -164,26 +165,28 @@ read, so a pipelined request needs no syscall. `.close_after_drain` switches
 the slot to drain; the engine reads into scratch and discards until EOF or the
 drain deadline.
 
-Accept uses `accept4` in a loop. `EMFILE`, `ENFILE`, and resource exhaustion
-pause the listener for the accept backoff, which defaults to 50 ms. A full slot
-table means the listener is not polled; the backlog holds the connection. The
-engine checks for a free slot before it accepts, so it never accepts and closes
-a connection just because slots are full.
+The platform edge accepts in a loop. Linux uses `accept4`; macOS uses `accept`
+plus `fcntl`, and sets `SO_NOSIGPIPE` on the accepted socket. `EMFILE`,
+`ENFILE`, and resource exhaustion pause the listener for the accept backoff,
+which defaults to 50 ms. A full slot table means the listener is not polled;
+the backlog holds the connection. The engine checks for a free slot before it
+accepts, so it never accepts and closes a connection just because slots are
+full.
 
 The listener is opened with `SO_REUSEADDR` only. It does not set
 `SO_REUSEPORT`, so two processes cannot silently bind the same port.
 
 The backend interface is `set`, `remove`, and `wait`. `h1.engine.poll` stores
 the entries and builds a `pollfd` array in `wait`; `h1.engine.epoll` maps each
-owner to an epoll registration. The slot state machine does not change.
-Kqueue will use the same interface. io_uring is a separate completion engine.
+owner to an epoll registration; `h1.engine.kqueue` maps each owner to
+`EVFILT_READ` and `EVFILT_WRITE` registrations. The slot state machine does not
+change. io_uring is a separate completion engine.
 
 ## Future
 
 The remaining evented engines are separate:
 
-- Kqueue shares the readiness loop. It needs the portable listener, accept,
-  and stop layer; epoll does not.
 - io_uring has its own completion loop.
+- Grand Central Dispatch is an `std.Io` engine, not a kqueue backend.
 - Do not use `std.Io.Evented` for these engines. It is an experimental fiber
   runtime.

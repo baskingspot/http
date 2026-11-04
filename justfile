@@ -126,6 +126,11 @@ example-poll:
 example-epoll:
     zig build example-epoll
 
+[doc("Run the HTTP/1.1 kqueue example server (macOS only)")]
+[group("example")]
+example-kqueue:
+    zig build example-kqueue
+
 [doc("Run the HTTP/1.1 io_uring example (Linux only)")]
 [group("example")]
 example-uring:
@@ -147,6 +152,7 @@ check-example:
     zig build example-bin
     zig build example-poll-bin
     zig build example-epoll-bin
+    zig build example-kqueue-bin
     zig build example-uring-bin
     zig build example-h2-bin
     zig build example-h2-poll-bin

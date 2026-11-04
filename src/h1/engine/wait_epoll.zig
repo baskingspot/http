@@ -6,12 +6,14 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 
 const types = @import("wait.zig");
+const platform = @import("platform_linux.zig");
 
 comptime {
     if (builtin.os.tag != .linux) @compileError("h1.engine.epoll is Linux-only");
 }
 
 pub const Wait = struct {
+    pub const Platform = platform;
     allocator: Allocator,
     entries: []Entry,
     epfd: linux.fd_t,

@@ -48,6 +48,16 @@ epoll doing registration and the wait. The slot state machine is shared; the
 poll engine builds a `pollfd` array on every wait, and this one keeps kernel
 registrations and changes them only when a slot's interest changes.
 
+## Kqueue server
+
+```sh
+just example-kqueue
+```
+
+macOS only. The same handler and readiness loop as the poll example, with
+kqueue read and write filters doing registration and the wait. The platform
+edge uses `accept` plus `fcntl` and a pipe for the stop descriptor.
+
 ## io_uring
 
 ```sh

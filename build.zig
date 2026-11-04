@@ -133,12 +133,12 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_h2_engine_tests.addArgs(args);
     test_step.dependOn(&run_h2_engine_tests.step);
 
-    // The readiness engines are Linux-only for now. The test artifact is
-    // present on every target in the source tree, but only Linux gets a build
-    // target. Both engines run the same integration suite.
+    // The readiness engines run the same integration suite. Linux builds the
+    // poll and epoll artifacts; macOS builds the kqueue artifact.
     if (target.result.os.tag == .linux) {
         const poll_options = b.addOptions();
         poll_options.addOption(bool, "epoll", false);
+        poll_options.addOption(bool, "kqueue", false);
         const poll_tests_mod = b.createModule(.{
             .root_source_file = b.path("tests/engine_poll.zig"),
             .target = target,
@@ -159,6 +159,7 @@ pub fn build(b: *std.Build) void {
 
         const epoll_options = b.addOptions();
         epoll_options.addOption(bool, "epoll", true);
+        epoll_options.addOption(bool, "kqueue", false);
         const epoll_tests_mod = b.createModule(.{
             .root_source_file = b.path("tests/engine_poll.zig"),
             .target = target,
@@ -176,6 +177,31 @@ pub fn build(b: *std.Build) void {
         run_epoll_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
         if (b.args) |args| run_epoll_tests.addArgs(args);
         test_step.dependOn(&run_epoll_tests.step);
+    }
+
+    // kqueue is the readiness backend on macOS. The same integration suite
+    // runs there with the Linux-only tests skipped.
+    if (target.result.os.tag == .macos) {
+        const kqueue_options = b.addOptions();
+        kqueue_options.addOption(bool, "epoll", false);
+        kqueue_options.addOption(bool, "kqueue", true);
+        const kqueue_tests_mod = b.createModule(.{
+            .root_source_file = b.path("tests/engine_poll.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "engine_options", .module = kqueue_options.createModule() },
+            },
+        });
+        const kqueue_tests = b.addTest(.{
+            .root_module = kqueue_tests_mod,
+            .test_runner = test_runner,
+        });
+        const run_kqueue_tests = b.addRunArtifact(kqueue_tests);
+        run_kqueue_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
+        if (b.args) |args| run_kqueue_tests.addArgs(args);
+        test_step.dependOn(&run_kqueue_tests.step);
     }
 
     // Fuzzing needs the built-in runner: testingx's main rejects fuzz mode
@@ -301,6 +327,34 @@ pub fn build(b: *std.Build) void {
         const run_epoll = b.addRunArtifact(epoll);
         if (b.args) |args| run_epoll.addArgs(args);
         epoll_example_run.dependOn(&run_epoll.step);
+    }
+
+    // The kqueue example is macOS-only. The steps exist everywhere so
+    // `check-example` is portable; only macOS gets a target to build.
+    const kqueue_example_bin = b.step(
+        "example-kqueue-bin",
+        "Build the HTTP/1.1 kqueue example server",
+    );
+    const kqueue_example_run = b.step(
+        "example-kqueue",
+        "Run the HTTP/1.1 kqueue example server",
+    );
+    if (target.result.os.tag == .macos) {
+        const kqueue_mod = b.createModule(.{
+            .root_source_file = b.path("examples/http1_kqueue.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "http", .module = mod }},
+        });
+        const kqueue = b.addExecutable(.{
+            .name = "http1-kqueue",
+            .root_module = kqueue_mod,
+        });
+        kqueue_example_bin.dependOn(&kqueue.step);
+
+        const run_kqueue = b.addRunArtifact(kqueue);
+        if (b.args) |args| run_kqueue.addArgs(args);
+        kqueue_example_run.dependOn(&run_kqueue.step);
     }
 
     // The io_uring example is Linux-only. The steps exist everywhere so
