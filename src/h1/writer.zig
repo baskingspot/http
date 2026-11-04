@@ -5,9 +5,10 @@
 //! format; they never create, flush, or close the sink, and they never
 //! allocate.
 //!
-//! The grammar matches the parser: CRLF only, `tchar` field names, field values
-//! with no CTLs, and a request target of printable US-ASCII. Invalid input is
-//! rejected before any bytes are written.
+//! The checked methods validate the parser's grammar before writing. The
+//! `assume*` variants skip that validation for data the caller already trusts;
+//! they write the bytes as given. Use the checked form unless the input is
+//! static or validated elsewhere.
 
 const std = @import("std");
 const testing = std.testing;
@@ -53,9 +54,32 @@ pub const Writer = struct {
         target: []const u8,
         version: Version,
     ) Error!void {
-        try validateMethod(method_token);
-        try validateTarget(target);
+        if (method_token.len == 0) return error.InvalidMethod;
+        for (method_token) |byte| if (!h1.isTchar(byte)) return error.InvalidMethod;
 
+        if (target.len == 0) return error.InvalidTarget;
+        for (target) |byte| if (!h1.isTargetByte(byte)) return error.InvalidTarget;
+
+        return self.assumeRequestLineToken(method_token, target, version);
+    }
+
+    /// `requestLine` without validation.
+    pub fn assumeRequestLine(
+        self: Writer,
+        method: Method,
+        target: []const u8,
+        version: Version,
+    ) Error!void {
+        return self.assumeRequestLineToken(method.token(), target, version);
+    }
+
+    /// `requestLineToken` without validation.
+    pub fn assumeRequestLineToken(
+        self: Writer,
+        method_token: []const u8,
+        target: []const u8,
+        version: Version,
+    ) Error!void {
         try self.io.writeAll(method_token);
         try self.io.writeAll(" ");
         try self.io.writeAll(target);
@@ -77,8 +101,22 @@ pub const Writer = struct {
         status: Status,
         reason: []const u8,
     ) Error!void {
-        try validateReason(reason);
+        for (reason) |byte| if (!h1.isFieldValueByte(byte)) return error.InvalidReason;
+        return self.assumeStatusLineReason(version, status, reason);
+    }
 
+    /// `statusLine` without validation.
+    pub fn assumeStatusLine(self: Writer, version: Version, status: Status) Error!void {
+        return self.assumeStatusLineReason(version, status, status.phrase() orelse "");
+    }
+
+    /// `statusLineReason` without validation.
+    pub fn assumeStatusLineReason(
+        self: Writer,
+        version: Version,
+        status: Status,
+        reason: []const u8,
+    ) Error!void {
         try self.io.writeAll(@tagName(version));
         try self.io.print(" {d:0>3} ", .{status.code()});
         try self.io.writeAll(reason);
@@ -87,9 +125,15 @@ pub const Writer = struct {
 
     /// Write one field line.
     pub fn field(self: Writer, name: []const u8, value: []const u8) Error!void {
-        try validateFieldName(name);
-        try validateFieldValue(value);
+        if (name.len == 0) return error.InvalidFieldName;
+        for (name) |byte| if (!h1.isTchar(byte)) return error.InvalidFieldName;
+        for (value) |byte| if (!h1.isFieldValueByte(byte)) return error.InvalidFieldValue;
 
+        return self.assumeField(name, value);
+    }
+
+    /// `field` without validation.
+    pub fn assumeField(self: Writer, name: []const u8, value: []const u8) Error!void {
         try self.io.writeAll(name);
         try self.io.writeAll(": ");
         try self.io.writeAll(value);
@@ -113,7 +157,7 @@ pub const Writer = struct {
 
     /// Write the `Transfer-Encoding: chunked` field line.
     pub fn chunked(self: Writer) Error!void {
-        try self.field("Transfer-Encoding", "chunked");
+        try self.assumeField("Transfer-Encoding", "chunked");
     }
 
     /// Write one non-final chunk.
@@ -127,34 +171,25 @@ pub const Writer = struct {
     /// Write the last chunk and the trailer section. An empty trailer list
     /// writes `0\r\n\r\n`.
     pub fn lastChunk(self: Writer, trailers: []const Header) Error!void {
+        for (trailers) |trailer| {
+            if (trailer.name.len == 0) return error.InvalidFieldName;
+            for (trailer.name) |byte| {
+                if (!h1.isTchar(byte)) return error.InvalidFieldName;
+            }
+            for (trailer.value) |byte| {
+                if (!h1.isFieldValueByte(byte)) return error.InvalidFieldValue;
+            }
+        }
+        return self.assumeLastChunk(trailers);
+    }
+
+    /// `lastChunk` without validation.
+    pub fn assumeLastChunk(self: Writer, trailers: []const Header) Error!void {
         try self.io.writeAll("0\r\n");
-        for (trailers) |trailer| try self.field(trailer.name, trailer.value);
+        for (trailers) |trailer| try self.assumeField(trailer.name, trailer.value);
         try self.io.writeAll("\r\n");
     }
 };
-
-fn validateMethod(token: []const u8) Writer.Error!void {
-    if (token.len == 0) return error.InvalidMethod;
-    for (token) |byte| if (!h1.isTchar(byte)) return error.InvalidMethod;
-}
-
-fn validateTarget(target: []const u8) Writer.Error!void {
-    if (target.len == 0) return error.InvalidTarget;
-    for (target) |byte| if (!h1.isTargetByte(byte)) return error.InvalidTarget;
-}
-
-fn validateFieldName(name: []const u8) Writer.Error!void {
-    if (name.len == 0) return error.InvalidFieldName;
-    for (name) |byte| if (!h1.isTchar(byte)) return error.InvalidFieldName;
-}
-
-fn validateFieldValue(value: []const u8) Writer.Error!void {
-    for (value) |byte| if (!h1.isFieldValueByte(byte)) return error.InvalidFieldValue;
-}
-
-fn validateReason(reason: []const u8) Writer.Error!void {
-    for (reason) |byte| if (!h1.isFieldValueByte(byte)) return error.InvalidReason;
-}
 
 test "request line" {
     var buffer: [64]u8 = undefined;
@@ -237,7 +272,7 @@ test "chunked body and trailers" {
     );
 }
 
-test "invalid input is rejected before writing" {
+test "checked methods reject before writing" {
     var buffer: [64]u8 = undefined;
     var io: IoWriter = .fixed(&buffer);
     var w: Writer = .init(&io);
@@ -247,7 +282,29 @@ test "invalid input is rejected before writing" {
     try testing.expectError(error.InvalidMethod, w.requestLineToken("GE T", "/", .@"HTTP/1.1"));
     try testing.expectError(error.InvalidReason, w.statusLineReason(.@"HTTP/1.1", .ok, "a\rb"));
     try testing.expectError(error.EmptyChunk, w.chunk(""));
+    try testing.expectError(error.InvalidFieldName, w.lastChunk(&.{
+        .{ .name = "Bad Name", .value = "x" },
+    }));
     try testing.expectEqualStrings("", io.buffered());
+}
+
+test "assume methods write trusted bytes verbatim" {
+    var buffer: [128]u8 = undefined;
+    var io: IoWriter = .fixed(&buffer);
+    var w: Writer = .init(&io);
+    try w.assumeRequestLineToken("GE T", "/a b", .@"HTTP/1.1");
+    try w.assumeStatusLineReason(.@"HTTP/1.1", .ok, "a\rb");
+    try w.assumeField("Bad Name", "a\rb");
+    try w.assumeLastChunk(&.{
+        .{ .name = "Bad Name", .value = "a\rb" },
+    });
+    try testing.expectEqualStrings(
+        "GE T /a b HTTP/1.1\r\n" ++
+            "HTTP/1.1 200 a\rb\r\n" ++
+            "Bad Name: a\rb\r\n" ++
+            "0\r\nBad Name: a\rb\r\n\r\n",
+        io.buffered(),
+    );
 }
 
 test "a full fixed buffer is WriteFailed" {

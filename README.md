@@ -54,7 +54,8 @@ ready to depend on.
   `need_more` across reads.
   `h1.Writer` carries a caller-owned `std.Io.Writer` and formats a request or
   status line, fields, a Content-Length or chunked body, and trailers into it;
-  it never flushes or closes the sink.
+  it never flushes or closes the sink. Checked methods validate the grammar;
+  the `assume*` variants skip validation for trusted data.
   `h1.framing` decides the body from a head: a request is `.none`, `.length`,
   or `.chunked`; a response adds `.close` and `.tunnel` (RFC 9112 §6.3).
   `h1.persistent` applies the §9.3 connection rule. It rejects TE with CL, TE

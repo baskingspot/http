@@ -103,7 +103,8 @@ a second encoder.
 - Does `statusLine` use `Status.phrase()` or require the caller to pass the
   reason? Default: use the phrase, and provide an explicit variant.
 - Does the writer reject an invalid field name/value, or trust the caller?
-  Default: reject. The check shares the parser's tables.
+  Both: the checked method validates, and the `assume*` variant writes as given
+  for trusted data. The checked path shares the parser's tables.
 - Do chunk extensions need a public form, or is `chunk(bytes)` enough? Default:
   no extensions until a caller asks; the decoder already ignores them.
 - Where does the writer live for HTTP/2 and HTTP/3? They have their own framing;

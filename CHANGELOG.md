@@ -51,7 +51,8 @@ All notable changes to http are recorded here. The format follows
   ignored; a chunk-size overflow is `error.Overflow`.
 - `h1.Writer`: carries a caller-owned `std.Io.Writer` and writes request/status
   lines, field lines, Content-Length, body bytes, and chunked bodies with
-  trailers. The writer validates the parser's grammar and never allocates,
+  trailers. Checked methods validate the parser's grammar; the `assume*`
+  variants skip validation for trusted data. The writer never allocates,
   flushes, or closes the sink.
 - `transfer_encoding.summarize`: the `Transfer-Encoding` coding list in field
   order, with the final coding, a seen/last `chunked` flag, parameter parsing
