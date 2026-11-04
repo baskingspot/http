@@ -55,11 +55,8 @@ pub fn requestLineToken(
     target: []const u8,
     version: Version,
 ) Error!void {
-    if (method_token.len == 0) return error.InvalidMethod;
-    for (method_token) |byte| if (!h1.isTchar(byte)) return error.InvalidMethod;
-
-    if (target.len == 0) return error.InvalidTarget;
-    for (target) |byte| if (!h1.isTargetByte(byte)) return error.InvalidTarget;
+    if (method_token.len == 0 or !validTchar(method_token)) return error.InvalidMethod;
+    if (target.len == 0 or !validTarget(target)) return error.InvalidTarget;
 
     return self.assumeRequestLineToken(method_token, target, version);
 }
@@ -97,7 +94,7 @@ pub fn statusLineReason(
     status: Status,
     reason: []const u8,
 ) Error!void {
-    for (reason) |byte| if (!h1.isFieldValueByte(byte)) return error.InvalidReason;
+    if (!validFieldValue(reason)) return error.InvalidReason;
     return self.assumeStatusLineReason(version, status, reason);
 }
 
@@ -118,9 +115,8 @@ pub fn assumeStatusLineReason(
 
 /// Write one field line.
 pub fn field(self: Writer, name: []const u8, value: []const u8) Error!void {
-    if (name.len == 0) return error.InvalidFieldName;
-    for (name) |byte| if (!h1.isTchar(byte)) return error.InvalidFieldName;
-    for (value) |byte| if (!h1.isFieldValueByte(byte)) return error.InvalidFieldValue;
+    if (name.len == 0 or !validTchar(name)) return error.InvalidFieldName;
+    if (!validFieldValue(value)) return error.InvalidFieldValue;
 
     return self.assumeField(name, value);
 }
@@ -160,13 +156,8 @@ pub fn chunk(self: Writer, bytes: []const u8) Error!void {
 /// writes `0\r\n\r\n`.
 pub fn lastChunk(self: Writer, trailers: []const Header) Error!void {
     for (trailers) |trailer| {
-        if (trailer.name.len == 0) return error.InvalidFieldName;
-        for (trailer.name) |byte| {
-            if (!h1.isTchar(byte)) return error.InvalidFieldName;
-        }
-        for (trailer.value) |byte| {
-            if (!h1.isFieldValueByte(byte)) return error.InvalidFieldValue;
-        }
+        if (trailer.name.len == 0 or !validTchar(trailer.name)) return error.InvalidFieldName;
+        if (!validFieldValue(trailer.value)) return error.InvalidFieldValue;
     }
     return self.assumeLastChunk(trailers);
 }
@@ -176,6 +167,74 @@ pub fn assumeLastChunk(self: Writer, trailers: []const Header) Error!void {
     try self.writer.writeAll("0\r\n");
     for (trailers) |trailer| try self.assumeField(trailer.name, trailer.value);
     try self.writer.writeAll("\r\n");
+}
+
+const vector_block = std.simd.suggestVectorLength(u8) orelse 8;
+const Vec = @Vector(vector_block, u8);
+const vector_ok = std.simd.suggestVectorLength(u8) != null;
+
+/// The tchar set is scattered, and the writer uses this on short field names
+/// and method tokens. The scalar table wins there; a vector mask is a
+/// follow-up only if a profile says otherwise.
+fn validTchar(bytes: []const u8) bool {
+    for (bytes) |byte| if (!h1.isTchar(byte)) return false;
+    return true;
+}
+
+fn validFieldValue(bytes: []const u8) bool {
+    var index: usize = 0;
+    if (comptime vector_ok) {
+        while (index + vector_block <= bytes.len) : (index += vector_block) {
+            const lanes: Vec = bytes[index..][0..vector_block].*;
+            const ctl = (lanes < @as(Vec, @splat(0x20))) &
+                (lanes != @as(Vec, @splat('\t')));
+            const del = lanes == @as(Vec, @splat(0x7f));
+            if (@reduce(.Or, ctl | del)) return false;
+        }
+    }
+    while (index < bytes.len) : (index += 1) {
+        if (!h1.isFieldValueByte(bytes[index])) return false;
+    }
+    return true;
+}
+
+fn validTarget(bytes: []const u8) bool {
+    var index: usize = 0;
+    if (comptime vector_ok) {
+        while (index + vector_block <= bytes.len) : (index += vector_block) {
+            const lanes: Vec = bytes[index..][0..vector_block].*;
+            const bad = (lanes < @as(Vec, @splat(0x21))) |
+                (lanes > @as(Vec, @splat(0x7e)));
+            if (@reduce(.Or, bad)) return false;
+        }
+    }
+    while (index < bytes.len) : (index += 1) {
+        if (!h1.isTargetByte(bytes[index])) return false;
+    }
+    return true;
+}
+
+fn scalarFieldValue(bytes: []const u8) bool {
+    for (bytes) |byte| if (!h1.isFieldValueByte(byte)) return false;
+    return true;
+}
+
+fn scalarTarget(bytes: []const u8) bool {
+    for (bytes) |byte| if (!h1.isTargetByte(byte)) return false;
+    return true;
+}
+
+test "vector validation agrees with the scalar tables" {
+    var buffer: [vector_block + 3]u8 = undefined;
+    for (0..256) |value| {
+        for (0..buffer.len) |at| {
+            @memset(&buffer, 'a');
+            buffer[at] = @intCast(value);
+
+            try testing.expectEqual(scalarFieldValue(&buffer), validFieldValue(&buffer));
+            try testing.expectEqual(scalarTarget(&buffer), validTarget(&buffer));
+        }
+    }
 }
 
 test "request line" {
