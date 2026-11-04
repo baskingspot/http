@@ -84,15 +84,15 @@ filter.
 
 | Input | http | hparse | ratio |
 | --- | --- | --- | --- |
-| typical scrape, 5 fields | 92 ns | 78 ns | 1.18 |
-| response, 4 fields | 88 ns | 77 ns | 1.14 |
-| wide request, 14 fields | 293 ns | 332 ns | 0.88 |
+| typical scrape, 5 fields | 91 ns | 79 ns | 1.15 |
+| response, 4 fields | 88 ns | 72 ns | 1.22 |
+| wide request, 14 fields | 290 ns | 333 ns | 0.87 |
 | 1 KiB header value | 92 ns | 307 ns | 0.30 |
 
 These are higher than the ad-hoc numbers above because the bench keeps the
 parsed head alive; the ad-hoc harness observed only `consumed`, which let the
 compiler drop the result construction. The trade is visible and acceptable:
-hparse wins the short-head cases by 14-18%, http wins the wide and long-value
+hparse wins the short-head cases by 15-22%, http wins the wide and long-value
 cases, and the long value is the one that matters for throughput and hostile
 input. hparse's short-head advantage is its 4-byte method dispatch and its
 looser key scan; the latter is not worth copying.
