@@ -4,6 +4,7 @@
 //! per byte that must stop a scan or fails validation. The parser and writer
 //! share both forms so a character rule is written once.
 
+const std = @import("std");
 const simd = @import("../simd.zig");
 
 /// `tchar` from RFC 9110 §5.6.2.
@@ -25,6 +26,15 @@ pub fn isTargetByte(byte: u8) bool {
     return byte >= 0x21 and byte <= 0x7e;
 }
 
+fn makeSet(comptime predicate: fn (u8) bool) std.StaticBitSet(256) {
+    @setEvalBranchQuota(10_000);
+    var set: std.StaticBitSet(256) = .initEmpty();
+    for (0..256) |index| {
+        if (predicate(@intCast(index))) set.set(index);
+    }
+    return set;
+}
+
 fn makeTable(comptime predicate: fn (u8) bool) [256]bool {
     var table: [256]bool = undefined;
     for (0..256) |index| table[index] = predicate(@intCast(index));
@@ -32,8 +42,8 @@ fn makeTable(comptime predicate: fn (u8) bool) [256]bool {
 }
 
 pub const tchar_table = makeTable(isTchar);
-pub const field_value_table = makeTable(isFieldValueByte);
-pub const target_table = makeTable(isTargetByte);
+pub const field_value_set = makeSet(isFieldValueByte);
+pub const target_set = makeSet(isTargetByte);
 
 /// A true lane where the byte is not part of a field value or reason phrase:
 /// CR, LF, any other CTL except HTAB, or DEL.

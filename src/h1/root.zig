@@ -877,7 +877,7 @@ test "target scanner: every byte at every position (RFC 9112 §3.2)" {
                     try testing.expectEqual(at, target.len);
                     try testing.expectEqual(at, @as(usize, cursor.pos));
                 }
-            } else if (!syntax.target_table[byte]) {
+            } else if (!syntax.target_set.isSet(byte)) {
                 try testing.expectError(error.Invalid, scanTarget(&cursor));
             } else {
                 try testing.expectError(error.Incomplete, scanTarget(&cursor));
@@ -900,7 +900,7 @@ test "line scanner: every byte at every position (RFC 9110 §5.5)" {
                 const line = try scanLine(&cursor);
                 try testing.expectEqual(at, line.len);
                 try testing.expectEqual(at, @as(usize, cursor.pos));
-            } else if (!syntax.field_value_table[byte]) {
+            } else if (!syntax.field_value_set.isSet(byte)) {
                 try testing.expectError(error.Invalid, scanLine(&cursor));
             } else {
                 try testing.expectError(error.Incomplete, scanLine(&cursor));
