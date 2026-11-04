@@ -688,6 +688,12 @@ pub const Session = struct {
         var state = self.streams.getPtr(id);
         if (state == null) {
             if (self.isClosedStream(id)) {
+                const local_parity: u31 = if (self.options.role == .client) 1 else 0;
+                if (id & 1 != local_parity and id < self.ids.last_remote) {
+                    // A lower remote identifier that was never opened is an
+                    // idle stream, not a closed one (RFC 9113 §5.1.1).
+                    return self.connectionError(allocator, .protocol_error);
+                }
                 return self.failStream(allocator, id, .stream_closed);
             }
             self.ids.acceptRemote(id) catch {
