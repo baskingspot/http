@@ -51,8 +51,8 @@
             .hash = "stdx-0.3.0-CcWego4nDwC5PxPd4F-nlcOWXxAVCZ6MDI5f3YNVNSO7",
         },
         .tls = .{
-            .url = "git+https://github.com/baskingspot/tls#a590a0f24aa9feae0cc92466c689c8c4efc1a415",
-            .hash = "tls-0.1.1-nf2MKNK-JQCT6YzLkbbX095mHuD8ZmiJAch0jpauAXxg",
+            .url = "git+https://github.com/baskingspot/tls#567257ac02eae9dad1510cc04bb13cd3a19ca6ca",
+            .hash = "tls-0.1.1-nf2MKPHUJQAkW3nfJDqM_C-Py2T67LSZnuuSngLYzEyr",
         },
     },
     .paths = .{

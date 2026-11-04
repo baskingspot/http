@@ -22,16 +22,15 @@ const Handshake = tls.ServerHandshake;
 pub const Transport = struct {
     // ast-grep-ignore: public-struct-field-default -- options bag; call sites override one knob
     pub const Options = struct {
-        /// Credentials and the handshake template. The transport replaces the
-        /// template's ephemeral keypairs, random, and reassembly storage for
-        /// every accepted connection; all other fields are borrowed as-is.
-        handshake: Handshake.Config,
+        /// Reusable server policy. Each slot supplies its own ephemeral keys,
+        /// random value, and handshake storage.
+        handshake: Handshake.ServerConfig = .{},
         cert_chain: []const []const u8,
         signer: tls.signature.Signer,
         /// Required ALPN protocol. The handshake fails without it.
         alpn: []const u8 = "h2",
         /// Per-connection storage for a verified client leaf certificate.
-        /// Zero leaves `handshake.client_cert_buffer` untouched.
+        /// Zero supplies no client-certificate storage.
         client_cert_bytes: usize = 0,
     };
 
@@ -79,21 +78,21 @@ pub const Transport = struct {
                 try allocator.alloc(u8, options.client_cert_bytes);
             errdefer if (self.client_cert.len != 0) allocator.free(self.client_cert);
 
-            var config = options.handshake;
-            var keypairs: Handshake.KeyPairs = try .init(.generate());
-            errdefer keypairs.secureZero();
-            config.keypairs = keypairs;
+            var config: Handshake.Config = .{
+                .keypairs = try .init(.generate()),
+                .random = undefined,
+                .reassembly = &self.reassembly,
+            };
+            defer config.keypairs.secureZero();
+            defer config.random.secureZero();
             try io.randomSecure(&config.random.data);
-            config.reassembly = &self.reassembly;
             if (self.client_cert.len != 0) config.client_cert_buffer = self.client_cert;
 
             try self.server.init(&.{
-                .handshake = config,
+                .handshake = options.handshake,
                 .cert_chain = options.cert_chain,
                 .signer = options.signer,
-            }, .{ .record = &self.record, .out = &self.out });
-            config.keypairs.secureZero();
-            keypairs.secureZero();
+            }, config, .{ .record = &self.record, .out = &self.out });
 
             self.fd = fd;
             self.required_alpn = options.alpn;

@@ -59,21 +59,12 @@ pub fn main(init: std.process.Init) !void {
     var signer = try tls.signature.PrivateKey.fromP256Scalar(&scalar_buf);
     defer signer.deinit();
 
-    // The readiness transport replaces these fields per connection. They are
-    // present to satisfy `ServerHandshake.Config`; no connection uses them.
-    var keypairs: tls.ServerHandshake.KeyPairs = try .init(.generate());
-    defer keypairs.secureZero();
-
     var server = try Engine.Server.init(io, address, App.handler(), .{
         .allocator = gpa,
         .max_connections = 64,
         .max_streams = 128,
         .transport = .{
-            .handshake = .{
-                .keypairs = keypairs,
-                .random = .init(@splat(0x72)),
-                .alpn_protocols = &.{"h2"},
-            },
+            .handshake = .{ .alpn_protocols = &.{"h2"} },
             .cert_chain = &.{cert},
             .signer = signer.signer(),
         },
