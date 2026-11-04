@@ -1,14 +1,14 @@
-//! A small h2c server over std.Io, driven by `h2.Session`.
+//! A small h2c server over std.Io, driven by the blocking h2 engine.
 //!
 //!     just example-h2
 //!     curl -v --http2-prior-knowledge http://127.0.0.1:8081/
 //!     nghttp -v http://127.0.0.1:8081/
-//!     just conformance
+//!     just conformance-run
 //!
-//! The session owns the protocol state; this file owns the sockets, the
-//! handler, and the accept loop. It accepts connections on threads, waits for a
-//! request to end before it answers, and resumes a body when flow control opens
-//! the window. No TLS: this is h2c with prior knowledge.
+//! The engine owns the session and the transport; this file owns the handler:
+//! requests, content-length checks, and a response body that resumes when flow
+//! control opens. One thread per connection sits above the engine's `serve`.
+//! No TLS: this is h2c with prior knowledge.
 
 const std = @import("std");
 const Io = std.Io;
@@ -35,6 +35,108 @@ const Request = struct {
 const Pending = struct {
     stream_id: u31,
     offset: usize,
+};
+
+const Handler = struct {
+    gpa: Allocator,
+    requests: [max_streams]?Request = @splat(null),
+    pending: [max_streams]?Pending = @splat(null),
+
+    pub fn handle(
+        self: *Handler,
+        conn: *http.h2.engine.Connection,
+        event: http.h2.session.Event,
+    ) !void {
+        const session = conn.session;
+        switch (event) {
+            .request => |request| {
+                const slot = findFreeRequest(&self.requests) orelse {
+                    try session.submitReset(self.gpa, request.stream_id, .refused_stream);
+                    return;
+                };
+                const method: Method = if (std.mem.eql(u8, request.head.method_token, "HEAD"))
+                    .head
+                else if (std.mem.eql(u8, request.head.method_token, "GET"))
+                    .get
+                else
+                    .other;
+
+                const content_length = parseContentLength(request.head.headers) catch {
+                    try session.submitReset(self.gpa, request.stream_id, .protocol_error);
+                    return;
+                };
+                slot.* = .{
+                    .stream_id = request.stream_id,
+                    .method = method,
+                    .content_length = content_length,
+                    .received = 0,
+                    .ready = request.end_stream,
+                    .responded = false,
+                };
+            },
+
+            .data => |data| {
+                const request = findRequest(&self.requests, data.stream_id) orelse return;
+                request.received += data.bytes.len;
+                if (data.end_stream) request.ready = true;
+            },
+
+            .trailers => |trailers| {
+                if (trailers.end_stream) {
+                    if (findRequest(&self.requests, trailers.stream_id)) |request| {
+                        request.ready = true;
+                    }
+                }
+            },
+
+            .window_update => |update| {
+                if (update.stream_id == 0) {
+                    for (&self.pending) |*slot| {
+                        if (slot.* != null) {
+                            try pump(session, self.gpa, slot, &self.requests);
+                        }
+                    }
+                } else if (findPending(&self.pending, update.stream_id)) |slot| {
+                    try pump(session, self.gpa, slot, &self.requests);
+                }
+            },
+
+            .reset => |reset| {
+                clearRequest(&self.requests, reset.stream_id);
+                clearPending(&self.pending, reset.stream_id);
+            },
+
+            .settings => {
+                for (&self.pending) |*slot| {
+                    if (slot.* != null) {
+                        try pump(session, self.gpa, slot, &self.requests);
+                    }
+                }
+            },
+
+            .goaway => |goaway| {
+                print("GOAWAY last={d} code=0x{x}\n", .{
+                    goaway.last_stream_id,
+                    @intFromEnum(goaway.code),
+                });
+            },
+
+            .connection_error => |err| {
+                print("connection error: 0x{x}\n", .{@intFromEnum(err.code)});
+            },
+
+            .response => {},
+        }
+    }
+
+    pub fn afterEvents(self: *Handler, conn: *http.h2.engine.Connection) !void {
+        try respondReady(conn.session, self.gpa, &self.requests, &self.pending);
+    }
+
+    pub fn onError(self: *Handler, err: anyerror) void {
+        _ = self;
+        print("http2-server: connection: {s}\n", .{@errorName(err)});
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -72,148 +174,14 @@ fn serveThread(gpa: Allocator, io: Io, stream: Io.net.Stream) void {
 }
 
 fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
-    var reader = stream.reader(io, &.{});
+    var handler: Handler = .{ .gpa = gpa };
+    var read_buffer: [16 * 1024]u8 = undefined;
     var write_buffer: [4096]u8 = undefined;
-    var writer = stream.writer(io, &write_buffer);
-    const r = &reader.interface;
-    const w = &writer.interface;
-
-    var session = try http.h2.Session.init(gpa, .{ .role = .server });
-    defer session.deinit(gpa);
-
-    var requests: [max_streams]?Request = @splat(null);
-    var pending: [max_streams]?Pending = @splat(null);
-
-    var read_buf: [16 * 1024]u8 = undefined;
-    var out_buf: [4096]u8 = undefined;
-
-    while (true) {
-        while (true) {
-            const n = session.send(&out_buf);
-            if (n == 0) break;
-            try w.writeAll(out_buf[0..n]);
-        }
-        try w.flush();
-
-        var vecs: [1][]u8 = .{&read_buf};
-        const n = r.readVec(&vecs) catch |err| switch (err) {
-            error.EndOfStream => return,
-            error.ReadFailed => return err,
-        };
-        if (n == 0) return;
-
-        var offset: usize = 0;
-        while (offset < n) {
-            const consumed = session.receive(read_buf[offset..n]);
-            if (consumed == 0) break;
-            offset += consumed;
-
-            while (try session.nextEvent(gpa)) |event| {
-                try handleEvent(&session, gpa, event, &requests, &pending);
-            }
-        }
-
-        if (!session.isClosed()) {
-            try respondReady(&session, gpa, &requests, &pending);
-        }
-
-        if (session.isClosed()) {
-            while (true) {
-                const written = session.send(&out_buf);
-                if (written == 0) break;
-                try w.writeAll(out_buf[0..written]);
-            }
-            try w.flush();
-            return;
-        }
-    }
-}
-
-fn handleEvent(
-    session: *http.h2.Session,
-    gpa: Allocator,
-    event: http.h2.session.Event,
-    requests: *[max_streams]?Request,
-    pending: *[max_streams]?Pending,
-) !void {
-    switch (event) {
-        .request => |request| {
-            const slot = findFreeRequest(requests) orelse {
-                try session.submitReset(gpa, request.stream_id, .refused_stream);
-                return;
-            };
-            const method: Method = if (std.mem.eql(u8, request.head.method_token, "HEAD"))
-                .head
-            else if (std.mem.eql(u8, request.head.method_token, "GET"))
-                .get
-            else
-                .other;
-
-            const content_length = parseContentLength(request.head.headers) catch {
-                try session.submitReset(gpa, request.stream_id, .protocol_error);
-                return;
-            };
-            slot.* = .{
-                .stream_id = request.stream_id,
-                .method = method,
-                .content_length = content_length,
-                .received = 0,
-                .ready = request.end_stream,
-                .responded = false,
-            };
-        },
-
-        .data => |data| {
-            const request = findRequest(requests, data.stream_id) orelse return;
-            request.received += data.bytes.len;
-            if (data.bytes.len > 0) {
-                try session.release(gpa, data.stream_id, @intCast(data.bytes.len));
-            }
-            if (data.end_stream) request.ready = true;
-        },
-
-        .trailers => |trailers| {
-            if (trailers.end_stream) {
-                if (findRequest(requests, trailers.stream_id)) |request| {
-                    request.ready = true;
-                }
-            }
-        },
-
-        .window_update => |update| {
-            if (update.stream_id == 0) {
-                for (pending) |*slot| {
-                    if (slot.* != null) try pump(session, gpa, slot, requests);
-                }
-            } else if (findPending(pending, update.stream_id)) |slot| {
-                try pump(session, gpa, slot, requests);
-            }
-        },
-
-        .reset => |reset| {
-            clearRequest(requests, reset.stream_id);
-            clearPending(pending, reset.stream_id);
-        },
-
-        .settings => {
-            for (pending) |*slot| {
-                if (slot.* != null) try pump(session, gpa, slot, requests);
-            }
-        },
-
-        .goaway => |goaway| {
-            print("GOAWAY last={d} code=0x{x}\n", .{
-                goaway.last_stream_id,
-                @intFromEnum(goaway.code),
-            });
-        },
-
-        .connection_error => |err| {
-            print("connection error: 0x{x}\n", .{@intFromEnum(err.code)});
-        },
-
-        .response => {},
-    }
+    try http.h2.engine.blocking.serve(Handler, gpa, io, stream, &handler, .{
+        .session = .{ .role = .server },
+        .read_buffer = &read_buffer,
+        .write_buffer = &write_buffer,
+    });
 }
 
 fn respondReady(

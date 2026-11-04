@@ -130,6 +130,13 @@ ready to depend on.
   `FixedBufferAllocator` gives the connection a fixed ceiling. The h2c example
   is the conformance target: `just conformance` runs h2spec against it, and the
   full suite passes in strict mode.
+- `h2.engine.blocking`: a blocking server engine over `std.Io`, the h2
+  counterpart to `h1.engine.blocking`. `serve` drives one connection and `run`
+  is the accept loop. A handler gets one `h2.session.Event` at a time through a
+  `Connection`, may batch responses in `afterEvents`, and may observe errors in
+  `onError`. The engine returns DATA to both flow-control windows after the
+  handler consumes it. The h2c example is this engine with a thread per
+  connection above `serve`.
 - `content_length`: `Content-Length` parsing and combination. Repeated values
   must agree, a comma list of identical values is accepted, and non-digits,
   conflicts, and overflow are errors. `null` means the field was absent.
@@ -167,7 +174,7 @@ runs the benchmarks, `just fuzz` drives the fuzz targets with the built-in
 runner, and `just example` runs the HTTP/1.1 server example.
 
 `just example-h2` runs an h2c server on `127.0.0.1:8081`, driven by
-`h2.Session`. Poke it with `curl -v --http2-prior-knowledge
+`h2.engine.blocking`. Poke it with `curl -v --http2-prior-knowledge
 http://127.0.0.1:8081/`, or with the devshell's `nghttp -v
 http://127.0.0.1:8081/` to see the frames. It handles the preface, SETTINGS,
 PING, HPACK, flow control, and a fixed 200 response over a real session loop;
