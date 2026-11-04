@@ -101,6 +101,10 @@ pub const Connection = struct {
         return self.session.isClosed();
     }
 
+    pub fn hasPendingOutput(self: *const Connection) bool {
+        return self.session.hasPendingOutput();
+    }
+
     /// Deliver every complete event currently buffered, start the handlers
     /// whose requests are complete, and queue as much response output as flow
     /// control accepts. Returns whether anything happened.

@@ -225,6 +225,34 @@ pub fn build(b: *std.Build) void {
     b.step("example-h2", "Run the HTTP/2 h2c example server")
         .dependOn(&run_h2_example.step);
 
+    // The readiness h2c example is Linux-only. The steps exist everywhere so
+    // `check-example` is portable; only Linux gets a target to build.
+    const h2_poll_example_bin = b.step(
+        "example-h2-poll-bin",
+        "Build the HTTP/2 poll example server",
+    );
+    const h2_poll_example_run = b.step(
+        "example-h2-poll",
+        "Run the HTTP/2 poll example server",
+    );
+    if (target.result.os.tag == .linux) {
+        const h2_poll_mod = b.createModule(.{
+            .root_source_file = b.path("examples/http2_poll.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "http", .module = mod }},
+        });
+        const h2_poll = b.addExecutable(.{
+            .name = "http2-poll",
+            .root_module = h2_poll_mod,
+        });
+        h2_poll_example_bin.dependOn(&h2_poll.step);
+
+        const run_h2_poll = b.addRunArtifact(h2_poll);
+        if (b.args) |args| run_h2_poll.addArgs(args);
+        h2_poll_example_run.dependOn(&run_h2_poll.step);
+    }
+
     // The poll example is Linux-only for now. The steps exist everywhere so
     // `check-example` is portable; only Linux gets a target to build.
     const poll_example_bin = b.step("example-poll-bin", "Build the HTTP/1.1 poll example server");

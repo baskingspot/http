@@ -4,6 +4,7 @@
 //! buffering, and the handler loop. `blocking` is the reference engine.
 
 pub const blocking = @import("blocking.zig");
+pub const poll = @import("poll.zig");
 pub const connection = @import("connection.zig");
 pub const Connection = connection.Connection;
 pub const ConnectionOptions = connection.Options;
@@ -15,4 +16,7 @@ pub const ResponseOptions = blocking.ResponseOptions;
 
 test {
     _ = blocking;
+    if (@import("builtin").os.tag == .linux) {
+        _ = poll;
+    }
 }
