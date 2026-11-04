@@ -101,6 +101,10 @@
           "baskingspot",
           "flake-parts"
         ],
+        "mattware": [
+          "baskingspot",
+          "mattware"
+        ],
         "nixpkgs": "nixpkgs"
       }
     },

@@ -42,7 +42,7 @@ const response =
 pub fn benchmarkRequestTypical(b: *testingx.B) !void {
     const buf = b.blackBox(typical);
     var storage: [16]http.Header = undefined;
-    var state: h1.SearchState = .{};
+    var state: h1.SearchState = .init;
     var sink: usize = 0;
     while (try b.loop()) {
         const parsed = try h1.parseRequest(buf, &state, &storage);
@@ -55,7 +55,7 @@ pub fn benchmarkRequestTypical(b: *testingx.B) !void {
 pub fn benchmarkRequestWide(b: *testingx.B) !void {
     const buf = b.blackBox(wide);
     var storage: [32]http.Header = undefined;
-    var state: h1.SearchState = .{};
+    var state: h1.SearchState = .init;
     var sink: usize = 0;
     while (try b.loop()) {
         const parsed = try h1.parseRequest(buf, &state, &storage);
@@ -68,7 +68,7 @@ pub fn benchmarkRequestWide(b: *testingx.B) !void {
 pub fn benchmarkResponse(b: *testingx.B) !void {
     const buf = b.blackBox(response);
     var storage: [16]http.Header = undefined;
-    var state: h1.SearchState = .{};
+    var state: h1.SearchState = .init;
     var sink: usize = 0;
     while (try b.loop()) {
         const parsed = try h1.parseResponse(buf, &state, &storage);
@@ -87,7 +87,7 @@ const incomplete_request = "GET / HTTP/1.1\r\n" ++ ("X-Filler: value\r\n" ** 400
 pub fn benchmarkRequestLongValue(b: *testingx.B) !void {
     const buf: []const u8 = long_request;
     var storage: [4]http.Header = undefined;
-    var state: h1.SearchState = .{};
+    var state: h1.SearchState = .init;
     var sink: usize = 0;
     while (try b.loop()) {
         const parsed = try h1.parseRequest(buf, &state, &storage);

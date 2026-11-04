@@ -129,7 +129,7 @@ fn serveConnection(io: Io, stream: Io.net.Stream) !void {
                 while (!decoder.isDone()) {
                     const step = decoder.next(r.buffered()) catch |err| switch (err) {
                         error.Incomplete => {
-                            fillMore(r) catch return;
+                            r.fillMore() catch return;
                             continue;
                         },
                         error.Invalid, error.TooManyHeaders => {
@@ -169,7 +169,7 @@ fn serveConnection(io: Io, stream: Io.net.Stream) !void {
                         .need_more => {},
                     }
                     if (step.event == .need_more and step.consumed == 0) {
-                        fillMore(r) catch return;
+                        r.fillMore() catch return;
                     }
                 }
                 break :blk decoded;
@@ -206,7 +206,7 @@ const ReadError = error{
 /// Fill the reader's buffer until a whole head is present, then consume it.
 /// The returned head borrows both `storage` and the reader's buffer.
 fn readRequest(r: *Io.Reader, storage: []http.Header) ReadError!http.h1.RequestHead {
-    var state: http.h1.SearchState = .{};
+    var state: http.h1.SearchState = .init;
 
     while (true) {
         const buffered = r.buffered();
@@ -219,7 +219,7 @@ fn readRequest(r: *Io.Reader, storage: []http.Header) ReadError!http.h1.RequestH
                 error.Incomplete => {
                     // No room left to grow the head. This is the 431 case.
                     if (buffered.len == r.buffer.len) return error.HeadTooLarge;
-                    try fillMore(r);
+                    try r.fillMore();
                     continue;
                 },
                 error.Invalid => return error.Invalid,
@@ -229,15 +229,8 @@ fn readRequest(r: *Io.Reader, storage: []http.Header) ReadError!http.h1.RequestH
             r.toss(parsed.consumed);
             return parsed.head;
         }
-        try fillMore(r);
+        try r.fillMore();
     }
-}
-
-fn fillMore(r: *Io.Reader) ReadError!void {
-    r.fillMore() catch |err| switch (err) {
-        error.EndOfStream => return error.EndOfStream,
-        error.ReadFailed => return error.ReadFailed,
-    };
 }
 
 fn writeResponse(

@@ -20,6 +20,11 @@ Zig 0.16 only. The flake is the tool contract, from `baskingspot/nix`: `nix deve
 - No server, no middleware, no message or connection types, and no header map.
   Those depend on the host's I/O runtime; this package stops at the message
   head.
+- One byte cursor. `src/Cursor.zig` is the file-as-struct `Cursor` every
+  parser walks with; do not add a second one or a local position type. It
+  knows nothing about error vocabularies, so `Incomplete` (h1) and `Truncated`
+  (HPACK) stay with the parser. A list iterator with a delimiter is a
+  different thing and may keep its own position.
 - stdx is first-party, not third-party: when it already solves the problem
   (`fmt.atoi` for decimal parsing, `buffer`, `time`), use it instead of
   reimplementing the primitive here. The ban above is on `compress`, because a

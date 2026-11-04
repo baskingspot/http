@@ -63,6 +63,24 @@ All notable changes to http are recorded here. The format follows
   form.
 - `Version` and `WireVersion`: the effective version and the exact wire pair,
   exported at the package root and from `h1`.
+- `Cursor`: one byte cursor for every parser here, replacing the private
+  cursors in `h1`, `prefix_int`, and the Huffman decoder. It is infallible;
+  each protocol maps the end of input to its own error.
+- `prefix_int.decode`, `prefix_int.encode`, and `prefix_int.encodedLen`:
+  RFC 7541 §5.1 integers, shared by HPACK and QPACK. Values are `u32`;
+  encodings that need more are `error.InvalidInteger`.
+- `huffman.decode` and `huffman.encode`: the RFC 7541 Appendix B code, shared
+  by HPACK and QPACK. Decoding rejects EOS and padding that is over seven bits
+  or not EOS's prefix.
+- `hpack.static_table`: the 61 predefined fields from RFC 7541 Appendix A, as
+  `Header` values with static storage.
+- `hpack.DynamicTable`: the per-connection table over a caller-owned arena and
+  slot array, with the RFC 7541 §4.1 size accounting, §4.4 eviction, and
+  compaction.
+- `hpack.Decoder`: header block decoding for HTTP/2. Decoded fields are copied
+  into a caller-owned buffer, so a field never borrows a dynamic-table entry.
+  `decode` returns `Headers`; `decodeFlags` also records the RFC 7541 §6.2.3
+  never-indexed flag per field for an intermediary that re-encodes.
 - `content_length.parse`: `Content-Length` parsing and duplicate
   combination. Conflicting values, non-digits, and overflow are errors;
   `null` means the field was absent.

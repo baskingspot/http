@@ -10,6 +10,12 @@ default:
 test:
     zig build test --summary all
 
+[doc("Regenerate the HPACK interop fixture from golang.org/x/net/http2/hpack")]
+[group("test")]
+fixture:
+    cd tools/hpack-interop && go run . > ../../tests/hpack-interop.txtar.tmp
+    mv tests/hpack-interop.txtar.tmp tests/hpack-interop.txtar
+
 [doc("Run the fuzzer with an iteration budget, for example `just fuzz 50M`. Uses the built-in test runner, which testingx does not replace in fuzz mode. ReleaseSafe forces the LLVM backend, dodging the 0.16.0 self-hosted-backend bug in Debug fuzz mode (ziglang/zig#30655)")]
 [group("test")]
 fuzz LIMIT="10M":
@@ -29,7 +35,7 @@ bench-smoke:
 [group("lint")]
 lint:
     ziglint
-    zig fmt --check src bench examples build.zig build.zig.zon
+    zig fmt --check src tests bench examples build.zig build.zig.zon
     nix fmt -- --ci
     oxfmt --check README.md AGENTS.md .github
     actionlint
@@ -39,7 +45,7 @@ lint:
 [doc("Format everything lint checks")]
 [group("lint")]
 fmt:
-    zig fmt src bench examples build.zig build.zig.zon
+    zig fmt src tests bench examples build.zig build.zig.zon
     nix fmt
     oxfmt README.md AGENTS.md .github
     just --fmt

@@ -34,6 +34,11 @@ ready to depend on.
   are named; any other three-digit code is still a value, so `class` returns
   null only outside 100..599. `Status.parse(200)` is `.ok`, `status.code()` is
   the wire number, and `phrase()` returns null for an unnamed code.
+- `Cursor`: the shared read position over borrowed bytes. `next`, `peek`,
+  `take`, and `skip` return null or false at the end; `at` and `slice` assert
+  bounds a scanner already checked. The cursor never decides whether running
+  out is an error, so `h1` maps it to `Incomplete` and HPACK to `Truncated`.
+  `h1`, `prefix_int`, and the Huffman decoder all use it.
 - `Header` / `Headers`: `Header` is a borrowed name/value pair. `Headers` is an
   ordered, case-insensitive view over a field section. `get` returns the first
   value for singleton fields, `values` yields every line separately
@@ -60,6 +65,18 @@ ready to depend on.
   or `.chunked`; a response adds `.close` and `.tunnel` (RFC 9112 §6.3).
   `h1.persistent` applies the §9.3 connection rule. It rejects TE with CL, TE
   on an HTTP/1.0 message, and a request whose final coding is not `chunked`.
+- `prefix_int`: HPACK and QPACK prefix integers (RFC 7541 §5.1), shared by
+  both. Up to 32 bits, with the representation's tag bits left to the caller.
+- `huffman`: the RFC 7541 Appendix B Huffman code, shared by HPACK and QPACK.
+  Decodes into caller storage and rejects EOS and bad padding; encodes with
+  the EOS prefix padding. An eight-bit root table covers every letter and
+  digit, so the canonical scan is the rare path.
+- `hpack`: HPACK for HTTP/2. `static_table` is the RFC's 61 fields,
+  `DynamicTable` is the per-connection table over caller-owned storage, and
+  `hpack.Decoder` turns one complete header block into `Header` values copied
+  into the caller's buffer. `decodeFlags` also records the RFC 7541 §6.2.3
+  never-indexed flag for an intermediary that re-encodes. The Appendix C
+  request and response sequences are the tests. There is no encoder yet.
 - `content_length`: `Content-Length` parsing and combination. Repeated values
   must agree, a comma list of identical values is accepted, and non-digits,
   conflicts, and overflow are errors. `null` means the field was absent.

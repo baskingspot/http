@@ -60,6 +60,29 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // The interop fixture reads a txtar archive with testingx at compile time,
+    // so it is a second test artifact with its own module. `http` itself never
+    // imports testingx, and `tests/` is outside the package tarball.
+    if (testingx_dep) |dep| {
+        const interop_mod = b.addModule("http-interop-tests", .{
+            .root_source_file = b.path("tests/hpack_interop.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "testingx", .module = dep.module("testingx") },
+            },
+        });
+        const interop_tests = b.addTest(.{
+            .root_module = interop_mod,
+            .test_runner = test_runner,
+        });
+        const run_interop = b.addRunArtifact(interop_tests);
+        run_interop.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
+        if (b.args) |args| run_interop.addArgs(args);
+        test_step.dependOn(&run_interop.step);
+    }
+
     // The picohttpparser case table. It lives outside the package for the same
     // reason as the interop fixture: it imports `http` and is not shipped.
     const corpus_mod = b.createModule(.{

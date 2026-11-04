@@ -6,6 +6,9 @@
       url = "github:baskingspot/nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # The shared mattware pin: Go's toolchain selection lives there, and
+    # following baskingspot's input keeps one rev across the org.
+    mattware.follows = "baskingspot/mattware";
   };
 
   outputs =
@@ -19,7 +22,12 @@
       ];
 
       perSystem =
-        { pkgs, config, ... }:
+        {
+          pkgs,
+          config,
+          system,
+          ...
+        }:
         {
           devShells.default = pkgs.mkShell {
             inputsFrom = [
@@ -27,8 +35,13 @@
               config.devShells."zig-0-16"
             ];
 
-            # Project-specific tools.
-            packages = with pkgs; [ ];
+            # Project-specific tools. Go builds `tools/hpack-interop`, which
+            # regenerates the HPACK interop fixture. `fromGoMod` takes the
+            # toolchain from the module's go.mod, not from nixpkgs.
+            packages = [
+              (inputs.mattware.packages.${system}.go-bin.fromGoMod ./tools/hpack-interop/go.mod)
+              pkgs.gopls
+            ];
           };
         };
     };

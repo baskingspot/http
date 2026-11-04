@@ -16,6 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 const IoUring = std.os.linux.IoUring;
+const print = std.debug.print;
 const posix = std.posix;
 const mem = std.mem;
 const builtin = @import("builtin");
@@ -58,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
     const port = listener.socket.address.getPort();
 
     var ctx: ServerCtx = .{ .io = io, .listener = &listener };
-    const server_thread = try std.Thread.spawn(.{}, serverRun, .{&ctx});
+    const server_thread: std.Thread = try .spawn(.{}, serverRun, .{&ctx});
 
     // Do not hang forever on an early client failure: leave the accept thread
     // detached and let process exit take it down.
@@ -69,7 +70,7 @@ pub fn main(init: std.process.Init) !void {
     server_thread.join();
     if (ctx.result) |err| return err;
 
-    std.debug.print("[uring] done\n", .{});
+    print("[uring] done\n", .{});
 }
 
 fn serverRun(ctx: *ServerCtx) void {
@@ -85,11 +86,11 @@ fn serverServe(ctx: *ServerCtx) !void {
     const stream = try ctx.listener.accept(io);
     defer stream.close(io);
     const fd = stream.socket.handle;
-    std.debug.print("[uring] server accepted\n", .{});
+    print("[uring] server accepted\n", .{});
 
     var buffer: [buffer_len]u8 = undefined;
     var used: usize = 0;
-    var state: http.h1.SearchState = .{};
+    var state: http.h1.SearchState = .init;
     var storage: [64]http.Header = undefined;
 
     while (true) {
@@ -222,14 +223,14 @@ fn clientRun(io: Io, port: u16) !void {
     const stream = try address.connect(io, .{ .mode = .stream });
     defer stream.close(io);
     const fd = stream.socket.handle;
-    std.debug.print("[uring] client connected\n", .{});
+    print("[uring] client connected\n", .{});
 
     try sendAll(&ring, fd, requests);
 
     var buffer: [16 * 1024]u8 = undefined;
     var used: usize = 0;
     var pos: usize = 0;
-    var state: http.h1.SearchState = .{};
+    var state: http.h1.SearchState = .init;
     var storage: [32]http.Header = undefined;
     const methods = [_]http.Method{ .POST, .GET };
     var response_index: usize = 0;
@@ -318,13 +319,13 @@ fn clientRun(io: Io, port: u16) !void {
     if (!mem.eql(u8, first_body[0..first_body_len], "POST / (5-byte body)\n")) {
         return error.UnexpectedBody;
     }
-    std.debug.print("[uring] decoded chunked response body ({d} bytes)\n", .{first_body_len});
+    print("[uring] decoded chunked response body ({d} bytes)\n", .{first_body_len});
 }
 
 fn initRing() !IoUring {
     return IoUring.init(8, 0) catch |err| switch (err) {
         error.PermissionDenied, error.SystemOutdated => {
-            std.debug.print("[uring] io_uring unavailable: {s}\n", .{@errorName(err)});
+            print("[uring] io_uring unavailable: {s}\n", .{@errorName(err)});
             return error.IoUringUnavailable;
         },
         else => return err,

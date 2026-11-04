@@ -39,7 +39,6 @@ const Header = @import("../header.zig").Header;
 const Headers = @import("../header.zig").Headers;
 const Method = @import("../method.zig").Method;
 const simd = @import("../simd.zig");
-const syntax = @import("syntax.zig");
 const Status = @import("../status.zig").Status;
 const version_mod = @import("../version.zig");
 pub const WireVersion = version_mod.WireVersion;
@@ -48,6 +47,7 @@ const effectiveVersion = version_mod.effective;
 pub const chunked = @import("chunked.zig");
 pub const framing = @import("framing.zig");
 pub const persistent = @import("persistence.zig").persistent;
+const syntax = @import("syntax.zig");
 pub const Writer = @import("Writer.zig");
 
 pub const Error = error{
@@ -69,7 +69,9 @@ pub const Error = error{
 /// so the caller never passes a length and never resets it for the next
 /// message.
 pub const SearchState = struct {
-    searched: u32 = 0,
+    searched: u32,
+
+    pub const init: SearchState = .{ .searched = 0 };
 };
 
 /// A parsed request head.
@@ -536,17 +538,17 @@ const typical_response =
     "\r\n";
 
 fn parseRequestOnce(buf: []const u8, storage: []Header) Error!ParsedRequest {
-    var state: SearchState = .{};
+    var state: SearchState = .init;
     return parseRequest(buf, &state, storage);
 }
 
 fn parseResponseOnce(buf: []const u8, storage: []Header) Error!ParsedResponse {
-    var state: SearchState = .{};
+    var state: SearchState = .init;
     return parseResponse(buf, &state, storage);
 }
 
 fn parseFieldSectionOnce(buf: []const u8, storage: []Header) Error!ParsedFieldSection {
-    var state: SearchState = .{};
+    var state: SearchState = .init;
     return parseFieldSection(buf, &state, storage);
 }
 
@@ -770,7 +772,7 @@ test "incomplete: every strict prefix of a valid request" {
 
 test "SearchState: the completeness check sees only new bytes (RFC 9112 §2.2)" {
     var storage: [8]Header = undefined;
-    var state: SearchState = .{};
+    var state: SearchState = .init;
     const prefix = typical.len - 8;
     try testing.expectError(error.Incomplete, parseRequest(typical[0..prefix], &state, &storage));
     try testing.expectEqual(@as(u32, prefix), state.searched);

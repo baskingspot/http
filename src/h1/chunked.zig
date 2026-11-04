@@ -17,9 +17,9 @@ const assert = std.debug.assert;
 const math = std.math;
 
 const Cursor = @import("../Cursor.zig");
-const h1 = @import("root.zig");
 const Header = @import("../header.zig").Header;
 const Headers = @import("../header.zig").Headers;
+const h1 = @import("root.zig");
 
 pub const Error = error{
     /// The bytes so far do not complete the next chunk-size line, data, or
@@ -57,7 +57,7 @@ pub const Decoder = struct {
     state: State = .size,
     remaining: u64 = 0,
     trailer_storage: []Header,
-    trailer_state: h1.SearchState = .{},
+    trailer_state: h1.SearchState = .init,
 
     const State = enum { size, data, data_crlf, trailers, done };
 
@@ -87,7 +87,7 @@ pub const Decoder = struct {
             error.Invalid => return error.Invalid,
         };
 
-        var line = Cursor.init(buf[0..line_end]);
+        var line: Cursor = .init(buf[0..line_end]);
         var digits: u32 = 0;
         var value: u64 = 0;
         while (line.peek()) |byte| {
