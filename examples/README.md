@@ -7,16 +7,25 @@ just example
 curl -v http://127.0.0.1:8080/
 ```
 
-The server uses `engine.blocking` over `std.Io`. The engine accepts one
-connection at a time and calls a handler with a complete request. The handler
-formats a response body into the per-connection scratch and calls
-`conn.respond`. The connection machine handles head parsing, body framing,
-keep-alive, pipelining, `Expect: 100-continue`, and the policy responses.
+The server uses `engine.blocking` over `std.Io`. The accept loop owns the
+listener and moves each accepted stream into a task in an `Io.Group`. One task
+serves one connection and owns its own buffers. The engine calls a handler with
+a complete request. The handler formats a response body into the connection
+scratch and calls `conn.respond`. The connection machine handles head parsing,
+body framing, keep-alive, pipelining, `Expect: 100-continue`, and the policy
+responses.
 
-There are no timeouts, no concurrency, and no TLS. A blocking syscall cannot
-enforce the connection deadlines, so the blocking engine sets every timeout to
-zero. A chunked request body gets 501 for now. The poll engine will replace
-this one for the admin plane.
+The example uses `Group.concurrent` rather than `Group.async`. The async form
+may run the task inline when the pool is busy, and a slow client would then
+stall the accept loop.
+
+The default `std.Io.Threaded` backend runs each task on its own thread, so this
+is a thread per live connection. It is an example, not a server to deploy.
+
+There are no timeouts and no TLS. A blocking syscall cannot enforce the
+connection deadlines, so the blocking engine sets every timeout to zero. A
+chunked request body gets 501 for now. The poll engine will replace this one
+for the admin plane.
 
 ## io_uring
 
