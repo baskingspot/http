@@ -41,6 +41,7 @@
             packages = [
               (inputs.mattware.packages.${system}.go-bin.fromGoMod ./tools/hpack-interop/go.mod)
               pkgs.gopls
+              pkgs.h2spec
               pkgs.nghttp2
               # ziglint with the target std's doc comments, so the deprecation
               # rule checks the oldest API surface this repo supports.

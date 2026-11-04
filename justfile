@@ -31,6 +31,16 @@ bench *ARGS:
 bench-smoke:
     zig build bench -- --benchtime=8x --count=1 --no-env
 
+[doc("Run h2spec against the example on 127.0.0.1:8081 (start `just example-h2` first); args select sections, e.g. `just conformance http2/5.1`")]
+[group("test")]
+conformance *ARGS:
+    h2spec -h 127.0.0.1 -p 8081 {{ ARGS }}
+
+[doc("Run h2load against the example on 127.0.0.1:8081 (start `just example-h2` first)")]
+[group("test")]
+load *ARGS:
+    h2load -n 100 -c 1 -m 10 http://127.0.0.1:8081/ {{ ARGS }}
+
 [doc("Lint Zig, Nix, Markdown, the workflows, and this justfile: ziglint-0-16, the ast-grep house rules, zig fmt, nix fmt, oxfmt, actionlint, zizmor, and just --fmt")]
 [group("lint")]
 lint:
