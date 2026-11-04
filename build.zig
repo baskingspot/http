@@ -100,6 +100,23 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_corpus.addArgs(args);
     test_step.dependOn(&run_corpus.step);
 
+    // The blocking engine over real loopback sockets. The tests live outside
+    // the package like the corpus and the interop fixture.
+    const engine_tests_mod = b.createModule(.{
+        .root_source_file = b.path("tests/engine_http1.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "http", .module = mod }},
+    });
+    const engine_tests = b.addTest(.{
+        .root_module = engine_tests_mod,
+        .test_runner = test_runner,
+    });
+    const run_engine_tests = b.addRunArtifact(engine_tests);
+    run_engine_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
+    if (b.args) |args| run_engine_tests.addArgs(args);
+    test_step.dependOn(&run_engine_tests.step);
+
     // Fuzzing needs the built-in runner: testingx's main rejects fuzz mode
     // because the fuzzer speaks a private protocol. `just fuzz` drives this.
     const fuzz_tests = b.addTest(.{ .root_module = mod });

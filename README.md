@@ -99,9 +99,10 @@ ready to depend on.
   already has a field view. The caller owns the rule that `Transfer-Encoding`
   and `Content-Length` cannot both frame a request; `h1.framing` applies it.
 
-Ranges, entity tags, dates, media types, and form decoding are next. No server,
-no middleware, and no message or connection types: those depend on an I/O
-runtime, and this package stops at the message head and its framing.
+Ranges, entity tags, dates, media types, and form decoding are next. The parser
+modules remain free of server types. `engine.blocking` is the one server in the
+package; the evented engines live separately, and the parser modules still have
+no I/O runtime.
 
 ## Usage
 
