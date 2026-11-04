@@ -112,7 +112,7 @@ conformance-run-tls-readiness *ARGS:
     set -euo pipefail
     zig build example-h2-tls-readiness >/tmp/http2-tls-readiness-conformance.log 2>&1 &
     build_pid=$!
-    trap 'pkill -P "$build_pid" 2>/dev/null || true; pkill -f "\\.zig-cache/.*/http2-tls-readiness$" 2>/dev/null || true; kill "$build_pid" 2>/dev/null || true' EXIT
+    trap 'pkill -P "$build_pid" 2>/dev/null || true; pkill -x http2-tls-readi 2>/dev/null || true; pkill -f "\\.zig-cache/.*/http2-tls-readiness$" 2>/dev/null || true; kill "$build_pid" 2>/dev/null || true' EXIT
     ready=0
     for _ in {1..50}; do
         if (exec 3<>/dev/tcp/127.0.0.1/8443) 2>/dev/null; then
@@ -250,7 +250,7 @@ interop-tls:
     set -euo pipefail
     zig build example-h1-tls >/tmp/http1-tls.log 2>&1 &
     server_pid=$!
-    trap 'pkill -P "$server_pid" 2>/dev/null || true; pkill -f "\\.zig-cache/.*/http1-tls$" 2>/dev/null || true; kill "$server_pid" 2>/dev/null || true' EXIT
+    trap 'pkill -P "$server_pid" 2>/dev/null || true; pkill -x http1-tls 2>/dev/null || true; pkill -f "\\.zig-cache/.*/http1-tls$" 2>/dev/null || true; kill "$server_pid" 2>/dev/null || true' EXIT
     ready=0
     for _ in {1..300}; do
         if curl -kfsS https://127.0.0.1:8443/ >/dev/null 2>&1; then
