@@ -217,7 +217,8 @@ blocking engine over TLS 1.3 on `https://127.0.0.1:8443/`, using the blocking
 `just example-h2-tls-readiness` runs the same protocol through the readiness
 engine and `tls_nonblocking`. `just example-h1-tls` serves HTTP/1.1 over the
 same TLS layer, `just example-h1-tls-client` fetches from it, and
-`just interop-tls` runs both. `just conformance-run`,
+`just interop-tls` runs both. `just curl <url>` is the tiny one-request
+HTTP/1.1 client example. `just conformance-run`,
 `just conformance-run-tls`, and `just conformance-run-tls-readiness` start
 their own example, run h2spec, and stop it (pass `-S` for strict);
 `just conformance` targets an example you already started, and `just load`

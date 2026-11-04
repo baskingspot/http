@@ -213,6 +213,7 @@ check-example:
     zig build example-h2-tls-readiness-bin
     zig build example-h1-tls-bin
     zig build example-h1-tls-client-bin
+    zig build example-curl-bin
     zig build interop-client-bin
 
 [doc("Run the HTTP/1 client against a Go net/http server")]
@@ -233,12 +234,17 @@ interop:
     done
     zig build interop-client
 
-[doc("Run the HTTP/1.1 TLS example server on 127.0.0.1:8443")]
+[doc("Run the tiny HTTP/1.1 curl example: just curl http://127.0.0.1:8080/")]
+[group("example")]
+curl *ARGS:
+    zig build example-curl -- {{ ARGS }}
+
+[doc("Run the HTTP/1.1 TLS example server on 127.0.0.1:8444")]
 [group("example")]
 example-h1-tls:
     zig build example-h1-tls
 
-[doc("Run the HTTP/1.1 TLS example client against 127.0.0.1:8443")]
+[doc("Run the HTTP/1.1 TLS example client against 127.0.0.1:8444")]
 [group("example")]
 example-h1-tls-client:
     zig build example-h1-tls-client

@@ -495,6 +495,33 @@ pub fn build(b: *std.Build) void {
         h1_tls_client_run.dependOn(&run_h1_tls_client.step);
     }
 
+    // The tiny curl example. HTTPS uses the same tls_std wrapper as the h1 TLS
+    // examples; the HTTP layer still sees only reader and writer interfaces.
+    const curl_example_bin = b.step("example-curl-bin", "Build the HTTP/1.1 curl example");
+    const curl_example_run = b.step("example-curl", "Run the HTTP/1.1 curl example");
+    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+        const curl_mod = b.createModule(.{
+            .root_source_file = b.path("examples/curl.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
+            },
+        });
+        curl_mod.link_libc = true;
+        curl_mod.linkSystemLibrary("crypto", .{});
+        const curl = b.addExecutable(.{
+            .name = "http1-curl",
+            .root_module = curl_mod,
+        });
+        curl_example_bin.dependOn(&curl.step);
+
+        const run_curl = b.addRunArtifact(curl);
+        if (b.args) |args| run_curl.addArgs(args);
+        curl_example_run.dependOn(&run_curl.step);
+    }
+
     // The poll example is Linux-only for now. The steps exist everywhere so
     // `check-example` is portable; only Linux gets a target to build.
     const poll_example_bin = b.step("example-poll-bin", "Build the HTTP/1.1 poll example server");

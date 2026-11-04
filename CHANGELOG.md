@@ -36,6 +36,10 @@ All notable changes to http are recorded here. The format follows
 - `examples/http1_tls.zig` and `examples/http1_tls_client.zig`: HTTP/1.1 over
   TLS 1.3 through `baskingspot/tls`. `just interop-tls` runs the pair.
 
+- `examples/curl.zig`: a tiny one-request HTTP/1.1 client. It prints response
+  headers to stderr and the body to stdout; `just curl <url>` runs it. HTTPS is
+  local-only and unverified.
+
 - `h1.client.blocking`: the first client adapter. `fetch` writes a request,
   drives `ClientConn`, and copies the body into caller-owned storage. It has
   no allocator and no connection reuse. `just interop` checks it against a Go

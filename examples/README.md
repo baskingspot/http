@@ -98,3 +98,14 @@ The server and client use the blocking `tls_std` integration from
 `Io.Reader` and `Io.Writer` interfaces; `just interop-tls` runs the pair in CI.
 The example certificate and scalar are the public test fixture from
 `baskingspot/tls`.
+
+## Tiny curl
+
+```sh
+just curl http://127.0.0.1:8080/
+just curl https://127.0.0.1:8444/
+```
+
+One HTTP/1.1 GET, headers to stderr, body to stdout. Hosts are IP literals;
+HTTPS uses `tls_std` with no chain verification because this is a local
+experiment, not a curl replacement.
