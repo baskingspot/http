@@ -14,6 +14,7 @@ const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
 
+const simd = @import("../simd.zig");
 const Header = @import("../header.zig").Header;
 const Method = @import("../method.zig").Method;
 const Status = @import("../status.zig").Status;
@@ -169,9 +170,9 @@ pub fn assumeLastChunk(self: Writer, trailers: []const Header) Error!void {
     try self.writer.writeAll("\r\n");
 }
 
-const vector_block = std.simd.suggestVectorLength(u8) orelse 8;
-const Vec = @Vector(vector_block, u8);
-const vector_ok = std.simd.suggestVectorLength(u8) != null;
+const vector_block = simd.block;
+const Vec = simd.Vec;
+const vector_ok = simd.available;
 
 /// The tchar set is scattered, and the writer uses this on short field names
 /// and method tokens. The scalar table wins there; a vector mask is a

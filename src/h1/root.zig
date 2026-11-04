@@ -33,9 +33,9 @@ const assert = std.debug.assert;
 const mem = std.mem;
 const fmt = std.fmt;
 const math = std.math;
-const builtin = @import("builtin");
 
 const Cursor = @import("../Cursor.zig");
+const simd = @import("../simd.zig");
 const Header = @import("../header.zig").Header;
 const Headers = @import("../header.zig").Headers;
 const Method = @import("../method.zig").Method;
@@ -310,13 +310,12 @@ fn headComplete(buf: []const u8, last_len: u32) bool {
     return findHeadEnd(buf, start) != null;
 }
 
-/// Bytes per vector scan. A target without vectors, or a big-endian one, uses
-/// the scalar path: the mask bit order below assumes lane 0 is the low bit.
-const block = std.simd.suggestVectorLength(u8) orelse 8;
-const Vec = @Vector(block, u8);
-const Mask = @Int(.unsigned, block);
-const vector_scans = builtin.cpu.arch.endian() == .little and
-    std.simd.suggestVectorLength(u8) != null;
+/// The shared byte width. `lanes_in_order` is false on a big-endian target, so
+/// the mask bit order below stays lane 0 = low bit.
+const block = simd.block;
+const Vec = simd.Vec;
+const Mask = simd.Mask;
+const vector_scans = simd.lanes_in_order;
 
 /// The first index of `CRLF CRLF` at or after `start`, or null. The vector
 /// path scans for CR and checks the three following bytes; the scalar path
