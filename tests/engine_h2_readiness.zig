@@ -10,8 +10,9 @@ const testing = std.testing;
 const Io = std.Io;
 
 const http = @import("http");
+const engine_options = @import("engine_options");
 const Engine = switch (builtin.os.tag) {
-    .linux => http.h2.engine.poll,
+    .linux => if (engine_options.epoll) http.h2.engine.epoll else http.h2.engine.poll,
     .macos => http.h2.engine.kqueue,
     else => @compileError("the readiness engine test is Linux and macOS only"),
 };
