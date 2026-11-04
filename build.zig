@@ -133,6 +133,25 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_h2_engine_tests.addArgs(args);
     test_step.dependOn(&run_h2_engine_tests.step);
 
+    // The readiness HTTP/2 engine runs the same socket test on poll and
+    // kqueue. It is Linux and macOS only.
+    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+        const h2_readiness_tests_mod = b.createModule(.{
+            .root_source_file = b.path("tests/engine_h2_readiness.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "http", .module = mod }},
+        });
+        const h2_readiness_tests = b.addTest(.{
+            .root_module = h2_readiness_tests_mod,
+            .test_runner = test_runner,
+        });
+        const run_h2_readiness_tests = b.addRunArtifact(h2_readiness_tests);
+        run_h2_readiness_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
+        if (b.args) |args| run_h2_readiness_tests.addArgs(args);
+        test_step.dependOn(&run_h2_readiness_tests.step);
+    }
+
     // The readiness engines run the same integration suite. Linux builds the
     // poll and epoll artifacts; macOS builds the kqueue artifact.
     if (target.result.os.tag == .linux) {
