@@ -166,6 +166,7 @@ fn handleRequest(
     request: h1.ServerConn.Request,
 ) !h1.ServerConn.Done {
     var exchange: Exchange = .{
+        .id = 0,
         .conn = conn,
         .request = request,
         .response_body = config.response_body_buffer,
@@ -173,12 +174,32 @@ fn handleRequest(
     handler.handle(&exchange) catch |err| {
         report(Handler, handler, err);
         if (conn.sendSlices().head.len == 0) {
-            exchange.respond(.{ .status = .internal_server_error }, "") catch
-                return error.NoResponse;
+            exchange.respond(.{ .status = .internal_server_error }, "") catch |resp_err| {
+                complete(Handler, handler, &exchange);
+                return resp_err;
+            };
         }
     };
 
-    return (try writePending(io, conn, writer)) orelse error.NoResponse;
+    const done = writePending(io, conn, writer) catch |err| {
+        complete(Handler, handler, &exchange);
+        return err;
+    };
+    if (done) |value| {
+        switch (value) {
+            .keep_alive, .close, .close_after_drain => complete(Handler, handler, &exchange),
+            .read, .more => {},
+        }
+        return value;
+    }
+    complete(Handler, handler, &exchange);
+    return error.NoResponse;
+}
+
+fn complete(comptime Handler: type, handler: *Handler, exchange: *Exchange) void {
+    if (@hasDecl(Handler, "onExchangeComplete")) {
+        handler.onExchangeComplete(exchange);
+    }
 }
 
 fn report(comptime Handler: type, handler: *Handler, err: anyerror) void {

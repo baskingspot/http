@@ -38,6 +38,9 @@ pub const Config = struct {
     body_bytes: usize = 64 * 1024,
     limits: h1.ServerConn.Limits = .{},
     accept_backoff: Io.Duration = .fromMilliseconds(50),
+    /// Linux `TCP_DEFER_ACCEPT`. The listener wakes only when the peer sends
+    /// data, not when the handshake completes.
+    tcp_defer_accept: bool = false,
 };
 
 const State = enum { free, read, write, drain };
@@ -51,6 +54,17 @@ const Slot = struct {
     response_head: []u8,
     response_body: []u8,
     drain: []u8,
+    exchange: Exchange,
+    exchange_active: bool = false,
+
+    fn bindExchange(self: *Slot, id: usize) void {
+        self.exchange = .{
+            .id = id,
+            .conn = &self.conn,
+            .request = undefined,
+            .response_body = self.response_body,
+        };
+    }
 
     fn initConn(self: *Slot, config: Config) void {
         self.conn = .init(.{
@@ -87,7 +101,7 @@ pub fn Server(comptime Handler: type, comptime Waiter: type) type {
             assert(config.response_head_bytes >= 64);
             const allocator = config.allocator;
 
-            var listener = try openListener(address);
+            var listener = try openListener(address, config);
             errdefer listener.deinit(io);
 
             const stop_rc = linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
@@ -99,8 +113,9 @@ pub fn Server(comptime Handler: type, comptime Waiter: type) type {
             errdefer allocator.free(slots);
             var initialized: usize = 0;
             errdefer for (slots[0..initialized]) |*slot| freeSlotBuffers(allocator, slot);
-            for (slots) |*slot| {
+            for (slots, 0..) |*slot, index| {
                 slot.* = try makeSlot(allocator, config);
+                slot.bindExchange(index);
                 initialized += 1;
             }
 
@@ -123,6 +138,7 @@ pub fn Server(comptime Handler: type, comptime Waiter: type) type {
 
         pub fn deinit(self: *Self) void {
             for (self.slots) |*slot| {
+                self.finishExchange(slot);
                 if (slot.state != .free) {
                     _ = linux.close(slot.fd);
                     slot.state = .free;
@@ -152,7 +168,17 @@ pub fn Server(comptime Handler: type, comptime Waiter: type) type {
                 self.expire(now);
 
                 try self.syncWait();
-                const ready = try self.wait.wait(self.pollTimeout(now));
+                const ready = self.wait.wait(self.pollTimeout(now)) catch |err| switch (err) {
+                    error.SystemResources => {
+                        self.io.sleep(self.config.accept_backoff, .awake) catch |sleep_err| {
+                            switch (sleep_err) {
+                                error.Canceled => return,
+                            }
+                        };
+                        continue;
+                    },
+                    else => return err,
+                };
                 if (ready.len == 0) continue;
 
                 const after = clock(self.io);
@@ -272,11 +298,21 @@ pub fn Server(comptime Handler: type, comptime Waiter: type) type {
 
         fn closeSlot(self: *Self, slot: *Slot) void {
             if (slot.state == .free) return;
+            self.finishExchange(slot);
             _ = linux.close(slot.fd);
             slot.fd = -1;
             slot.state = .free;
             assert(self.active > 0);
             self.active -= 1;
+        }
+
+        fn finishExchange(self: *Self, slot: *Slot) void {
+            if (!slot.exchange_active) return;
+            slot.exchange_active = false;
+            if (@hasDecl(Handler, "onExchangeComplete")) {
+                self.handler.onExchangeComplete(&slot.exchange);
+            }
+            slot.exchange.request = undefined;
         }
 
         fn service(self: *Self, slot: *Slot, ready: wait.Ready, now: Io.Timestamp) void {
@@ -369,16 +405,15 @@ pub fn Server(comptime Handler: type, comptime Waiter: type) type {
         }
 
         fn handleRequest(self: *Self, slot: *Slot, request: h1.ServerConn.Request) bool {
-            var exchange: Exchange = .{
-                .conn = &slot.conn,
-                .request = request,
-                .response_body = slot.response_body,
-            };
-            self.handler.handle(&exchange) catch |err| {
+            assert(!slot.exchange_active);
+            slot.exchange.request = request;
+            slot.exchange.response_body = slot.response_body;
+            slot.exchange_active = true;
+            self.handler.handle(&slot.exchange) catch |err| {
                 self.report(err);
             };
             if (slot.conn.sendSlices().head.len == 0) {
-                exchange.respond(.{ .status = .internal_server_error }, "") catch {
+                slot.exchange.respond(.{ .status = .internal_server_error }, "") catch {
                     self.closeSlot(slot);
                     return false;
                 };
@@ -412,15 +447,18 @@ pub fn Server(comptime Handler: type, comptime Waiter: type) type {
                         return;
                     },
                     .keep_alive => {
+                        self.finishExchange(slot);
                         const event = slot.conn.advance(now);
                         self.afterKeepAlive(slot, event);
                         return;
                     },
                     .close => {
+                        self.finishExchange(slot);
                         self.closeSlot(slot);
                         return;
                     },
                     .close_after_drain => {
+                        self.finishExchange(slot);
                         slot.state = .drain;
                         return;
                     },
@@ -487,6 +525,7 @@ fn makeSlot(allocator: Allocator, config: Config) !Slot {
         .response_head = response_head,
         .response_body = response_body,
         .drain = drain,
+        .exchange = undefined,
     };
 }
 
@@ -538,7 +577,7 @@ fn send(fd: linux.fd_t, head: []const u8, body: []const u8) SendError!usize {
     }
 }
 
-fn openListener(address: Io.net.IpAddress) !Io.net.Server {
+fn openListener(address: Io.net.IpAddress, config: Config) !Io.net.Server {
     const family: u32 = switch (address) {
         .ip4 => linux.AF.INET,
         .ip6 => linux.AF.INET6,
@@ -561,6 +600,18 @@ fn openListener(address: Io.net.IpAddress) !Io.net.Server {
         @sizeOf(u32),
     );
     if (linux.errno(opt_rc) != .SUCCESS) return error.SocketOptionFailed;
+
+    if (config.tcp_defer_accept) {
+        const seconds: u32 = 1;
+        const defer_rc = linux.setsockopt(
+            fd,
+            linux.IPPROTO.TCP,
+            linux.TCP.DEFER_ACCEPT,
+            mem.asBytes(&seconds),
+            @sizeOf(u32),
+        );
+        if (linux.errno(defer_rc) != .SUCCESS) return error.SocketOptionFailed;
+    }
 
     switch (address) {
         .ip4 => |a| {

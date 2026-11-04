@@ -12,7 +12,12 @@ All notable changes to http are recorded here. The format follows
   deadlines, keep-alive and pipelining, and a stop eventfd. The handler type is
   comptime, the same as the blocking engine. The wait and registration live in
   a backend; the slot state machine is shared. Kqueue is next; io_uring is
-  separate.
+  separate. `Config.tcp_defer_accept` sets Linux `TCP_DEFER_ACCEPT`. A wait
+  that returns `SystemResources` backs off and retries.
+
+- `Exchange.id` and `Handler.onExchangeComplete`: the engine reports when the
+  final response bytes are written or the connection ends, so a handler can
+  release a response body it owns. The slot id is stable for the exchange.
 
 - `h1.engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
   connection at a time; `serve` drives one stream. The handler is a comptime

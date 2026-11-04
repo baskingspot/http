@@ -84,8 +84,9 @@ ready to depend on.
   slots, nonblocking sockets, accept backoff, connection deadlines, keep-alive
   and pipelining, and a stop eventfd. They share the slot state machine and
   differ only in registration and wait. Both use the same comptime handler and
-  `Exchange` as the blocking engine. Kqueue becomes the next backend for this
-  readiness loop; io_uring is separate.
+  `Exchange` as the blocking engine. `onExchangeComplete` reports when a
+  borrowed response body can be released. Kqueue becomes the next backend for
+  this readiness loop; io_uring is separate.
 - `prefix_int`: HPACK and QPACK prefix integers (RFC 7541 §5.1), shared by
   both. Up to 32 bits, with the representation's tag bits left to the caller.
 - `huffman`: the RFC 7541 Appendix B Huffman code, shared by HPACK and QPACK.

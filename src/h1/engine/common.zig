@@ -4,6 +4,9 @@ const h1 = @import("../root.zig");
 
 /// One request/response exchange handed to the application.
 pub const Exchange = struct {
+    /// The engine slot serving this exchange. Stable for the exchange; the
+    /// slot is reused after `onExchangeComplete`.
+    id: usize,
     conn: *h1.ServerConn,
     request: h1.ServerConn.Request,
     /// The per-connection response body scratch. A slice of this buffer stays

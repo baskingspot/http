@@ -3,6 +3,7 @@
 const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
+const linux = std.os.linux;
 const mem = std.mem;
 const panic = std.debug.panic;
 
@@ -12,6 +13,8 @@ const options = @import("engine_options");
 const engine = if (options.epoll) h1.engine.epoll else h1.engine.poll;
 
 const TestApp = struct {
+    complete_count: usize = 0,
+
     pub fn handle(_: *TestApp, exchange: *engine.Exchange) anyerror!void {
         const target = exchange.request.head.target;
         if (mem.eql(u8, target, "/no-response")) return;
@@ -26,6 +29,11 @@ const TestApp = struct {
             .{ target, exchange.request.body.len },
         );
         try exchange.respond(.{ .status = .ok, .content_type = "text/plain" }, body);
+    }
+
+    pub fn onExchangeComplete(self: *TestApp, exchange: *engine.Exchange) void {
+        _ = exchange;
+        self.complete_count += 1;
     }
 };
 
@@ -361,6 +369,44 @@ test "poll a slow reader hits the write deadline" {
     const got = try readAll(stream, h.io, &response);
     try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(got.len < 4 * 1024 * 1024);
+}
+
+test "poll reports exchange completion" {
+    var h: Harness = undefined;
+    try h.init(.{}, 8);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+    try send(stream, h.io, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+
+    var response: [1024]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expect(mem.find(u8, got, "HTTP/1.1 200 OK") != null);
+    try testing.expectEqual(1, h.app.complete_count);
+}
+
+test "poll listener honors TCP_DEFER_ACCEPT" {
+    var app: TestApp = .{};
+    const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
+    var server = try PollServer.init(testing.io, address, &app, .{
+        .allocator = testing.allocator,
+        .max_connections = 1,
+        .tcp_defer_accept = true,
+    });
+    defer server.deinit();
+
+    var value: u32 = 0;
+    var len: linux.socklen_t = @sizeOf(u32);
+    const rc = linux.getsockopt(
+        server.listener.socket.handle,
+        linux.IPPROTO.TCP,
+        linux.TCP.DEFER_ACCEPT,
+        mem.asBytes(&value),
+        &len,
+    );
+    try testing.expectEqual(linux.E.SUCCESS, linux.errno(rc));
+    try testing.expectEqual(@as(u32, 1), value);
 }
 
 test "poll accept backoff defaults to 50 ms" {

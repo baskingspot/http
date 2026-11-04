@@ -106,6 +106,7 @@ pub const Wait = struct {
         switch (linux.errno(rc)) {
             .SUCCESS => {},
             .INTR => return self.ready[0..0],
+            .NOMEM => return error.SystemResources,
             else => return error.EpollWaitFailed,
         }
 

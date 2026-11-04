@@ -41,11 +41,19 @@ A handler is a comptime type. The engine calls `Handler.handle` with an
 pub fn handle(self: *Handler, exchange: *Exchange) anyerror!void
 ```
 
-It may provide:
+It may also provide:
 
 ```zig
 pub fn onError(self: *Handler, err: anyerror) void
+pub fn onExchangeComplete(self: *Handler, exchange: *Exchange) void
 ```
+
+`onExchangeComplete` runs once per exchange, after the final response bytes
+have been written or after the connection closes first. A body borrowed from
+handler-owned storage can be released there. The callback runs on the engine
+thread. Do not respond from it; the exchange is already complete. The
+`Exchange.id` is the engine slot, stable for the exchange and reused only
+after this callback.
 
 `run` and `serve` take the handler type and a pointer to the handler value.
 There is no function pointer or `?*anyopaque` context. The handler type is
@@ -71,9 +79,10 @@ reports the error through `onError` in both cases. A handler that returns
 without responding also gets a 500.
 
 The handler is synchronous. It runs on the engine thread; a slow handler
-blocks the other connections on that thread. A deferred response hook is not
-part of the blocking or poll engine yet. Keep heavy work off the poll thread
-until such a hook exists.
+blocks the other connections on that thread. A deferral hook is not part of
+the blocking or readiness engines yet. Keep heavy work off the engine thread
+until one exists. Completion notification is not a deferral hook: the handler
+must respond before it returns.
 
 ## Connection behavior
 
@@ -117,7 +126,13 @@ The wait set contains:
 The timeout is the earliest connection deadline or the accept-backoff
 deadline. After each wait, the engine services readable and writable slots and
 then expires due connections with `tick`. A head, body, or application timeout
-queues a 408; a response or drain timeout closes.
+queues a 408; a response or drain timeout closes. If the wait itself returns
+`SystemResources`, the engine sleeps for the accept backoff and retries rather
+than exiting.
+
+The listener option `tcp_defer_accept` sets Linux `TCP_DEFER_ACCEPT` with a
+one-second timeout. It is off by default; enable it when the server wants the
+listener to wake only after the peer sends data.
 
 A read feeds `recvBuffer` and `received`. A request calls the comptime handler.
 A write sends `sendSlices` and calls `sent`. After 100 Continue the slot
