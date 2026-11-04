@@ -13,10 +13,12 @@
 //!     switch (conn.sent(n, now)) { ... }
 //!
 //! After `.keep_alive`, call `advance` before the next read; it parses a
-//! pipelined request already in the buffer. `.sent` starts the idle head
-//! timer on `.keep_alive`. After `.read`, read the request body. Call `eof`
-//! when the peer closes and `tick` when the poll deadline expires; `tick`
-//! covers every phase.
+//! pipelined request already in the buffer. `.sent` starts the idle timer on
+//! `.keep_alive`; the first request byte starts the head and total timers.
+//! After `.read`, read the request body. When `.sent` returns
+//! `.close_after_drain`, drain input until `deadline`; then `tick` returns
+//! `.close`. Call `eof` when the peer closes and `tick` when the poll deadline
+//! expires; `tick` covers every phase.
 //!
 //! Policy responses are queued by the machine. The application never writes a
 //! 400, 408, 413, 417, 431, 501, or 505 path itself.
@@ -45,13 +47,18 @@ pub const Limits = struct {
     /// Largest buffered request body. The request buffer must also hold it.
     body_bytes: usize = 64 * 1024,
     /// Zero disables the deadline. Starts at accept and after a keep-alive
-    /// response; it covers the idle wait and the head.
+    /// response, while the connection waits for the next request.
+    idle_timeout: Io.Duration = .fromSeconds(5),
+    /// Zero disables the deadline. Starts with the first request byte.
     head_timeout: Io.Duration = .fromSeconds(5),
     /// Zero disables the deadline.
     body_timeout: Io.Duration = .fromSeconds(10),
     write_timeout: Io.Duration = .fromSeconds(10),
     /// Zero disables the deadline. Starts with the first request byte.
     total_timeout: Io.Duration = .fromSeconds(30),
+    /// Zero disables the deadline. Bounds a lingering close after an unread
+    /// request body; the engine drains input until the deadline.
+    drain_timeout: Io.Duration = .fromSeconds(1),
 };
 
 // ast-grep-ignore: public-struct-field-default -- options bag; the caller overrides one knob
@@ -106,7 +113,9 @@ pub const Done = union(enum) {
     /// The response is complete and the connection must close.
     close,
     /// The response is complete. The request body was not fully read; drain
-    /// input before close so a reset does not discard the response.
+    /// the raw socket until `deadline` expires or the peer closes, so a reset
+    /// does not discard the response. The machine no longer reads.
+    /// `Limits.drain_timeout` bounds the drain.
     close_after_drain,
 };
 
@@ -116,7 +125,8 @@ pub const Tick = union(enum) {
     none,
     /// The machine queued this 408. Send it, then close.
     reject: Status,
-    /// Close now. Part of a response is already on the wire.
+    /// Close now. Part of a response is on the wire, or a drain deadline
+    /// expired.
     close,
 };
 
@@ -126,7 +136,7 @@ pub const RespondError = h1.Writer.Error || error{
     ResponseHeadTooLarge,
 };
 
-const Phase = enum { head, body, app, response, closed };
+const Phase = enum { head, body, app, response, drain, closed };
 const ResponseKind = enum { none, interim, final };
 
 request_buffer: []u8,
@@ -147,6 +157,7 @@ body_allowed: bool,
 head_parsed: bool,
 body_chunked: bool,
 drain_close: bool,
+idle: bool,
 
 response: []const u8,
 response_head_len: usize,
@@ -180,6 +191,7 @@ pub fn init(config: Config) ServerConn {
         .head_parsed = false,
         .body_chunked = false,
         .drain_close = false,
+        .idle = true,
 
         .response = "",
         .response_head_len = 0,
@@ -194,13 +206,14 @@ pub fn init(config: Config) ServerConn {
     };
 }
 
-/// Start the idle head deadline. Call once after accept, before the first read.
-/// Without it a silent connection has no deadline. The total request timeout
-/// starts with the first input byte.
+/// Start the idle deadline. Call once after accept, before the first read.
+/// Without it a silent connection has no deadline. The first input byte starts
+/// the head and total request timeouts.
 pub fn start(self: *ServerConn, now: Io.Timestamp) void {
     assert(self.phase == .head);
+    self.idle = true;
     self.last_now = now;
-    self.startPhase(now, self.limits.head_timeout);
+    self.startIdleDeadline(now);
 }
 
 /// Where the engine should read. Empty while a response or the application
@@ -208,7 +221,7 @@ pub fn start(self: *ServerConn, now: Io.Timestamp) void {
 pub fn recvBuffer(self: *ServerConn) []u8 {
     return switch (self.phase) {
         .head, .body => self.request_buffer[self.used..],
-        .app, .response, .closed => self.request_buffer[0..0],
+        .app, .response, .drain, .closed => self.request_buffer[0..0],
     };
 }
 
@@ -218,10 +231,9 @@ pub fn received(self: *ServerConn, n: usize, now: Io.Timestamp) Event {
     assert(n <= self.request_buffer.len - self.used);
 
     self.last_now = now;
-    self.startInputDeadlines(now);
-    if (self.timedOut(now)) return self.reject(.request_timeout, false);
-
     if (n == 0) return self.eof(now);
+    if (self.timedOut(now)) return self.reject(.request_timeout, false);
+    self.startInputDeadlines(now);
 
     self.used += n;
     return switch (self.phase) {
@@ -244,8 +256,8 @@ pub fn advance(self: *ServerConn, now: Io.Timestamp) Event {
         return .need_more;
     }
 
-    self.startInputDeadlines(now);
     if (self.timedOut(now)) return self.reject(.request_timeout, false);
+    self.startInputDeadlines(now);
     return switch (self.phase) {
         .head => self.parseHead(now),
         .body => self.parseBody(),
@@ -266,15 +278,14 @@ pub fn eof(self: *ServerConn, now: Io.Timestamp) Event {
 }
 
 /// The poll deadline fired. Covers every phase. A head, body, or application
-/// timeout queues a 408. A response timeout closes, because part of the
-/// response may be on the wire.
+/// timeout queues a 408. A response or drain timeout closes.
 pub fn tick(self: *ServerConn, now: Io.Timestamp) Tick {
     self.last_now = now;
     if (!self.timedOut(now)) return .none;
 
     return switch (self.phase) {
         .head, .body, .app => self.rejectTick(),
-        .response => {
+        .response, .drain => {
             self.phase = .closed;
             self.clearDeadlines();
             return .close;
@@ -356,11 +367,18 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
     }
 
     if (!self.keep_alive) {
+        const drain = self.drain_close;
+        self.drain_close = false;
+        if (drain) {
+            self.phase = .drain;
+            self.phase_start = now;
+            self.phase_deadline = addDeadline(now, self.limits.drain_timeout);
+            self.total_deadline = null;
+            return .close_after_drain;
+        }
         self.phase = .closed;
         self.clearDeadlines();
-        const done: Done = if (self.drain_close) .close_after_drain else .close;
-        self.drain_close = false;
-        return done;
+        return .close;
     }
 
     const consumed = self.body_start + self.body_len;
@@ -381,6 +399,7 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
     self.version = .@"HTTP/1.1";
     self.head_only = false;
     self.body_allowed = true;
+    self.idle = true;
     self.startIdleDeadline(now);
     return .keep_alive;
 }
@@ -568,7 +587,11 @@ fn startInputDeadlines(self: *ServerConn, now: Io.Timestamp) void {
     if (self.total_deadline == null) {
         self.total_deadline = addDeadline(now, self.limits.total_timeout);
     }
-    if (self.phase_start == null) {
+    if (self.idle) {
+        assert(self.phase == .head);
+        self.idle = false;
+        self.startPhase(now, self.limits.head_timeout);
+    } else if (self.phase_start == null) {
         self.startPhase(now, switch (self.phase) {
             .head => self.limits.head_timeout,
             .body => self.limits.body_timeout,
@@ -579,8 +602,9 @@ fn startInputDeadlines(self: *ServerConn, now: Io.Timestamp) void {
 
 fn startIdleDeadline(self: *ServerConn, now: Io.Timestamp) void {
     assert(self.phase == .head);
+    assert(self.idle);
     if (self.phase_start == null) {
-        self.startPhase(now, self.limits.head_timeout);
+        self.startPhase(now, self.limits.idle_timeout);
     }
 }
 
@@ -906,7 +930,11 @@ test "start gives a silent connection a deadline" {
 
 test "the total timeout starts with the first request byte" {
     var t: TestConn = undefined;
-    t.init(.{ .head_timeout = .fromSeconds(60), .total_timeout = .fromSeconds(30) });
+    t.init(.{
+        .idle_timeout = .fromSeconds(60),
+        .head_timeout = .fromSeconds(60),
+        .total_timeout = .fromSeconds(30),
+    });
     t.conn.start(t.clock.now);
 
     t.clock.advance(29 * std.time.ns_per_s);
@@ -914,6 +942,37 @@ test "the total timeout starts with the first request byte" {
 
     t.clock.advance(2 * std.time.ns_per_s);
     try testing.expectEqual(.none, std.meta.activeTag(t.conn.tick(t.clock.now)));
+}
+
+test "idle and head timeouts are separate" {
+    var t: TestConn = undefined;
+    t.init(.{
+        .idle_timeout = .fromSeconds(1),
+        .head_timeout = .fromSeconds(5),
+        .total_timeout = .fromSeconds(30),
+    });
+    t.conn.start(t.clock.now);
+
+    t.clock.advance(900 * std.time.ns_per_ms);
+    try testing.expectEqual(.need_more, std.meta.activeTag(try t.feed("GET /")));
+
+    t.clock.advance(4300 * std.time.ns_per_ms);
+    try testing.expectEqual(.none, std.meta.activeTag(t.conn.tick(t.clock.now)));
+
+    t.clock.advance(1000 * std.time.ns_per_ms);
+    switch (t.conn.tick(t.clock.now)) {
+        .reject => |status| try testing.expectEqual(Status.request_timeout, status),
+        else => return error.TestExpectedTimeout,
+    }
+}
+
+test "a byte after the idle deadline is a 408" {
+    var t: TestConn = undefined;
+    t.init(.{ .idle_timeout = .fromSeconds(1) });
+    t.conn.start(t.clock.now);
+
+    t.clock.advance(2 * std.time.ns_per_s);
+    try expectReject(try t.feed("GET /"), .request_timeout);
 }
 
 test "keep-alive leaves an idle deadline" {
@@ -946,6 +1005,20 @@ test "a response timeout closes the connection" {
 
     _ = try expectRequest(try t.feed("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
     try t.conn.respond(.{ .status = .ok }, "");
+    t.clock.advance(2 * std.time.ns_per_s);
+    try testing.expectEqual(.close, std.meta.activeTag(t.conn.tick(t.clock.now)));
+}
+
+test "a drain has its own deadline" {
+    var t: TestConn = undefined;
+    t.init(.{ .body_bytes = 4, .drain_timeout = .fromSeconds(1) });
+
+    try expectReject(try t.feed(
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\n",
+    ), .payload_too_large);
+    try testing.expectEqual(.close_after_drain, std.meta.activeTag(try t.drain()));
+    try testing.expect(t.conn.deadline() != null);
+
     t.clock.advance(2 * std.time.ns_per_s);
     try testing.expectEqual(.close, std.meta.activeTag(t.conn.tick(t.clock.now)));
 }
