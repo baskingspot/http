@@ -41,13 +41,11 @@ conformance *ARGS:
 conformance-run *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    zig build example-h2-bin
-    bin=$(find .zig-cache -type f -name http2-server -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)
-    "$bin" >/tmp/http2-conformance.log 2>&1 &
-    server_pid=$!
-    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    zig build example-h2 >/tmp/http2-conformance.log 2>&1 &
+    build_pid=$!
+    trap 'pkill -x http2-server 2>/dev/null || true; kill "$build_pid" 2>/dev/null || true' EXIT
     ready=0
-    for _ in $(seq 1 50); do
+    for _ in {1..50}; do
         if (exec 3<>/dev/tcp/127.0.0.1/8081) 2>/dev/null; then
             exec 3>&-
             ready=1
@@ -66,13 +64,11 @@ conformance-run *ARGS:
 conformance-run-readiness *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    zig build example-h2-readiness-bin
-    bin=$(find .zig-cache -type f -name http2-readiness -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)
-    "$bin" >/tmp/http2-readiness-conformance.log 2>&1 &
-    server_pid=$!
-    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    zig build example-h2-readiness >/tmp/http2-readiness-conformance.log 2>&1 &
+    build_pid=$!
+    trap 'pkill -x http2-readiness 2>/dev/null || true; kill "$build_pid" 2>/dev/null || true' EXIT
     ready=0
-    for _ in $(seq 1 50); do
+    for _ in {1..50}; do
         if (exec 3<>/dev/tcp/127.0.0.1/8081) 2>/dev/null; then
             exec 3>&-
             ready=1
