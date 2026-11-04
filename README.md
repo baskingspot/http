@@ -133,11 +133,13 @@ ready to depend on.
   full suite passes in strict mode.
 - `h2.engine.blocking`: a blocking server engine over `std.Io`, the h2
   counterpart to `h1.engine.blocking`. `serve` drives one connection and `run`
-  is the accept loop. A handler gets one `h2.session.Event` at a time through a
-  `Connection`, may batch responses in `afterEvents`, and may observe errors in
-  `onError`. The engine returns DATA to both flow-control windows after the
-  handler consumes it. The h2c example is this engine with a thread per
-  connection above `serve`.
+  is the accept loop. The engine buffers one request per stream and hands it to
+  a type-erased `Handler` as an `Exchange`: a typed head, the whole body up to
+  `body_bytes`, and trailers, with a per-stream arena. `respond` records the
+  response and the engine sends it under flow control; `complete` and
+  `report_error` close the lifecycle. The h2c example is this engine with a
+  thread per connection above `serve`; `h2.Session` remains the streaming
+  escape hatch.
 - `content_length`: `Content-Length` parsing and combination. Repeated values
   must agree, a comma list of identical values is accepted, and non-digits,
   conflicts, and overflow are errors. `null` means the field was absent.

@@ -57,11 +57,12 @@ All notable changes to http are recorded here. The format follows
   h2c example serves connections on threads and the full h2spec suite passes,
   strict included.
 - `h2.engine.blocking`: the blocking h2 server engine over `std.Io`, the h2
-  counterpart to `h1.engine.blocking`. `serve` drives one connection and `run`
-  accepts. A handler receives `h2.session.Event` values through a `Connection`,
-  may batch responses in `afterEvents`, and may observe errors in `onError`;
-  the engine returns consumed DATA to both flow-control windows. The h2c
-  example now uses this engine with a thread per connection.
+  counterpart to `h1.engine.blocking`. `serve` buffers one complete request per
+  stream and hands it to a type-erased `Handler` as an `Exchange` with a typed
+  head, whole body, trailers, and a per-stream arena. `respond` records the
+  response; the engine validates it, sends the HEADERS, and pumps the body
+  under flow control. `complete` and `report_error` close the lifecycle. The
+  h2c example uses this engine with a thread per connection.
 - `Status`: the status codes as an open enum. Named codes are constants; any
   other three-digit code is still a value. `Status.code()`, `Status.class()`,
   `Status.phrase()`, and `Status.parse()` work on the wire number, and the

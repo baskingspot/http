@@ -663,7 +663,12 @@ pub const Session = struct {
 
         const state = self.streams.getPtr(id) orelse {
             if (self.closedReason(id) != null) {
-                return self.failStream(allocator, id, .stream_closed);
+                self.conn_recv.consume(header.length) catch {
+                    return self.connectionError(allocator, .flow_control_error);
+                };
+                const event = try self.failStream(allocator, id, .stream_closed);
+                try self.grantConnection(allocator, header.length);
+                return event;
             }
             return self.connectionError(allocator, .protocol_error);
         };
@@ -672,20 +677,26 @@ pub const Session = struct {
             return self.connectionError(allocator, .flow_control_error);
         };
         state.recv.consume(header.length) catch {
-            return self.failStream(allocator, id, .flow_control_error);
+            const event = try self.failStream(allocator, id, .flow_control_error);
+            try self.grantConnection(allocator, header.length);
+            return event;
         };
 
         const end_stream = header.flags & frame.flags.end_stream != 0;
         state.state = stream.transition(state.state, .remote, .data) catch |err| {
-            return switch (err) {
-                error.IdleStream => self.connectionError(allocator, .protocol_error),
-                error.InvalidTransition => self.failStream(allocator, id, .stream_closed),
-                else => self.connectionError(allocator, .protocol_error),
+            const event = switch (err) {
+                error.IdleStream => return self.connectionError(allocator, .protocol_error),
+                error.InvalidTransition => try self.failStream(allocator, id, .stream_closed),
+                else => return self.connectionError(allocator, .protocol_error),
             };
+            try self.grantConnection(allocator, header.length);
+            return event;
         };
         if (end_stream) {
             state.state = stream.transition(state.state, .remote, .end_stream) catch {
-                return self.failStream(allocator, id, .protocol_error);
+                const event = try self.failStream(allocator, id, .protocol_error);
+                try self.grantConnection(allocator, header.length);
+                return event;
             };
         }
 
@@ -750,6 +761,7 @@ pub const Session = struct {
                 try self.appendFrame(allocator, .rst_stream, 0, id, &.{
                     0, 0, 0, @intFromEnum(frame.ErrorCode.refused_stream),
                 });
+                self.rememberClosed(id, true);
                 return null;
             }
             self.streams.putAssumeCapacityNoClobber(id, .{
@@ -1277,6 +1289,18 @@ pub const Session = struct {
         try self.release(allocator, id, count);
     }
 
+    /// Return a discarded DATA frame's bytes to the connection window, with a
+    /// WINDOW_UPDATE the peer can see. A stream being reset keeps no stream
+    /// window; the connection window is the one that must not stall.
+    fn grantConnection(self: *Session, allocator: Allocator, count: u32) Error!void {
+        if (count == 0) return;
+        const inc: u31 = @intCast(count);
+        self.conn_recv.increase(inc) catch return error.FlowControlError;
+        var payload: [4]u8 = undefined;
+        mem.writeInt(u32, &payload, @as(u32, inc), .big);
+        try self.appendFrame(allocator, .window_update, 0, 0, &payload);
+    }
+
     fn rememberClosed(self: *Session, id: u31, reset: bool) void {
         self.closed[self.closed_pos] = .{ .id = id, .reset = reset };
         self.closed_pos = (self.closed_pos + 1) % closed_capacity;
@@ -1801,11 +1825,67 @@ test "a closed stream rejects DATA with STREAM_CLOSED" {
     _ = server.receive(writer.written());
     try testing.expect((try server.nextEvent(testing.allocator)) == null);
 
-    var out: [64]u8 = undefined;
+    var out: [13]u8 = undefined;
     const parsed = try takeFrame(&server, &out);
     const body = try frame.body(parsed.header, parsed.payload);
     try testing.expectEqual(frame.FrameType.rst_stream, parsed.header.type);
     try testing.expectEqual(frame.ErrorCode.stream_closed, body.rst_stream.error_code);
+
+    const update = try takeFrame(&server, &out);
+    const update_body = try frame.body(update.header, update.payload);
+    try testing.expectEqual(frame.FrameType.window_update, update.header.type);
+    try testing.expectEqual(@as(u31, 0), update.header.stream_id);
+    try testing.expectEqual(@as(u31, 1), update_body.window_update.increment);
+    try testing.expectEqual(@as(i64, 65_535), server.conn_recv.available);
+}
+
+test "a refused stream keeps its DATA out of the connection" {
+    var client = try Session.init(testing.allocator, .{
+        .role = .client,
+        .max_streams = 1,
+    });
+    defer client.deinit(testing.allocator);
+    var server = try Session.init(testing.allocator, .{
+        .role = .server,
+        .max_streams = 1,
+    });
+    defer server.deinit(testing.allocator);
+    try handshake(&client, &server, testing.allocator);
+
+    _ = try client.submitRequest(testing.allocator, &request_fields, false);
+    try transfer(&client, &server);
+    _ = (try server.nextEvent(testing.allocator)).?;
+
+    var raw: [32]u8 = undefined;
+    var writer = frame.Writer.init(&raw);
+    try writer.begin(.headers, frame.flags.end_headers, 3);
+    writer.end();
+    _ = server.receive(writer.written());
+    try testing.expect((try server.nextEvent(testing.allocator)) == null);
+
+    var out: [13]u8 = undefined;
+    const refused = try takeFrame(&server, &out);
+    const refused_body = try frame.body(refused.header, refused.payload);
+    try testing.expectEqual(
+        frame.ErrorCode.refused_stream,
+        refused_body.rst_stream.error_code,
+    );
+
+    writer = frame.Writer.init(&raw);
+    try writer.begin(.data, 0, 3);
+    try writer.bytes("x");
+    writer.end();
+    _ = server.receive(writer.written());
+    try testing.expect((try server.nextEvent(testing.allocator)) == null);
+    try testing.expect(!server.isClosed());
+
+    const reset = try takeFrame(&server, &out);
+    const reset_body = try frame.body(reset.header, reset.payload);
+    try testing.expectEqual(frame.ErrorCode.stream_closed, reset_body.rst_stream.error_code);
+    const update = try takeFrame(&server, &out);
+    const update_body = try frame.body(update.header, update.payload);
+    try testing.expectEqual(frame.FrameType.window_update, update.header.type);
+    try testing.expectEqual(@as(u31, 1), update_body.window_update.increment);
 }
 
 test "a normal closed stream rejects HEADERS as a connection error" {
