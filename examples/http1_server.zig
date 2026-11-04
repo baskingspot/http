@@ -241,19 +241,20 @@ fn fillMore(r: *Io.Reader) ReadError!void {
 }
 
 fn writeResponse(
-    w: *Io.Writer,
+    io_writer: *Io.Writer,
     version: http.Version,
     status: http.Status,
     body: []const u8,
     keep_alive: bool,
 ) !void {
-    try http.h1.writer.statusLine(w, version, status);
-    try http.h1.writer.field(w, "Content-Type", "text/plain; charset=utf-8");
-    try http.h1.writer.contentLength(w, body.len);
-    try http.h1.writer.field(w, "Connection", if (keep_alive) "keep-alive" else "close");
-    try http.h1.writer.endFields(w);
-    try http.h1.writer.body(w, body);
-    try w.flush();
+    var w: http.h1.Writer = .init(io_writer);
+    try w.statusLine(version, status);
+    try w.field("Content-Type", "text/plain; charset=utf-8");
+    try w.contentLength(body.len);
+    try w.field("Connection", if (keep_alive) "keep-alive" else "close");
+    try w.endFields();
+    try w.body(body);
+    try io_writer.flush();
 }
 
 fn writeError(

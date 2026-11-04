@@ -17,7 +17,7 @@ library expects:
 - `h1.persistent` for the connection decision.
 - `Headers.containsToken`, `Method.token`, `Status.phrase`, and `Version` in the
   response.
-- `h1.writer` for the response start line, fields, Content-Length, and body.
+- `h1.Writer` for the response start line, fields, Content-Length, and body.
 
 Two lifetimes matter. The head borrows both the header storage and the reader's
 buffer, so the target is copied and keep-alive is computed before the body read;

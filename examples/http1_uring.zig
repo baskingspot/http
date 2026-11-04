@@ -182,28 +182,26 @@ fn serverServe(ctx: *ServerCtx) !void {
         // The first response is chunked so the client exercises the response
         // decoder. The second keeps Content-Length.
         var head_buffer: [256]u8 = undefined;
-        var head_writer: Io.Writer = .fixed(&head_buffer);
-        try http.h1.writer.statusLine(&head_writer, version, status);
-        try http.h1.writer.field(&head_writer, "Content-Type", "text/plain");
-        try http.h1.writer.field(
-            &head_writer,
-            "Connection",
-            if (keep_alive) "keep-alive" else "close",
-        );
+        var head_io: Io.Writer = .fixed(&head_buffer);
+        var head: http.h1.Writer = .init(&head_io);
+        try head.statusLine(version, status);
+        try head.field("Content-Type", "text/plain");
+        try head.field("Connection", if (keep_alive) "keep-alive" else "close");
         if (mem.eql(u8, target, "/")) {
-            try http.h1.writer.chunked(&head_writer);
+            try head.chunked();
         } else {
-            try http.h1.writer.contentLength(&head_writer, response_body.len);
+            try head.contentLength(response_body.len);
         }
-        try http.h1.writer.endFields(&head_writer);
-        try sendAll(&ring, fd, head_writer.buffered());
+        try head.endFields();
+        try sendAll(&ring, fd, head_io.buffered());
 
         if (mem.eql(u8, target, "/")) {
             var frame_buffer: [512]u8 = undefined;
-            var frame_writer: Io.Writer = .fixed(&frame_buffer);
-            try http.h1.writer.chunk(&frame_writer, response_body);
-            try http.h1.writer.lastChunk(&frame_writer, &.{});
-            try sendAll(&ring, fd, frame_writer.buffered());
+            var frame_io: Io.Writer = .fixed(&frame_buffer);
+            var frame: http.h1.Writer = .init(&frame_io);
+            try frame.chunk(response_body);
+            try frame.lastChunk(&.{});
+            try sendAll(&ring, fd, frame_io.buffered());
         } else {
             try sendAll(&ring, fd, response_body);
         }

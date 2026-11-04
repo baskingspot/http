@@ -48,7 +48,7 @@ const effectiveVersion = version_mod.effective;
 
 pub const chunked = @import("chunked.zig");
 pub const framing = @import("framing.zig");
-pub const writer = @import("writer.zig");
+pub const Writer = @import("writer.zig").Writer;
 pub const persistent = @import("persistence.zig").persistent;
 
 pub const Error = error{
@@ -1100,5 +1100,5 @@ test {
     _ = framing;
     _ = @import("persistence.zig");
     _ = chunked;
-    _ = writer;
+    _ = Writer;
 }

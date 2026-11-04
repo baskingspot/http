@@ -32,7 +32,8 @@ The line syntax is HTTP/1-specific, so the type belongs at `http.h1.Writer`.
 
 ```zig
 var buffer: [4096]u8 = undefined;
-var w: h1.Writer = .init(&buffer);
+var io: std.Io.Writer = .fixed(&buffer);
+var w: h1.Writer = .init(&io);
 
 try w.statusLine(.@"HTTP/1.1", .ok);
 try w.field("Content-Type", "text/plain");
@@ -40,7 +41,7 @@ try w.contentLength(5);
 try w.endFields();
 try w.body("hello");
 
-const bytes = w.written();
+const bytes = io.buffered();
 ```
 
 For a chunked response:
@@ -89,10 +90,11 @@ slice cannot express.
 
 ## Recommendation
 
-A is implemented in `src/h1/writer.zig` over `std.Io.Writer`: request and
-status lines, fields, `endFields`, `contentLength`, `body`, and
-`chunked`/`chunk`/`lastChunk`. The blocking example uses the connection's
-writer; the io_uring example uses a fixed buffer writer and sends the bytes.
+A is implemented in `src/h1/writer.zig` as `h1.Writer`, which carries a
+caller-owned `*std.Io.Writer`: request and status lines, fields, `endFields`,
+`contentLength`, `body`, and `chunked`/`chunk`/`lastChunk`. The blocking example
+uses the connection's writer; the io_uring example uses a fixed buffer writer
+and sends the bytes.
 If the examples later want a `Response` value, B is a thin function over A, not
 a second encoder.
 
