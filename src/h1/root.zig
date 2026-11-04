@@ -312,9 +312,9 @@ fn headComplete(buf: []const u8, last_len: u32) bool {
 
 /// The shared byte width. `lanes_in_order` is false on a big-endian target, so
 /// the mask bit order below stays lane 0 = low bit.
-const block = simd.block;
-const Vec = simd.Vec;
-const Mask = simd.Mask;
+const width = simd.Block.width;
+const Vec = simd.Block.Vec;
+const Mask = simd.Block.Mask;
 const vector_scans = simd.lanes_in_order;
 
 /// The first index of `CRLF CRLF` at or after `start`, or null. The vector
@@ -324,8 +324,8 @@ fn findHeadEnd(buf: []const u8, start: u32) ?u32 {
     if (comptime !vector_scans) return findHeadEndScalar(buf, @intCast(start));
 
     var index: usize = start;
-    while (index + block <= buf.len) : (index += block) {
-        const chunk: Vec = buf[index..][0..block].*;
+    while (index + width <= buf.len) : (index += width) {
+        const chunk: Vec = buf[index..][0..width].*;
         var mask: Mask = @bitCast(chunk == @as(Vec, @splat('\r')));
         while (mask != 0) : (mask &= mask - 1) {
             const at = index + @as(usize, @ctz(mask));
@@ -404,8 +404,8 @@ fn scanTarget(cursor: *Cursor) Error![]const u8 {
     var index: usize = start;
 
     if (comptime vector_scans) {
-        while (index + block <= cursor.buf.len) : (index += block) {
-            const chunk: Vec = cursor.buf[index..][0..block].*;
+        while (index + width <= cursor.buf.len) : (index += width) {
+            const chunk: Vec = cursor.buf[index..][0..width].*;
             const bad = (chunk < @as(Vec, @splat(0x21))) |
                 (chunk > @as(Vec, @splat(0x7e)));
             if (@reduce(.Or, bad)) {
@@ -439,8 +439,8 @@ inline fn scanLine(cursor: *Cursor) Error![]const u8 {
     var index: usize = start;
 
     if (comptime vector_scans) {
-        while (index + block <= cursor.buf.len) : (index += block) {
-            const chunk: Vec = cursor.buf[index..][0..block].*;
+        while (index + width <= cursor.buf.len) : (index += width) {
+            const chunk: Vec = cursor.buf[index..][0..width].*;
             const ctl = (chunk < @as(Vec, @splat(0x20))) &
                 (chunk != @as(Vec, @splat('\t')));
             const del = chunk == @as(Vec, @splat(0x7f));
@@ -928,7 +928,7 @@ test "incomplete: every strict prefix of a valid response" {
 }
 
 test "head terminator: every placement, vector and scalar (RFC 9112 §2.1)" {
-    var buf: [4 * block + 8]u8 = undefined;
+    var buf: [4 * width + 8]u8 = undefined;
     for (0..buf.len - 3) |at| {
         @memset(&buf, 'a');
         @memcpy(buf[at..][0..4], "\r\n\r\n");
@@ -951,7 +951,7 @@ test "head terminator: every placement, vector and scalar (RFC 9112 §2.1)" {
 }
 
 test "target scanner: every byte at every position (RFC 9112 §3.2)" {
-    var buf: [block + 3]u8 = undefined;
+    var buf: [width + 3]u8 = undefined;
     for (0..256) |value| {
         for (0..buf.len) |at| {
             @memset(&buf, 'a');
@@ -978,7 +978,7 @@ test "target scanner: every byte at every position (RFC 9112 §3.2)" {
 }
 
 test "line scanner: every byte at every position (RFC 9110 §5.5)" {
-    var buf: [block + 3]u8 = undefined;
+    var buf: [width + 3]u8 = undefined;
     for (0..256) |value| {
         for (0..buf.len) |at| {
             @memset(&buf, 'a');

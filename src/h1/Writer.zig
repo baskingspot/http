@@ -170,8 +170,8 @@ pub fn assumeLastChunk(self: Writer, trailers: []const Header) Error!void {
     try self.writer.writeAll("\r\n");
 }
 
-const vector_block = simd.block;
-const Vec = simd.Vec;
+const width = simd.Block.width;
+const Vec = simd.Block.Vec;
 const vector_ok = simd.available;
 
 /// The tchar set is scattered, and the writer uses this on short field names
@@ -185,8 +185,8 @@ fn validTchar(bytes: []const u8) bool {
 fn validFieldValue(bytes: []const u8) bool {
     var index: usize = 0;
     if (comptime vector_ok) {
-        while (index + vector_block <= bytes.len) : (index += vector_block) {
-            const lanes: Vec = bytes[index..][0..vector_block].*;
+        while (index + width <= bytes.len) : (index += width) {
+            const lanes: Vec = bytes[index..][0..width].*;
             const ctl = (lanes < @as(Vec, @splat(0x20))) &
                 (lanes != @as(Vec, @splat('\t')));
             const del = lanes == @as(Vec, @splat(0x7f));
@@ -202,8 +202,8 @@ fn validFieldValue(bytes: []const u8) bool {
 fn validTarget(bytes: []const u8) bool {
     var index: usize = 0;
     if (comptime vector_ok) {
-        while (index + vector_block <= bytes.len) : (index += vector_block) {
-            const lanes: Vec = bytes[index..][0..vector_block].*;
+        while (index + width <= bytes.len) : (index += width) {
+            const lanes: Vec = bytes[index..][0..width].*;
             const bad = (lanes < @as(Vec, @splat(0x21))) |
                 (lanes > @as(Vec, @splat(0x7e)));
             if (@reduce(.Or, bad)) return false;
@@ -226,7 +226,7 @@ fn scalarTarget(bytes: []const u8) bool {
 }
 
 test "vector validation agrees with the scalar tables" {
-    var buffer: [vector_block + 3]u8 = undefined;
+    var buffer: [width + 3]u8 = undefined;
     for (0..256) |value| {
         for (0..buffer.len) |at| {
             @memset(&buffer, 'a');

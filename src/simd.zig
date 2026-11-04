@@ -1,22 +1,23 @@
 //! Shared byte-vector width and mask types.
 //!
-//! Keep the target-dependent choices here. A caller uses `block`, `Vec`, and a
-//! capability flag; it does not call `std.simd.suggestVectorLength` itself.
-//! `available` is false on a target with no suggested width, even though `Vec`
-//! exists; the caller takes the scalar path.
+//! `Block` is the unit: a fixed number of bytes processed per vector pass.
+//! Callers use `Block.width`, `Block.Vec`, and `Block.Mask`; the capability
+//! flags say whether the vector path is usable on this target.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// Bytes per byte-vector scan. The fallback is the machine word; it is only a
-/// type width when `available` is false.
-pub const block = std.simd.suggestVectorLength(u8) orelse @sizeOf(usize);
+pub const Block = struct {
+    /// Bytes per byte-vector scan. The fallback is the machine word; it is only
+    /// a type width when `available` is false.
+    pub const width = std.simd.suggestVectorLength(u8) orelse @sizeOf(usize);
 
-/// The byte vector for `block` lanes.
-pub const Vec = @Vector(block, u8);
+    /// The byte vector for `width` lanes.
+    pub const Vec = @Vector(width, u8);
 
-/// One bit per lane of `Vec`.
-pub const Mask = @Int(.unsigned, block);
+    /// One bit per lane of `Vec`.
+    pub const Mask = @Int(.unsigned, width);
+};
 
 /// Whether the target has a suggested vector width. When false, use the scalar
 /// path.
