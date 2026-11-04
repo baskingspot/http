@@ -247,12 +247,12 @@ fn writeResponse(
     body: []const u8,
     keep_alive: bool,
 ) !void {
-    const phrase = status.phrase() orelse "Unknown";
-    try w.print("{s} {d} {s}\r\n", .{ @tagName(version), status.code(), phrase });
-    try w.print("Content-Length: {d}\r\n", .{body.len});
-    try w.writeAll("Content-Type: text/plain; charset=utf-8\r\n");
-    try w.print("Connection: {s}\r\n\r\n", .{if (keep_alive) "keep-alive" else "close"});
-    try w.writeAll(body);
+    try http.h1.writer.statusLine(w, version, status);
+    try http.h1.writer.field(w, "Content-Type", "text/plain; charset=utf-8");
+    try http.h1.writer.contentLength(w, body.len);
+    try http.h1.writer.field(w, "Connection", if (keep_alive) "keep-alive" else "close");
+    try http.h1.writer.endFields(w);
+    try http.h1.writer.body(w, body);
     try w.flush();
 }
 

@@ -12,9 +12,11 @@ Zig 0.16 only. The flake is the tool contract, from `baskingspot/nix`: `nix deve
 
 ## Design
 
-- Pure functions over bytes. No `std.Io`, no allocator, no server types, and
-  no dependency on `compress`. A parser takes a slice and returns borrowed
-  slices or fills caller-owned storage; a list parser is an iterator.
+- Pure functions over bytes. The parser has no `std.Io`, no allocator, no
+  server types, and no dependency on `compress`. A parser takes a slice and
+  returns borrowed slices or fills caller-owned storage; a list parser is an
+  iterator. The writer takes a caller-owned `*std.Io.Writer` as a sink; it never
+  creates, flushes, or closes one.
 - No server, no middleware, no message or connection types, and no header map.
   Those depend on the host's I/O runtime; this package stops at the message
   head.

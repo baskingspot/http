@@ -52,6 +52,9 @@ ready to depend on.
   trailer parser. `h1.chunked.Decoder` is a resumable chunked body decoder:
   chunk sizes and extensions, a trailer section, borrowed data slices, and
   `need_more` across reads.
+  `h1.writer` formats a request or status line, fields, a Content-Length or
+  chunked body, and trailers into a caller-owned `std.Io.Writer`; it never
+  flushes or closes the sink.
   `h1.framing` decides the body from a head: a request is `.none`, `.length`,
   or `.chunked`; a response adds `.close` and `.tunnel` (RFC 9112 §6.3).
   `h1.persistent` applies the §9.3 connection rule. It rejects TE with CL, TE

@@ -43,18 +43,6 @@ const requests =
     "Connection: close\r\n" ++
     "\r\n";
 
-const response_format =
-    "{s} {d} {s}\r\n" ++
-    "Content-Length: {d}\r\n" ++
-    "Content-Type: text/plain\r\n" ++
-    "Connection: {s}\r\n\r\n";
-
-const chunked_response_format =
-    "{s} {d} {s}\r\n" ++
-    "Transfer-Encoding: chunked\r\n" ++
-    "Content-Type: text/plain\r\n" ++
-    "Connection: {s}\r\n\r\n";
-
 const ServerCtx = struct {
     io: Io,
     listener: *Io.net.Server,
@@ -190,45 +178,33 @@ fn serverServe(ctx: *ServerCtx) !void {
             .{ method_name, target, body_len },
         );
         const status: http.Status = if (mem.eql(u8, target, "/")) .ok else .not_found;
-        const phrase = status.phrase() orelse "Unknown";
 
         // The first response is chunked so the client exercises the response
         // decoder. The second keeps Content-Length.
+        var head_buffer: [256]u8 = undefined;
+        var head_writer: Io.Writer = .fixed(&head_buffer);
+        try http.h1.writer.statusLine(&head_writer, version, status);
+        try http.h1.writer.field(&head_writer, "Content-Type", "text/plain");
+        try http.h1.writer.field(
+            &head_writer,
+            "Connection",
+            if (keep_alive) "keep-alive" else "close",
+        );
         if (mem.eql(u8, target, "/")) {
-            var head_buffer: [256]u8 = undefined;
-            const response_head = try std.fmt.bufPrint(
-                &head_buffer,
-                chunked_response_format,
-                .{
-                    @tagName(version),
-                    status.code(),
-                    phrase,
-                    if (keep_alive) "keep-alive" else "close",
-                },
-            );
-            try sendAll(&ring, fd, response_head);
-
-            var frame_buffer: [512]u8 = undefined;
-            const frame = try std.fmt.bufPrint(
-                &frame_buffer,
-                "{x}\r\n{s}\r\n0\r\n\r\n",
-                .{ response_body.len, response_body },
-            );
-            try sendAll(&ring, fd, frame);
+            try http.h1.writer.chunked(&head_writer);
         } else {
-            var response_buffer: [512]u8 = undefined;
-            const response_head = try std.fmt.bufPrint(
-                &response_buffer,
-                response_format,
-                .{
-                    @tagName(version),
-                    status.code(),
-                    phrase,
-                    response_body.len,
-                    if (keep_alive) "keep-alive" else "close",
-                },
-            );
-            try sendAll(&ring, fd, response_head);
+            try http.h1.writer.contentLength(&head_writer, response_body.len);
+        }
+        try http.h1.writer.endFields(&head_writer);
+        try sendAll(&ring, fd, head_writer.buffered());
+
+        if (mem.eql(u8, target, "/")) {
+            var frame_buffer: [512]u8 = undefined;
+            var frame_writer: Io.Writer = .fixed(&frame_buffer);
+            try http.h1.writer.chunk(&frame_writer, response_body);
+            try http.h1.writer.lastChunk(&frame_writer, &.{});
+            try sendAll(&ring, fd, frame_writer.buffered());
+        } else {
             try sendAll(&ring, fd, response_body);
         }
 

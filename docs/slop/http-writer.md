@@ -1,6 +1,7 @@
 # HTTP/1 writer: shape sketch
 
-Proposal, 2026-11-04. No code yet.
+First slice implemented 2026-11-04. The sink is a caller-owned
+`*std.Io.Writer`; the writer never creates, flushes, or closes one.
 
 ## Goal
 
@@ -88,10 +89,12 @@ slice cannot express.
 
 ## Recommendation
 
-Build A first, as a small grammar layer over a forward-only byte sink. The
-existing `stdx.wire.Writer` is the likely sink: it is caller-owned and
-forward-only. If the examples later want a `Response` value, B is a thin
-function over A, not a second encoder.
+A is implemented in `src/h1/writer.zig` over `std.Io.Writer`: request and
+status lines, fields, `endFields`, `contentLength`, `body`, and
+`chunked`/`chunk`/`lastChunk`. The blocking example uses the connection's
+writer; the io_uring example uses a fixed buffer writer and sends the bytes.
+If the examples later want a `Response` value, B is a thin function over A, not
+a second encoder.
 
 ## Open questions
 

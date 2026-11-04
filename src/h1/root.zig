@@ -48,6 +48,7 @@ const effectiveVersion = version_mod.effective;
 
 pub const chunked = @import("chunked.zig");
 pub const framing = @import("framing.zig");
+pub const writer = @import("writer.zig");
 pub const persistent = @import("persistence.zig").persistent;
 
 pub const Error = error{
@@ -586,7 +587,7 @@ fn parseHeaders(cursor: *Cursor, storage: []Header) Error!Headers {
 }
 
 /// `tchar` from RFC 9110 §5.6.2.
-fn isTchar(byte: u8) bool {
+pub fn isTchar(byte: u8) bool {
     return switch (byte) {
         '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
         '0'...'9', 'A'...'Z', 'a'...'z' => true,
@@ -595,12 +596,12 @@ fn isTchar(byte: u8) bool {
 }
 
 /// RFC 9110 §5.5: `field-vchar` (VCHAR or obs-text), SP, and HTAB.
-fn isFieldValueByte(byte: u8) bool {
+pub fn isFieldValueByte(byte: u8) bool {
     return byte == '\t' or (byte >= 0x20 and byte != 0x7f);
 }
 
 /// RFC 9112 §3.2: printable US-ASCII, and SP is the delimiter.
-fn isTargetByte(byte: u8) bool {
+pub fn isTargetByte(byte: u8) bool {
     return byte >= 0x21 and byte <= 0x7e;
 }
 
@@ -1099,4 +1100,5 @@ test {
     _ = framing;
     _ = @import("persistence.zig");
     _ = chunked;
+    _ = writer;
 }

@@ -49,6 +49,10 @@ All notable changes to http are recorded here. The format follows
   `next` returns a borrowed data slice, the trailer `Headers`, or `need_more`,
   with the consumed prefix on every step. Chunk extensions are parsed and
   ignored; a chunk-size overflow is `error.Overflow`.
+- `h1.writer`: request/status lines, field lines, Content-Length, body bytes,
+  and chunked bodies with trailers into a caller-owned `std.Io.Writer`. The
+  writer validates the parser's grammar and never allocates, flushes, or closes
+  the sink.
 - `transfer_encoding.summarize`: the `Transfer-Encoding` coding list in field
   order, with the final coding, a seen/last `chunked` flag, parameter parsing
   (including quoted values), and rejection of repeated or parameterized
