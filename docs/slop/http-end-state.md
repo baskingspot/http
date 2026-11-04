@@ -132,11 +132,12 @@ of the output, and it makes `Header` mean the same thing on all three protocols.
 ## Scope boundary
 
 In: frame headers and payloads, header-block compression and decompression,
-field-section syntax, chunked coding, request/status lines, framing rules.
+field-section syntax, chunked coding, request/status lines, framing rules, and
+the h2 connection state machine (`h2.Session`): stream state, flow control, and
+CONTINUATION assembly.
 
-Out: stream state machines, flow control, scheduling, prioritization, SETTINGS
-policy beyond parsing, connection reuse, retries, TLS, QUIC transport, server
-or middleware types, cookie storage.
+Out: scheduling, prioritization, application SETTINGS policy, connection reuse,
+retries, TLS, QUIC transport, server or middleware types, cookie storage.
 
 Encoders: decode first. The field model is the same either way; encoder
 insertion policy and Huffman-vs-literal choices are a separate design.

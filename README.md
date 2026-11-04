@@ -118,6 +118,13 @@ ready to depend on.
   initial window; stream transitions follow §5.1 and allocate identifiers by
   role parity; header-block assembly joins CONTINUATION fragments into a
   caller-owned buffer.
+- `h2.Session`: the sans-I/O h2 connection machine. It owns the preface,
+  SETTINGS, streams, HPACK, flow control, CONTINUATION assembly, and the
+  outbound queue. `receive` and `send` move bytes; `nextEvent` returns decoded
+  requests, responses, DATA, trailers, resets, and GOAWAY; the `submit*`
+  methods queue frames. The allocator is per call and never stored. Stream
+  records and output chunks come from fixed-record pools, so a
+  `FixedBufferAllocator` gives the connection a fixed ceiling.
 - `content_length`: `Content-Length` parsing and combination. Repeated values
   must agree, a comma list of identical values is accepted, and non-digits,
   conflicts, and overflow are errors. `null` means the field was absent.
@@ -153,11 +160,12 @@ const length = try http.content_length.parse(&.{ "42", "42" }); // 42
 runs the benchmarks, `just fuzz` drives the fuzz targets with the built-in
 runner, and `just example` runs the HTTP/1.1 server example.
 
-`just example-h2` runs a primitive h2c server on `127.0.0.1:8081`. Poke it with
-`curl -v --http2-prior-knowledge http://127.0.0.1:8081/`, or with the devshell's
-`nghttp -v http://127.0.0.1:8081/` to see the frames. It handles the preface,
-SETTINGS, PING, HEADERS through `h2.head`, and a fixed 200 response; flow
-control and stream state are not there yet.
+`just example-h2` runs an h2c server on `127.0.0.1:8081`, driven by
+`h2.Session`. Poke it with `curl -v --http2-prior-knowledge
+http://127.0.0.1:8081/`, or with the devshell's `nghttp -v
+http://127.0.0.1:8081/` to see the frames. It handles the preface, SETTINGS,
+PING, HPACK, flow control, and a fixed 200 response over a real session loop;
+the socket, TLS, and handler live outside the library.
 
 ## License
 

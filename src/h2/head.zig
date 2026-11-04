@@ -161,6 +161,17 @@ pub fn request(fields: Headers) Error!RequestHead {
     };
 }
 
+/// Validate a trailer section: regular fields only, no pseudo-headers.
+pub fn trailers(fields: Headers) Error!Headers {
+    for (fields.items) |field| {
+        try validateValue(field.value);
+        if (field.name.len != 0 and field.name[0] == ':') return error.UnknownPseudo;
+        try validateFieldName(field.name);
+        try validateRegularField(field);
+    }
+    return fields;
+}
+
 pub fn response(fields: Headers) Error!ResponseHead {
     var status: ?Status = null;
     var seen_regular = false;

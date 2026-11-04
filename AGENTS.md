@@ -18,8 +18,8 @@ Zig 0.16 only. The flake is the tool contract, from `baskingspot/nix`: `nix deve
   iterator. The writer takes a caller-owned `*std.Io.Writer` as a sink; it never
   creates, flushes, or closes one.
 - No server in the parser modules and no `std.http` message types. The parsers
-  import no socket and no allocator. `h1.ServerConn` is the sans-I/O connection
-  state machine; `src/h1/engine/blocking.zig` is the blocking server over
+  import no socket and no allocator. `h1.ServerConn` and `h2.Session` are the
+  sans-I/O connection state machines; `src/h1/engine/blocking.zig` is the blocking server over
   `std.Io`, and `src/h1/engine/poll.zig` is the Linux readiness server. Epoll and
   kqueue are future backends for the poll loop; io_uring is separate. The
   parser modules still import no socket.
