@@ -36,6 +36,31 @@ bench-smoke:
 conformance *ARGS:
     h2spec -h 127.0.0.1 -p 8081 {{ ARGS }}
 
+[doc("Build and run the h2c example, run h2spec, then stop it; port 8081 must be free")]
+[group("test")]
+conformance-run *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    zig build example-h2-bin
+    bin=$(find .zig-cache -type f -name http2-server -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)
+    "$bin" >/tmp/http2-conformance.log 2>&1 &
+    server_pid=$!
+    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    ready=0
+    for _ in $(seq 1 50); do
+        if (exec 3<>/dev/tcp/127.0.0.1/8081) 2>/dev/null; then
+            exec 3>&-
+            ready=1
+            break
+        fi
+        sleep 0.1
+    done
+    if [ "$ready" -ne 1 ]; then
+        echo "http2-server did not start on 127.0.0.1:8081" >&2
+        exit 1
+    fi
+    h2spec -h 127.0.0.1 -p 8081 {{ ARGS }}
+
 [doc("Run h2load against the example on 127.0.0.1:8081 (start `just example-h2` first)")]
 [group("test")]
 load *ARGS:

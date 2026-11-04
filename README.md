@@ -124,7 +124,8 @@ ready to depend on.
   SETTINGS, streams, HPACK, flow control, CONTINUATION assembly, and the
   outbound queue. `receive` and `send` move bytes; `nextEvent` returns decoded
   requests, responses, DATA, trailers, resets, and GOAWAY; the `submit*`
-  methods queue frames. The allocator is per call and never stored. Stream
+  methods queue frames, and `submitSettings` sends a local SETTINGS change. The
+  allocator is per call and never stored. Stream
   records and output chunks come from fixed-record pools, so a
   `FixedBufferAllocator` gives the connection a fixed ceiling. The h2c example
   is the conformance target: `just conformance` runs h2spec against it, and the
@@ -170,9 +171,10 @@ runner, and `just example` runs the HTTP/1.1 server example.
 http://127.0.0.1:8081/`, or with the devshell's `nghttp -v
 http://127.0.0.1:8081/` to see the frames. It handles the preface, SETTINGS,
 PING, HPACK, flow control, and a fixed 200 response over a real session loop;
-the socket, TLS, and handler live outside the library. With the example running,
-`just conformance` runs h2spec (pass `-S` for strict) and `just load` runs
-h2load.
+the socket, TLS, and handler live outside the library. `just conformance-run`
+starts its own example, runs h2spec, and stops it (pass `-S` for strict);
+`just conformance` targets an example you already started, and `just load`
+runs h2load.
 
 ## License
 

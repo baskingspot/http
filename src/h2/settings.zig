@@ -45,32 +45,38 @@ pub const Error = error{
 pub fn apply(values: *Values, local_role: Role, settings: frame.Settings) Error!void {
     var entries = settings.iterator();
     while (entries.next()) |entry| {
-        switch (entry.id) {
-            .header_table_size => values.header_table_size = entry.value,
+        try applyEntry(values, local_role, entry);
+    }
+}
 
-            .enable_push => {
-                if (entry.value > 1) return error.InvalidEnablePush;
-                if (local_role == .client and entry.value == 1) return error.ServerEnablePush;
-                values.enable_push = entry.value == 1;
-            },
+/// Apply one defined setting. Unknown identifiers are ignored; a caller that
+/// sends local settings rejects them before this point.
+pub fn applyEntry(values: *Values, local_role: Role, entry: frame.Setting) Error!void {
+    switch (entry.id) {
+        .header_table_size => values.header_table_size = entry.value,
 
-            .max_concurrent_streams => values.max_concurrent_streams = entry.value,
+        .enable_push => {
+            if (entry.value > 1) return error.InvalidEnablePush;
+            if (local_role == .client and entry.value == 1) return error.ServerEnablePush;
+            values.enable_push = entry.value == 1;
+        },
 
-            .initial_window_size => {
-                if (entry.value > 0x7fff_ffff) return error.InvalidInitialWindowSize;
-                values.initial_window_size = entry.value;
-            },
+        .max_concurrent_streams => values.max_concurrent_streams = entry.value,
 
-            .max_frame_size => {
-                if (entry.value < frame.min_max_frame_size or
-                    entry.value > frame.max_frame_size_limit) return error.InvalidMaxFrameSize;
-                values.max_frame_size = entry.value;
-            },
+        .initial_window_size => {
+            if (entry.value > 0x7fff_ffff) return error.InvalidInitialWindowSize;
+            values.initial_window_size = entry.value;
+        },
 
-            .max_header_list_size => values.max_header_list_size = entry.value,
+        .max_frame_size => {
+            if (entry.value < frame.min_max_frame_size or
+                entry.value > frame.max_frame_size_limit) return error.InvalidMaxFrameSize;
+            values.max_frame_size = entry.value;
+        },
 
-            else => {},
-        }
+        .max_header_list_size => values.max_header_list_size = entry.value,
+
+        else => {},
     }
 }
 

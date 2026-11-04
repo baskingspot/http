@@ -134,6 +134,8 @@ pub const Error = error{
     InvalidHeaderListSize,
     InvalidHeaderBlockSize,
     InvalidOutputSize,
+    InvalidSetting,
+    SettingsTooLarge,
     BufferTooSmall,
     TooLarge,
 } || Allocator.Error;
@@ -461,7 +463,7 @@ pub const Session = struct {
             const header = frame.parseHeader(
                 self.in_buf[self.in_start..self.in_len],
             ) catch unreachable;
-            if (header.length > self.options.max_frame_size) {
+            if (header.length > self.local.max_frame_size) {
                 return self.connectionError(allocator, .frame_size_error);
             }
             const total = 9 + @as(usize, header.length);
@@ -741,7 +743,10 @@ pub const Session = struct {
             self.ids.acceptRemote(id) catch {
                 return self.connectionError(allocator, .protocol_error);
             };
-            if (self.streams.count() >= self.options.max_streams) {
+            const stream_limit = self.local.max_concurrent_streams orelse self.options.max_streams;
+            if (self.active_remote >= stream_limit or
+                self.streams.count() >= self.options.max_streams)
+            {
                 try self.appendFrame(allocator, .rst_stream, 0, id, &.{
                     0, 0, 0, @intFromEnum(frame.ErrorCode.refused_stream),
                 });
@@ -861,6 +866,16 @@ pub const Session = struct {
                 else => self.connectionError(allocator, .compression_error),
             };
         };
+
+        if (self.local.max_header_list_size) |limit| {
+            var list_size: usize = 0;
+            for (fields.items) |field| {
+                list_size += field.name.len + field.value.len + 32;
+            }
+            if (list_size > limit) {
+                return self.failStream(allocator, id, .enhance_your_calm);
+            }
+        }
 
         const event: Event = switch (kind) {
             .request => .{ .request = .{
@@ -1089,6 +1104,91 @@ pub const Session = struct {
         _ = self.removeStream(id, true);
     }
 
+    /// Send a local SETTINGS change. Only the entries supplied are sent; the
+    /// session validates each one, applies the receive-side effects, and
+    /// queues the frame. Local table and buffer growth is capped by what
+    /// `init` allocated.
+    pub fn submitSettings(
+        self: *Session,
+        allocator: Allocator,
+        entries: []const frame.Setting,
+    ) Error!void {
+        if (self.state == .closed) return error.ConnectionClosed;
+        if (self.goaway_sent) return error.ConnectionClosed;
+
+        var next = self.local;
+        for (entries) |entry| {
+            switch (entry.id) {
+                .header_table_size,
+                .enable_push,
+                .max_concurrent_streams,
+                .initial_window_size,
+                .max_frame_size,
+                .max_header_list_size,
+                => {},
+                else => return error.InvalidSetting,
+            }
+            if (entry.id == .enable_push) {
+                if (entry.value > 1) return error.InvalidSetting;
+                if (self.options.role == .server or entry.value == 1) {
+                    return error.InvalidSetting;
+                }
+            }
+            settings.applyEntry(&next, self.options.role, entry) catch {
+                return error.InvalidSetting;
+            };
+        }
+
+        if (next.header_table_size > self.decoder_storage.max_size) {
+            return error.SettingsTooLarge;
+        }
+        if (next.max_frame_size > self.in_buf.len - 9) {
+            return error.SettingsTooLarge;
+        }
+        if (next.max_header_list_size) |limit| {
+            if (limit > self.field_bytes.len) return error.SettingsTooLarge;
+        }
+        if (next.max_concurrent_streams) |limit| {
+            if (limit > self.options.max_streams) return error.SettingsTooLarge;
+        }
+
+        const old_initial = self.local.initial_window_size;
+        if (next.initial_window_size != old_initial) {
+            var it = self.streams.valueIterator();
+            while (it.next()) |state| {
+                var probe = state.recv;
+                probe.applyInitialChange(old_initial, next.initial_window_size) catch {
+                    return error.FlowControlError;
+                };
+            }
+        }
+
+        const payload = try allocator.alloc(u8, entries.len * 6);
+        defer allocator.free(payload);
+        for (entries, 0..) |entry, index| {
+            const at = index * 6;
+            mem.writeInt(u16, payload[at..][0..2], @intFromEnum(entry.id), .big);
+            mem.writeInt(u32, payload[at + 2 ..][0..4], entry.value, .big);
+        }
+        if (9 + payload.len > self.frame_buf.len) return error.SettingsTooLarge;
+        try self.out.ensure(allocator, 9 + payload.len);
+
+        if (next.initial_window_size != old_initial) {
+            var it = self.streams.valueIterator();
+            while (it.next()) |state| {
+                state.recv.applyInitialChange(
+                    old_initial,
+                    next.initial_window_size,
+                ) catch unreachable;
+            }
+        }
+        if (next.header_table_size != self.local.header_table_size) {
+            self.decoder.table.setMaxSize(next.header_table_size) catch unreachable;
+        }
+        self.local = next;
+        try self.appendFrame(allocator, .settings, 0, 0, payload);
+    }
+
     pub fn submitGoaway(self: *Session, allocator: Allocator, code: frame.ErrorCode) Error!void {
         if (self.state == .closed) return error.ConnectionClosed;
         if (self.goaway_sent) return;
@@ -1123,8 +1223,10 @@ pub const Session = struct {
         try self.appendFrame(allocator, .window_update, 0, 0, &payload);
 
         if (self.streams.getPtr(id)) |state| {
-            state.recv.increase(inc) catch return error.FlowControlError;
-            try self.appendFrame(allocator, .window_update, 0, id, &payload);
+            if (state.state != .closed) {
+                state.recv.increase(inc) catch return error.FlowControlError;
+                try self.appendFrame(allocator, .window_update, 0, id, &payload);
+            }
         }
     }
 
@@ -1824,4 +1926,190 @@ test "a SETTINGS update is visible to the application" {
         .settings => |values| try testing.expectEqual(@as(u32, 100), values.initial_window_size),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "a local SETTINGS change adjusts receive windows and sends a frame" {
+    var client = try Session.init(testing.allocator, .{ .role = .client });
+    defer client.deinit(testing.allocator);
+
+    const id = try client.submitRequest(testing.allocator, &request_fields, true);
+    var discard: [1024]u8 = undefined;
+    while (client.send(&discard) > 0) {}
+
+    try client.submitSettings(testing.allocator, &.{
+        .{ .id = .initial_window_size, .value = 100 },
+    });
+    try testing.expectEqual(@as(u32, 100), client.local.initial_window_size);
+    try testing.expectEqual(@as(i64, 100), client.streams.get(id).?.recv.available);
+
+    var out: [64]u8 = undefined;
+    const parsed = try takeFrame(&client, &out);
+    try testing.expectEqual(frame.FrameType.settings, parsed.header.type);
+    const body = try frame.body(parsed.header, parsed.payload);
+    var entries = body.settings.iterator();
+    const entry = entries.next().?;
+    try testing.expectEqual(frame.SettingId.initial_window_size, entry.id);
+    try testing.expectEqual(@as(u32, 100), entry.value);
+    try testing.expect(entries.next() == null);
+}
+
+test "local SETTINGS cannot exceed the allocated resources" {
+    var server = try Session.init(testing.allocator, .{ .role = .server });
+    defer server.deinit(testing.allocator);
+
+    try testing.expectError(error.InvalidSetting, server.submitSettings(
+        testing.allocator,
+        &.{.{ .id = .enable_push, .value = 0 }},
+    ));
+    try testing.expectError(error.SettingsTooLarge, server.submitSettings(
+        testing.allocator,
+        &.{.{ .id = .max_frame_size, .value = 32_768 }},
+    ));
+    try testing.expectError(error.SettingsTooLarge, server.submitSettings(
+        testing.allocator,
+        &.{.{ .id = .header_table_size, .value = 4097 }},
+    ));
+
+    var client = try Session.init(testing.allocator, .{ .role = .client });
+    defer client.deinit(testing.allocator);
+    const id = try client.submitRequest(testing.allocator, &request_fields, true);
+    client.streams.getPtr(id).?.recv.increase(0x7fff_ffff - 65_535) catch unreachable;
+    try testing.expectError(error.FlowControlError, client.submitSettings(
+        testing.allocator,
+        &.{.{ .id = .initial_window_size, .value = 0x7fff_ffff }},
+    ));
+    try testing.expectEqual(@as(u32, 65_535), client.local.initial_window_size);
+}
+
+test "a malformed HPACK block is a connection error" {
+    var server = try Session.init(testing.allocator, .{ .role = .server });
+    defer server.deinit(testing.allocator);
+    var client = try Session.init(testing.allocator, .{ .role = .client });
+    defer client.deinit(testing.allocator);
+    try handshake(&client, &server, testing.allocator);
+
+    var raw: [16]u8 = undefined;
+    var writer = frame.Writer.init(&raw);
+    try writer.begin(.headers, frame.flags.end_headers, 1);
+    try writer.byte(0);
+    writer.end();
+    _ = server.receive(writer.written());
+
+    const event = (try server.nextEvent(testing.allocator)).?;
+    switch (event) {
+        .connection_error => |err| try testing.expectEqual(
+            frame.ErrorCode.compression_error,
+            err.code,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+const fuzz_settings_frame = "\x00\x00\x00\x04\x00\x00\x00\x00\x00";
+
+test "fuzz session input never panics" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var session = try Session.init(testing.allocator, .{ .role = .server });
+            defer session.deinit(testing.allocator);
+
+            var input: [512]u8 = undefined;
+            const len = smith.slice(&input);
+            var offset: usize = 0;
+            while (offset < len) {
+                const chunk = @min(
+                    len - offset,
+                    @as(usize, smith.valueRangeAtMost(u16, 1, 64)),
+                );
+                const consumed = session.receive(input[offset..][0..chunk]);
+                if (consumed == 0) break;
+                offset += consumed;
+                while (try session.nextEvent(testing.allocator)) |_| {}
+                var out: [256]u8 = undefined;
+                while (session.send(&out) > 0) {}
+                if (session.isClosed()) return;
+            }
+            while (try session.nextEvent(testing.allocator)) |_| {}
+            var out: [256]u8 = undefined;
+            while (session.send(&out) > 0) {}
+        }
+    }.run, .{ .corpus = &.{
+        "",
+        frame.preface,
+        frame.preface ++ fuzz_settings_frame,
+        frame.preface ++ fuzz_settings_frame ++ "\x00\x00\x00\x01\x00\x00\x00\x00\x00",
+    } });
+}
+
+test "fuzz session submissions never panic" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var client = try Session.init(testing.allocator, .{ .role = .client });
+            defer client.deinit(testing.allocator);
+            var server = try Session.init(testing.allocator, .{ .role = .server });
+            defer server.deinit(testing.allocator);
+            try handshake(&client, &server, testing.allocator);
+
+            var stream_id: ?u31 = null;
+            const steps = smith.valueRangeAtMost(u8, 1, 16);
+            for (0..steps) |_| {
+                switch (smith.valueRangeAtMost(u8, 0, 4)) {
+                    0 => {
+                        if (stream_id == null) {
+                            stream_id = client.submitRequest(
+                                testing.allocator,
+                                &request_fields,
+                                smith.valueRangeAtMost(u8, 0, 1) == 1,
+                            ) catch null;
+                        }
+                    },
+                    1 => {
+                        if (stream_id) |id| {
+                            var data_buf: [32]u8 = undefined;
+                            const n = smith.slice(&data_buf);
+                            _ = client.submitData(
+                                testing.allocator,
+                                id,
+                                data_buf[0..n],
+                                smith.valueRangeAtMost(u8, 0, 1) == 1,
+                            ) catch |err| {
+                                if (err == error.OutOfMemory) return err;
+                                _ = @errorName(err);
+                            };
+                        }
+                    },
+                    2 => {
+                        if (stream_id) |id| {
+                            client.submitReset(testing.allocator, id, .cancel) catch |err| {
+                                _ = @errorName(err);
+                                // The stream may already be closed.
+                            };
+                        }
+                    },
+                    3 => {
+                        const ping: [8]u8 = @splat(0);
+                        client.submitPing(testing.allocator, &ping) catch |err| {
+                            _ = @errorName(err);
+                        };
+                    },
+                    4 => {
+                        client.submitSettings(testing.allocator, &.{
+                            .{
+                                .id = .initial_window_size,
+                                .value = smith.valueRangeAtMost(u32, 0, 65_535),
+                            },
+                        }) catch |err| {
+                            _ = @errorName(err);
+                            // The peer may have stopped reading.
+                        };
+                    },
+                    else => unreachable,
+                }
+                try transfer(&client, &server);
+                while (try server.nextEvent(testing.allocator)) |_| {}
+                try transfer(&server, &client);
+                while (try client.nextEvent(testing.allocator)) |_| {}
+            }
+        }
+    }.run, .{ .corpus = &.{} });
 }
