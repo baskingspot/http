@@ -39,12 +39,14 @@ const Header = @import("../header.zig").Header;
 const Headers = @import("../header.zig").Headers;
 const Method = @import("../method.zig").Method;
 const Status = @import("../status.zig").Status;
+const Cursor = @import("../Cursor.zig");
 const version_mod = @import("../version.zig");
 
 pub const WireVersion = version_mod.WireVersion;
 pub const Version = version_mod.Version;
 const effectiveVersion = version_mod.effective;
 
+pub const chunked = @import("chunked.zig");
 pub const framing = @import("framing.zig");
 pub const persistent = @import("persistence.zig").persistent;
 
@@ -134,17 +136,17 @@ pub fn parseRequest(buf: []const u8, last_len: u32, storage: []Header) Error!Par
     assert(buf.len <= math.maxInt(u32));
     if (last_len != 0 and !headComplete(buf, last_len)) return error.Incomplete;
 
-    var cursor: Cursor = .{ .buf = buf };
+    var cursor = Cursor.init(buf);
     // RFC 9112 §2.2: a server SHOULD ignore empty lines before the request-line.
     try skipLeadingEmptyLines(&cursor);
 
     const method_token = try scanToken(&cursor, ' ');
-    try cursor.expect(' ');
+    try expect(&cursor, ' ');
     const target = try scanTarget(&cursor);
-    try cursor.expect(' ');
+    try expect(&cursor, ' ');
     const wire_version = try parseVersion(&cursor);
     const version = try effectiveVersion(wire_version);
-    try cursor.expectCrlf();
+    try expectCrlf(&cursor);
 
     const headers = try parseHeaders(&cursor, storage);
     return .{
@@ -168,15 +170,15 @@ pub fn parseResponse(buf: []const u8, last_len: u32, storage: []Header) Error!Pa
     assert(buf.len <= math.maxInt(u32));
     if (last_len != 0 and !headComplete(buf, last_len)) return error.Incomplete;
 
-    var cursor: Cursor = .{ .buf = buf };
+    var cursor = Cursor.init(buf);
     const wire_version = try parseVersion(&cursor);
     const version = try effectiveVersion(wire_version);
-    try cursor.expect(' ');
+    try expect(&cursor, ' ');
     const status = try parseStatus(&cursor);
     // RFC 9112 §4: the space is required even when the reason is absent.
-    try cursor.expect(' ');
+    try expect(&cursor, ' ');
     const reason = try scanReason(&cursor);
-    try cursor.expectCrlf();
+    try expectCrlf(&cursor);
 
     const headers = try parseHeaders(&cursor, storage);
     return .{
@@ -191,59 +193,68 @@ pub fn parseResponse(buf: []const u8, last_len: u32, storage: []Header) Error!Pa
     };
 }
 
-/// Not `stdx.buffer.Queue`: that type panics when a read overruns, while an
-/// incomplete HTTP head must return `error.Incomplete` and wait for more
-/// bytes. This cursor never owns or refills storage.
-const Cursor = struct {
-    buf: []const u8,
-    pos: u32 = 0,
-
-    fn atEnd(self: Cursor) bool {
-        return @as(usize, self.pos) == self.buf.len;
-    }
-
-    fn has(self: Cursor, count: u32) bool {
-        return @as(usize, self.pos) + count <= self.buf.len;
-    }
-
-    /// The byte at `index`. The casts are the one place a head offset becomes
-    /// a slice index; `parseRequest` asserts the buffer fits `u32`.
-    fn at(self: Cursor, index: u32) u8 {
-        return self.buf[@intCast(index)];
-    }
-
-    fn slice(self: Cursor, start: u32, end: u32) []const u8 {
-        return self.buf[@intCast(start)..@intCast(end)];
-    }
-
-    fn expect(self: *Cursor, byte: u8) Error!void {
-        if (self.atEnd()) return error.Incomplete;
-        if (self.at(self.pos) != byte) return error.Invalid;
-        self.pos += 1;
-    }
-
-    fn expectDigit(self: *Cursor) Error!u8 {
-        if (self.atEnd()) return error.Incomplete;
-        const byte = self.at(self.pos);
-        if (byte < '0' or byte > '9') return error.Invalid;
-        self.pos += 1;
-        return byte - '0';
-    }
-
-    /// CRLF, and only CRLF. A bare LF is rejected even though RFC 9112 §2.2
-    /// permits recognizing one.
-    fn expectCrlf(self: *Cursor) Error!void {
-        if (self.atEnd()) return error.Incomplete;
-        const first = self.at(self.pos);
-        if (first == '\n') return error.Invalid;
-        if (first != '\r') return error.Invalid;
-        self.pos += 1;
-
-        if (self.atEnd()) return error.Incomplete;
-        if (self.at(self.pos) != '\n') return error.Invalid;
-        self.pos += 1;
-    }
+/// A parsed field section and the number of bytes it occupied.
+///
+/// The headers borrow the input buffer and the caller's storage, exactly as a
+/// `RequestHead` does; see that type for the lifetime rule.
+pub const ParsedFieldSection = struct {
+    headers: Headers,
+    /// Bytes consumed, including the terminating empty line.
+    consumed: u32,
 };
+
+/// Parse a standalone field section: `*( field-line CRLF ) CRLF`.
+///
+/// This is the trailer parser and the entry point for a caller that already
+/// has a start line. The section is complete at the first empty line; an empty
+/// section is a single CRLF. The returned headers borrow `buf` and `storage`;
+/// see `RequestHead`.
+pub fn parseFieldSection(
+    buf: []const u8,
+    last_len: u32,
+    storage: []Header,
+) Error!ParsedFieldSection {
+    assert(buf.len <= math.maxInt(u32));
+    if (last_len != 0 and !fieldSectionComplete(buf, last_len)) return error.Incomplete;
+
+    var cursor = Cursor.init(buf);
+    const headers = try parseHeaders(&cursor, storage);
+    return .{ .headers = headers, .consumed = cursor.pos };
+}
+
+/// Whether a complete field section is present. A section can end with the
+/// empty line alone, which the head terminator search does not catch.
+fn fieldSectionComplete(buf: []const u8, last_len: u32) bool {
+    assert(@as(usize, last_len) <= buf.len);
+    if (buf.len >= 2 and buf[0] == '\r' and buf[1] == '\n') return true;
+    const start: u32 = if (last_len > 4) last_len - 4 else 0;
+    return findHeadEnd(buf, start) != null;
+}
+
+/// Consume `byte`, or report why not. The shared cursor is infallible; this
+/// is where HTTP/1.1 decides that running out is `Incomplete` and a wrong
+/// byte is `Invalid`.
+fn expect(cursor: *Cursor, byte: u8) Error!void {
+    const got = cursor.next() orelse return error.Incomplete;
+    if (got != byte) return error.Invalid;
+}
+
+fn expectDigit(cursor: *Cursor) Error!u8 {
+    const got = cursor.next() orelse return error.Incomplete;
+    if (got < '0' or got > '9') return error.Invalid;
+    return got - '0';
+}
+
+/// CRLF, and only CRLF. A bare LF is rejected even though RFC 9112 §2.2
+/// permits recognizing one.
+fn expectCrlf(cursor: *Cursor) Error!void {
+    const first = cursor.next() orelse return error.Incomplete;
+    if (first == '\n') return error.Invalid;
+    if (first != '\r') return error.Invalid;
+
+    const second = cursor.next() orelse return error.Incomplete;
+    if (second != '\n') return error.Invalid;
+}
 
 /// Whether a complete head terminator is present. Starts at `last_len - 4`
 /// because a terminator completed by the newest bytes can begin no earlier.
@@ -457,18 +468,18 @@ fn parseVersionSlow(cursor: *Cursor) Error!WireVersion {
     if (prefix != http_prefix) return error.Invalid;
     cursor.pos += 5;
 
-    const major = try cursor.expectDigit();
-    try cursor.expect('.');
-    const minor = try cursor.expectDigit();
+    const major = try expectDigit(cursor);
+    try expect(cursor, '.');
+    const minor = try expectDigit(cursor);
 
     return .{ .major = major, .minor = minor };
 }
 
 /// RFC 9112 §4: `status-code = 3DIGIT`.
 fn parseStatus(cursor: *Cursor) Error!Status {
-    const hundreds = try cursor.expectDigit();
-    const tens = try cursor.expectDigit();
-    const ones = try cursor.expectDigit();
+    const hundreds = try expectDigit(cursor);
+    const tens = try expectDigit(cursor);
+    const ones = try expectDigit(cursor);
     const value = @as(u16, hundreds) * 100 + @as(u16, tens) * 10 + ones;
     return @as(Status, @enumFromInt(@as(u10, @intCast(value))));
 }
@@ -489,7 +500,7 @@ fn parseHeaders(cursor: *Cursor, storage: []Header) Error!Headers {
         const first = cursor.buf[cursor.pos];
 
         if (first == '\r') {
-            try cursor.expectCrlf();
+            try expectCrlf(cursor);
             return .{ .items = storage[0..@intCast(count)] };
         }
         // A leading bare LF is not an empty line, and a line beginning with
@@ -500,7 +511,7 @@ fn parseHeaders(cursor: *Cursor, storage: []Header) Error!Headers {
 
         const name = try scanToken(cursor, ':');
         // RFC 9112 §5.1: no whitespace between field name and colon.
-        try cursor.expect(':');
+        try expect(cursor, ':');
 
         // RFC 9112 §5.1: OWS before the value is not part of the value.
         while (!cursor.atEnd()) : (cursor.pos += 1) {
@@ -519,7 +530,7 @@ fn parseHeaders(cursor: *Cursor, storage: []Header) Error!Headers {
             if (byte != ' ' and byte != '\t') break;
         }
 
-        try cursor.expectCrlf();
+        try expectCrlf(cursor);
 
         if (@as(usize, count) == storage.len) return error.TooManyHeaders;
         storage[@intCast(count)] = .{ .name = name, .value = raw[0..@intCast(value_end)] };
@@ -877,7 +888,7 @@ test "target scanner: every byte at every position (RFC 9112 §3.2)" {
             @memset(&buf, 'a');
             buf[at] = @intCast(value);
 
-            var cursor: Cursor = .{ .buf = &buf };
+            var cursor = Cursor.init(&buf);
             const byte: u8 = @intCast(value);
 
             if (byte == ' ') {
@@ -904,7 +915,7 @@ test "line scanner: every byte at every position (RFC 9110 §5.5)" {
             @memset(&buf, 'a');
             buf[at] = @intCast(value);
 
-            var cursor: Cursor = .{ .buf = &buf };
+            var cursor = Cursor.init(&buf);
             const byte: u8 = @intCast(value);
 
             if (byte == '\r') {
@@ -1011,4 +1022,10 @@ fn within(outer: []const u8, inner: []const u8) bool {
     const base = @intFromPtr(outer.ptr);
     const start = @intFromPtr(inner.ptr);
     return start >= base and start + inner.len <= base + outer.len;
+}
+
+test {
+    _ = framing;
+    _ = @import("persistence.zig");
+    _ = chunked;
 }

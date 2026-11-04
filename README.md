@@ -48,6 +48,10 @@ ready to depend on.
   head arrives, and take `last_len` so a client trickling bytes cannot force a
   rescan. Strict where RFC 9112 allows leniency: bare LF, obs-fold, whitespace
   before the colon, and lenient start-line whitespace are rejected.
+  `h1.parseFieldSection` parses a standalone field section, which is also the
+  trailer parser. `h1.chunked.Decoder` is a resumable chunked body decoder:
+  chunk sizes and extensions, a trailer section, borrowed data slices, and
+  `need_more` across reads.
   `h1.framing` decides the body from a head: a request is `.none`, `.length`,
   or `.chunked`; a response adds `.close` and `.tunnel` (RFC 9112 §6.3).
   `h1.persistent` applies the §9.3 connection rule. It rejects TE with CL, TE

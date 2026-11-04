@@ -23,9 +23,9 @@ buffer, so the target is copied and keep-alive is computed before the body read;
 the read may rebase the buffer. The response body is written before the loop
 returns to the next head.
 
-A chunked request gets 501 until the decoder lands. A body over 64 KiB gets 413.
-There are no timeouts, no concurrency, and no TLS; those belong to the server
-above this package.
+A chunked request is decoded, including its trailer section. A body over
+64 KiB gets 413. There are no timeouts, no concurrency, and no TLS; those belong
+to the server above this package.
 
 ## io_uring
 
@@ -39,6 +39,7 @@ requests; the second is already in the receive buffer after the first head, so
 the server has to consume the first request and move the leftover forward
 before parsing again.
 
-This is the useful stress test for the API: the parser sees a buffer that may
-hold a head, a body, and the next request, and the head slices go stale as soon
-as the buffer is reused.
+The server answers the first request with a chunked response; the client parses
+the response head and decodes the body. This is the useful stress test for the
+API: the parser sees a buffer that may hold a head, a body, and the next
+request, and the head slices go stale as soon as the buffer is reused.

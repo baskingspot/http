@@ -9,6 +9,8 @@
 
 const std = @import("std");
 const Io = std.Io;
+const print = std.debug.print;
+
 const http = @import("http");
 
 const address_text = "127.0.0.1:8080";
@@ -18,7 +20,7 @@ const max_target = 256;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const address = try Io.net.IpAddress.parseLiteral(address_text);
+    const address: Io.net.IpAddress = try .parseLiteral(address_text);
 
     var listener = try address.listen(io, .{
         .mode = .stream,
@@ -26,15 +28,15 @@ pub fn main(init: std.process.Init) !void {
     });
     defer listener.deinit(io);
 
-    std.debug.print("http1-server: listening on {s}\n", .{address_text});
+    print("http1-server: listening on {s}\n", .{address_text});
 
     while (true) {
         const stream = listener.accept(io) catch |err| {
-            std.debug.print("http1-server: accept: {s}\n", .{@errorName(err)});
+            print("http1-server: accept: {s}\n", .{@errorName(err)});
             continue;
         };
         serveConnection(io, stream) catch |err| {
-            std.debug.print("http1-server: connection: {s}\n", .{@errorName(err)});
+            print("http1-server: connection: {s}\n", .{@errorName(err)});
         };
         stream.close(io);
     }
@@ -119,15 +121,58 @@ fn serveConnection(io: Io, stream: Io.net.Stream) !void {
                 r.readSliceAll(body_buffer[0..n]) catch return;
                 break :blk n;
             },
-            .chunked => {
-                // The chunked decoder is the next piece. Reject for now.
-                writeError(
-                    w,
-                    version,
-                    .not_implemented,
-                    "chunked request bodies are not implemented yet\n",
-                ) catch return;
-                return;
+            .chunked => blk: {
+                var trailer_storage: [16]http.Header = undefined;
+                var decoder: http.h1.chunked.Decoder = .init(&trailer_storage);
+                var decoded: usize = 0;
+
+                while (!decoder.isDone()) {
+                    const step = decoder.next(r.buffered()) catch |err| switch (err) {
+                        error.Incomplete => {
+                            fillMore(r) catch return;
+                            continue;
+                        },
+                        error.Invalid, error.TooManyHeaders => {
+                            writeError(
+                                w,
+                                version,
+                                .bad_request,
+                                "malformed chunked body\n",
+                            ) catch return;
+                            return;
+                        },
+                        error.Overflow => {
+                            writeError(
+                                w,
+                                version,
+                                .payload_too_large,
+                                "chunk size overflow\n",
+                            ) catch return;
+                            return;
+                        },
+                    };
+                    r.toss(step.consumed);
+                    switch (step.event) {
+                        .data => |data| {
+                            decoded += data.len;
+                            if (decoded > max_body) {
+                                writeError(
+                                    w,
+                                    version,
+                                    .payload_too_large,
+                                    "request body too large\n",
+                                ) catch return;
+                                return;
+                            }
+                        },
+                        .trailers => {},
+                        .need_more => {},
+                    }
+                    if (step.event == .need_more and step.consumed == 0) {
+                        fillMore(r) catch return;
+                    }
+                }
+                break :blk decoded;
             },
         };
 

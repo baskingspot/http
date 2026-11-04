@@ -42,6 +42,13 @@ All notable changes to http are recorded here. The format follows
 - `h1.persistent`: the RFC 9112 §9.3 connection decision from the version and
   the `Connection` tokens. HTTP/1.1 persists by default; HTTP/1.0 persists
   only with `keep-alive`; `close` wins.
+- `h1.parseFieldSection`: a standalone field section and the trailer parser.
+  An empty section is a single CRLF; the returned headers borrow the input and
+  the caller's storage.
+- `h1.chunked.Decoder`: resumable chunked transfer coding (RFC 9112 §7.1).
+  `next` returns a borrowed data slice, the trailer `Headers`, or `need_more`,
+  with the consumed prefix on every step. Chunk extensions are parsed and
+  ignored; a chunk-size overflow is `error.Overflow`.
 - `transfer_encoding.summarize`: the `Transfer-Encoding` coding list in field
   order, with the final coding, a seen/last `chunked` flag, parameter parsing
   (including quoted values), and rejection of repeated or parameterized
