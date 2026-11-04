@@ -34,6 +34,12 @@ All notable changes to http are recorded here. The format follows
   `Headers`. Both report `error.Incomplete` until a whole head arrives, take
   a `SearchState` for a resumable completeness check, and reject bare LF,
   obs-fold, and whitespace before the colon.
+- `h1.ServerConn`: a sans-I/O server connection state machine. It owns no
+  memory and does no I/O. The caller supplies the request buffer, field
+  storage, response head buffer, and time. It handles keep-alive and
+  pipelining, buffers request bodies up to a limit, answers `Expect:
+  100-continue`, and queues policy responses. HEAD responses keep
+  Content-Length and omit the body. Chunked request bodies return 501 for now.
 - `h1.framing.request` and `h1.framing.response`: body framing per RFC 9112
   §6.3. A request returns `RequestBody`: `.none`, `.length`, or `.chunked`. A
   response returns `ResponseBody`, which adds `.close` and `.tunnel`. TE with

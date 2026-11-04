@@ -45,6 +45,7 @@ pub const WireVersion = version_mod.WireVersion;
 pub const Version = version_mod.Version;
 const effectiveVersion = version_mod.effective;
 pub const chunked = @import("chunked.zig");
+pub const ServerConn = @import("ServerConn.zig");
 pub const framing = @import("framing.zig");
 pub const persistent = @import("persistence.zig").persistent;
 const syntax = @import("syntax.zig");
@@ -1135,4 +1136,5 @@ test {
     _ = @import("persistence.zig");
     _ = chunked;
     _ = Writer;
+    _ = ServerConn;
 }

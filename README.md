@@ -2,9 +2,10 @@
 
 Pure HTTP field-value parsers: content negotiation, ranges, entity tags, dates, and media types.
 
-No server. These are functions over bytes: parse a header value, negotiate a
-content coding, compare validators. They take borrowed slices and fill
-caller-owned storage, so there is no `std.Io` and no allocator in the API.
+No server and no I/O runtime. Parse a header value, negotiate a content coding,
+compare validators. The parsers take borrowed slices and fill caller-owned
+storage. `h1.ServerConn` is a sans-I/O connection state machine; the engine
+owns the socket, the clock, and the buffers.
 
 This project is incubating. It is unstable, its API will change, and it is not
 ready to depend on.
@@ -68,6 +69,10 @@ ready to depend on.
   `h1.targetForm` classifies the request target as origin, absolute, authority,
   or asterisk for the method; `h1.host` returns the single Host value or
   `error.DuplicateHost`.
+  `h1.ServerConn` drives one connection over those pieces: it buffers a
+  request body, keeps the leftover for a pipelined request, queues policy
+  errors, and writes a response through a caller head buffer. It owns no
+  memory and does no I/O.
 - `prefix_int`: HPACK and QPACK prefix integers (RFC 7541 §5.1), shared by
   both. Up to 32 bits, with the representation's tag bits left to the caller.
 - `huffman`: the RFC 7541 Appendix B Huffman code, shared by HPACK and QPACK.

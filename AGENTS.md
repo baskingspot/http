@@ -17,9 +17,10 @@ Zig 0.16 only. The flake is the tool contract, from `baskingspot/nix`: `nix deve
   returns borrowed slices or fills caller-owned storage; a list parser is an
   iterator. The writer takes a caller-owned `*std.Io.Writer` as a sink; it never
   creates, flushes, or closes one.
-- No server, no middleware, no message or connection types, and no header map.
-  Those depend on the host's I/O runtime; this package stops at the message
-  head.
+- No server, no middleware, no `std.http` message types, and no header map.
+  Those depend on the host's I/O runtime; this package stops at the connection.
+  `h1.ServerConn` is the sans-I/O connection state machine: it parses and
+  frames one connection, owns no socket, and leaves the listener to the engine.
 - One byte cursor. `src/Cursor.zig` is the file-as-struct `Cursor` every
   parser walks with; do not add a second one or a local position type. It
   knows nothing about error vocabularies, so `Incomplete` (h1) and `Truncated`
