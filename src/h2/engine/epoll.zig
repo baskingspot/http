@@ -5,8 +5,9 @@
 
 const readiness = @import("readiness.zig");
 const Wait = @import("../../transport/wait_epoll.zig").Wait;
+const transport = @import("transport/plain.zig");
 
-pub const Config = readiness.Config;
+pub const Config = readiness.Config(transport.Transport);
 pub const Exchange = readiness.Exchange;
 pub const Handler = readiness.Handler;
-pub const Server = readiness.Server(Wait);
+pub const Server = readiness.Server(Wait, transport.Transport);

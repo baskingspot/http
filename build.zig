@@ -18,6 +18,25 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "stdx", .module = stdx.module("stdx") }},
     });
 
+    // TLS is a separate module: importing it must not put libcrypto in an
+    // h2c-only build. Consumers that terminate TLS import `http_tls`.
+    const tls_dep = b.dependency("tls", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const http_tls_mod = b.addModule("http_tls", .{
+        .root_source_file = b.path("src/http_tls.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "http", .module = mod },
+            .{ .name = "tls", .module = tls_dep.module("tls") },
+            .{ .name = "tls_nonblocking", .module = tls_dep.module("tls_nonblocking") },
+        },
+    });
+    http_tls_mod.link_libc = true;
+    http_tls_mod.linkSystemLibrary("crypto", .{});
+
     if (b.pkg_hash.len != 0) return;
 
     // The bench suite runs ReleaseFast, but an imported module keeps its own
@@ -345,6 +364,40 @@ pub fn build(b: *std.Build) void {
         h2_readiness_example_run.dependOn(&run_h2_readiness.step);
     }
 
+    // The TLS readiness example is Linux and macOS only. It uses the separate
+    // `http_tls` module, so the h2c core never links libcrypto.
+    const h2_tls_readiness_example_bin = b.step(
+        "example-h2-tls-readiness-bin",
+        "Build the HTTP/2 TLS readiness example server",
+    );
+    const h2_tls_readiness_example_run = b.step(
+        "example-h2-tls-readiness",
+        "Run the HTTP/2 TLS readiness example server",
+    );
+    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+        const h2_tls_readiness_mod = b.createModule(.{
+            .root_source_file = b.path("examples/http2_tls_readiness.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "http_tls", .module = http_tls_mod },
+                .{ .name = "tls", .module = tls_dep.module("tls") },
+            },
+        });
+        h2_tls_readiness_mod.link_libc = true;
+        h2_tls_readiness_mod.linkSystemLibrary("crypto", .{});
+        const h2_tls_readiness = b.addExecutable(.{
+            .name = "http2-tls-readiness",
+            .root_module = h2_tls_readiness_mod,
+        });
+        h2_tls_readiness_example_bin.dependOn(&h2_tls_readiness.step);
+
+        const run_h2_tls_readiness = b.addRunArtifact(h2_tls_readiness);
+        if (b.args) |args| run_h2_tls_readiness.addArgs(args);
+        h2_tls_readiness_example_run.dependOn(&run_h2_tls_readiness.step);
+    }
+
     // The TLS h2 example is Linux and macOS only. It imports tls and the
     // blocking tls_std integration from baskingspot/tls.
     const h2_tls_example_bin = b.step(
@@ -356,10 +409,6 @@ pub fn build(b: *std.Build) void {
         "Run the HTTP/2 TLS example server",
     );
     if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
-        const tls_dep = b.dependency("tls", .{
-            .target = target,
-            .optimize = optimize,
-        });
         const h2_tls_mod = b.createModule(.{
             .root_source_file = b.path("examples/http2_tls.zig"),
             .target = target,
@@ -402,10 +451,6 @@ pub fn build(b: *std.Build) void {
         "Run the HTTP/1.1 TLS example client",
     );
     if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
-        const tls_dep = b.dependency("tls", .{
-            .target = target,
-            .optimize = optimize,
-        });
         const h1_tls_mod = b.createModule(.{
             .root_source_file = b.path("examples/http1_tls.zig"),
             .target = target,

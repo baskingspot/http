@@ -1,10 +1,11 @@
-//! The readiness engine shared by the poll(2), epoll(7), and kqueue(2) backends.
+//! The readiness engine shared by the poll(2), epoll(7), and kqueue(2)
+//! backends, for h2c and h2 over TLS.
 //!
-//! Fixed connection slots, nonblocking sockets, one thread, and no deadlines
-//! yet. Each slot drives the sans-I/O `Connection` core; the socket is only
-//! read when the waiter says so, and output is drained through a per-slot
-//! buffer. The `Waiter.Platform` edge supplies the listener, stop descriptor,
-//! accept, read, send, and close for the host.
+//! Fixed connection slots, nonblocking sockets, one thread. Each slot owns a
+//! byte transport and drives the sans-I/O `Connection` core above it. The
+//! `Waiter.Platform` edge supplies the listener, stop descriptor, accept,
+//! read, send, and close for the host. The `Transport` parameter supplies the
+//! h2c socket transport or the TLS record transport.
 
 const std = @import("std");
 const Io = std.Io;
@@ -19,52 +20,67 @@ const common = @import("common.zig");
 pub const Exchange = common.Exchange;
 pub const Handler = common.Handler;
 const wait = @import("../../transport/wait.zig");
+const transport_events = @import("transport.zig");
+const Event = transport_events.Event;
 
 // ast-grep-ignore: public-struct-field-default -- options bag; defaults are the policy
-pub const Config = struct {
-    allocator: Allocator,
-    max_connections: usize,
-    read_buffer_bytes: usize = 16 * 1024,
-    write_buffer_bytes: usize = 16 * 1024,
-    max_streams: u16 = 128,
-    body_bytes: usize = 64 * 1024,
-    arena_retain_bytes: usize = 4 * 1024,
-    session: SessionOptions = .{ .role = .server },
-    /// Zero disables the deadline.
-    idle_timeout: Io.Duration = .zero,
-    write_timeout: Io.Duration = .zero,
-    total_timeout: Io.Duration = .zero,
-    head_timeout: Io.Duration = .zero,
-    body_timeout: Io.Duration = .zero,
-    accept_backoff: Io.Duration = .fromMilliseconds(50),
-    /// How long a stop waits for active streams to finish before closing.
-    drain_timeout: Io.Duration = .fromSeconds(5),
-};
+pub fn Config(comptime Transport: type) type {
+    // ast-grep-ignore: public-struct-field-default -- options bag; call sites override one knob
+    return struct {
+        allocator: Allocator,
+        max_connections: usize,
+        /// Read storage for the plaintext transport. TLS owns its record
+        /// storage and ignores this.
+        read_buffer_bytes: usize = 16 * 1024,
+        /// Staging for h2 output, and the plaintext transport's write
+        /// storage. TLS encrypts from this staging buffer.
+        write_buffer_bytes: usize = 16 * 1024,
+        max_streams: u16 = 128,
+        body_bytes: usize = 64 * 1024,
+        arena_retain_bytes: usize = 4 * 1024,
+        session: SessionOptions = .{ .role = .server },
+        /// Zero disables the deadline.
+        idle_timeout: Io.Duration = .zero,
+        write_timeout: Io.Duration = .zero,
+        total_timeout: Io.Duration = .zero,
+        head_timeout: Io.Duration = .zero,
+        body_timeout: Io.Duration = .zero,
+        accept_backoff: Io.Duration = .fromMilliseconds(50),
+        /// How long a stop waits for active streams to finish before closing.
+        drain_timeout: Io.Duration = .fromSeconds(5),
+        /// Transport options. The plaintext transport has defaults; TLS
+        /// requires credentials and a handshake template.
+        transport: ?Transport.Options = null,
+    };
+}
 
-const State = enum { free, read, write };
-
-const Slot = struct {
-    conn: Connection = undefined,
-    fd: fd_t = -1,
-    state: State = .free,
-    read_buffer: []u8,
-    out_buffer: []u8,
-    out_start: usize = 0,
-    out_end: usize = 0,
-    started: Io.Timestamp = .zero,
-    last_active: Io.Timestamp = .zero,
-    write_started: ?Io.Timestamp = null,
-};
-
-pub fn Server(comptime Wait: type) type {
+pub fn Server(comptime Wait: type, comptime Transport: type) type {
     const P = Wait.Platform;
+    const ConfigType = Config(Transport);
     return struct {
         const Self = @This();
+
+        pub const Config = ConfigType;
+
+        const Slot = struct {
+            used: bool = false,
+            conn: Connection = undefined,
+            transport: Transport.Slot = undefined,
+            fd: fd_t = -1,
+            send_buffer: []u8,
+            send_start: usize = 0,
+            send_end: usize = 0,
+            started: Io.Timestamp = .zero,
+            last_active: Io.Timestamp = .zero,
+            write_started: ?Io.Timestamp = null,
+            input_closed: bool = false,
+            allow_write: bool = false,
+        };
 
         io: Io,
         allocator: Allocator,
         handler: Handler,
-        config: Config,
+        config: ConfigType,
         listener: P.Listener,
         stop: P.Stop,
         slots: []Slot,
@@ -78,11 +94,14 @@ pub fn Server(comptime Wait: type) type {
             io: Io,
             bind_address: Io.net.IpAddress,
             handler: Handler,
-            config: Config,
+            config: ConfigType,
         ) !Self {
             if (config.max_connections == 0) return error.NoConnections;
             if (config.read_buffer_bytes == 0 or config.write_buffer_bytes == 0) {
                 return error.NoBuffer;
+            }
+            if (config.transport == null and Transport.defaultOptions() == null) {
+                return error.MissingTransportOptions;
             }
 
             var listener = try P.openListener(bind_address, false);
@@ -95,13 +114,11 @@ pub fn Server(comptime Wait: type) type {
             errdefer config.allocator.free(slots);
             var initialized: usize = 0;
             errdefer for (slots[0..initialized]) |*slot| {
-                config.allocator.free(slot.read_buffer);
-                config.allocator.free(slot.out_buffer);
+                config.allocator.free(slot.send_buffer);
             };
             for (slots) |*slot| {
                 slot.* = .{
-                    .read_buffer = try config.allocator.alloc(u8, config.read_buffer_bytes),
-                    .out_buffer = try config.allocator.alloc(u8, config.write_buffer_bytes),
+                    .send_buffer = try config.allocator.alloc(u8, config.write_buffer_bytes),
                 };
                 initialized += 1;
             }
@@ -129,9 +146,8 @@ pub fn Server(comptime Wait: type) type {
 
         pub fn deinit(self: *Self) void {
             for (self.slots, 0..) |*slot, index| {
-                if (slot.state != .free) self.closeSlot(index);
-                self.allocator.free(slot.read_buffer);
-                self.allocator.free(slot.out_buffer);
+                if (slot.used) self.closeSlot(index);
+                self.allocator.free(slot.send_buffer);
             }
             self.wait.deinit();
             self.stop.deinit();
@@ -194,17 +210,14 @@ pub fn Server(comptime Wait: type) type {
             }
 
             for (self.slots, 0..) |*slot, index| {
-                if (slot.state == .free) continue;
+                if (!slot.used) continue;
+                slot.allow_write = true;
                 slot.conn.beginDrain() catch |err| {
                     self.handler.vtable.report_error(self.handler.ptr, err);
                     self.closeSlot(index);
                     continue;
                 };
-                if (slot.state == .read) {
-                    self.transition(index, .write, now);
-                } else if (slot.write_started == null) {
-                    slot.write_started = now;
-                }
+                self.refresh(index, now);
             }
         }
 
@@ -226,14 +239,29 @@ pub fn Server(comptime Wait: type) type {
                 };
                 const fd = maybe orelse return;
 
-                const slot = &self.slots[index];
-                slot.fd = fd;
-                slot.out_start = 0;
-                slot.out_end = 0;
-                slot.started = now;
-                slot.last_active = now;
-                slot.write_started = null;
-                slot.conn = Connection.init(.{
+                const options = self.config.transport orelse Transport.defaultOptions() orelse {
+                    P.close(fd);
+                    self.handler.vtable.report_error(
+                        self.handler.ptr,
+                        error.MissingTransportOptions,
+                    );
+                    continue;
+                };
+
+                var transport = Transport.init(
+                    self.allocator,
+                    self.io,
+                    fd,
+                    options,
+                    self.config.read_buffer_bytes,
+                    self.config.write_buffer_bytes,
+                ) catch |err| {
+                    P.close(fd);
+                    self.handler.vtable.report_error(self.handler.ptr, err);
+                    continue;
+                };
+
+                const conn = Connection.init(.{
                     .allocator = self.allocator,
                     .handler = self.handler,
                     .max_streams = self.config.max_streams,
@@ -243,164 +271,227 @@ pub fn Server(comptime Wait: type) type {
                     .head_timeout = self.config.head_timeout,
                     .body_timeout = self.config.body_timeout,
                 }) catch |err| {
+                    transport.deinit();
                     P.close(fd);
-                    slot.state = .free;
                     self.handler.vtable.report_error(self.handler.ptr, err);
                     continue;
                 };
+
+                const slot = &self.slots[index];
+                slot.fd = fd;
+                slot.used = true;
+                slot.conn = conn;
+                slot.transport = transport;
+                slot.send_start = 0;
+                slot.send_end = 0;
+                slot.input_closed = false;
+                slot.started = now;
+                slot.last_active = now;
+                slot.write_started = null;
+                slot.allow_write = false;
                 slot.conn.start(now);
-                slot.state = .read;
                 self.active += 1;
-                try self.wait.set(.{ .slot = index }, fd, .initOne(.read));
+
+                self.refresh(index, now);
+                if (!slot.used) continue;
             }
         }
 
         fn handleSlot(self: *Self, index: usize, flags: wait.Flags, now: Io.Timestamp) void {
             const slot = &self.slots[index];
-            if (slot.state == .free) return;
-
-            if (flags.contains(.failed) or flags.contains(.hup)) {
+            if (!slot.used) return;
+            if (flags.contains(.failed)) {
                 self.closeSlot(index);
                 return;
             }
 
-            if (slot.state == .read and flags.contains(.readable)) {
-                self.readSlot(index, now);
-                return;
-            }
-            if (slot.state == .write and flags.contains(.writable)) {
-                self.writeSlot(index, now);
-            }
-        }
-
-        fn readSlot(self: *Self, index: usize, now: Io.Timestamp) void {
-            const slot = &self.slots[index];
-            while (true) {
-                const n = P.read(slot.fd, slot.read_buffer) catch |err| switch (err) {
-                    error.WouldBlock => return,
-                    error.ReadFailed => {
-                        self.closeSlot(index);
-                        return;
-                    },
-                };
-                if (n == 0) {
-                    if (slot.conn.hasPendingOutput()) {
-                        self.transition(index, .write, now);
-                    } else {
-                        self.closeSlot(index);
-                    }
-                    return;
-                }
-                slot.last_active = now;
-
-                var offset: usize = 0;
-                while (offset < n) {
-                    const consumed = slot.conn.receive(slot.read_buffer[offset..n]);
-                    if (consumed == 0) break;
-                    offset += consumed;
-                }
-                _ = slot.conn.drive(now) catch |err| {
+            if (flags.contains(.readable)) {
+                slot.transport.receive(P) catch |err| {
                     self.handler.vtable.report_error(self.handler.ptr, err);
                     self.closeSlot(index);
                     return;
                 };
-                self.afterRead(index, now);
-                if (slot.state != .read) return;
+                slot.last_active = now;
+                slot.allow_write = true;
+                self.driveSlot(index, now);
+                if (!slot.used) return;
             }
-        }
-
-        fn afterRead(self: *Self, index: usize, now: Io.Timestamp) void {
-            const slot = &self.slots[index];
-            if (slot.conn.isClosed()) {
-                if (slot.conn.hasPendingOutput()) {
-                    self.transition(index, .write, now);
-                } else {
+            if (flags.contains(.writable)) {
+                slot.transport.send(P) catch |err| {
+                    self.handler.vtable.report_error(self.handler.ptr, err);
                     self.closeSlot(index);
-                }
-                return;
+                    return;
+                };
+                slot.last_active = now;
+                slot.allow_write = true;
+                self.driveSlot(index, now);
+                if (!slot.used) return;
             }
-            if (slot.conn.hasPendingOutput()) {
-                self.transition(index, .write, now);
-            } else {
-                self.transition(index, .read, now);
+            if (flags.contains(.hup)) {
+                slot.input_closed = true;
+                self.refresh(index, now);
             }
         }
 
-        fn writeSlot(self: *Self, index: usize, now: Io.Timestamp) void {
+        fn driveSlot(self: *Self, index: usize, now: Io.Timestamp) void {
             const slot = &self.slots[index];
-            while (true) {
-                if (slot.out_start == slot.out_end) {
-                    slot.out_start = 0;
-                    slot.out_end = slot.conn.send(slot.out_buffer);
-                    if (slot.out_end == 0) {
-                        _ = slot.conn.drive(now) catch |err| {
-                            self.handler.vtable.report_error(self.handler.ptr, err);
-                            self.closeSlot(index);
-                            return;
-                        };
-                        slot.out_end = slot.conn.send(slot.out_buffer);
-                        if (slot.out_end == 0) {
-                            if (slot.conn.isClosed()) {
-                                self.closeSlot(index);
-                            } else {
-                                self.transition(index, .read, now);
-                            }
-                            return;
-                        }
-                    }
+            if (!slot.used) return;
+
+            while (!slot.conn.isClosed()) {
+                const event = slot.transport.next() catch |err| {
+                    self.handler.vtable.report_error(self.handler.ptr, err);
+                    self.closeSlot(index);
+                    return;
+                };
+                switch (event) {
+                    .need_input, .need_output => break,
+                    .progress => continue,
+                    .handshake_complete => {
+                        slot.allow_write = true;
+                        continue;
+                    },
+                    .application_data => |bytes| {
+                        if (!self.feed(index, bytes, now)) return;
+                    },
+                    .closed => {
+                        slot.input_closed = true;
+                        break;
+                    },
+                }
+            }
+
+            _ = slot.conn.drive(now) catch |err| {
+                self.handler.vtable.report_error(self.handler.ptr, err);
+                self.closeSlot(index);
+                return;
+            };
+            if (!slot.used) return;
+
+            self.refresh(index, now);
+        }
+
+        /// Copy borrowed plaintext into the h2 session. A full session input
+        /// buffer forces a drive before the remainder can move.
+        fn feed(self: *Self, index: usize, bytes: []const u8, now: Io.Timestamp) bool {
+            const slot = &self.slots[index];
+            var offset: usize = 0;
+            while (offset < bytes.len) {
+                if (slot.conn.isClosed()) {
+                    // A connection error already queued GOAWAY. Drop the rest
+                    // of this plaintext and let the output drain.
+                    slot.transport.consume(bytes.len);
+                    slot.last_active = now;
+                    return true;
                 }
 
-                const bytes = slot.out_buffer[slot.out_start..slot.out_end];
-                const n = P.send(slot.fd, &.{}, bytes) catch |err| switch (err) {
-                    error.WouldBlock => return,
-                    error.BrokenPipe => {
+                const taken = slot.conn.receive(bytes[offset..]);
+                if (taken == 0) {
+                    _ = slot.conn.drive(now) catch |err| {
+                        self.handler.vtable.report_error(self.handler.ptr, err);
                         self.closeSlot(index);
-                        return;
-                    },
+                        return false;
+                    };
+                    if (slot.conn.isClosed()) {
+                        slot.transport.consume(bytes.len);
+                        slot.last_active = now;
+                        return true;
+                    }
+                    const retry = slot.conn.receive(bytes[offset..]);
+                    if (retry == 0) {
+                        self.closeSlot(index);
+                        return false;
+                    }
+                    offset += retry;
+                } else {
+                    offset += taken;
+                }
+
+                _ = slot.conn.drive(now) catch |err| {
+                    self.handler.vtable.report_error(self.handler.ptr, err);
+                    self.closeSlot(index);
+                    return false;
                 };
-                if (n == 0) {
+                if (!slot.used) return false;
+            }
+            slot.transport.consume(bytes.len);
+            slot.last_active = now;
+            return true;
+        }
+
+        fn refresh(self: *Self, index: usize, now: Io.Timestamp) void {
+            const slot = &self.slots[index];
+            if (!slot.used) return;
+
+            if (slot.allow_write and slot.transport.canWrite()) self.pump(index);
+            if (!slot.used) return;
+
+            var interest = slot.transport.interest();
+            if (slot.conn.isClosed() or slot.input_closed) {
+                interest.remove(.read);
+            }
+            if (interest.count() == 0) {
+                if (slot.conn.isClosed() or slot.input_closed) {
                     self.closeSlot(index);
                     return;
                 }
-                slot.last_active = now;
-                slot.out_start += n;
-                if (slot.out_start < slot.out_end) return;
+                interest.insert(.read);
             }
-        }
 
-        fn transition(self: *Self, index: usize, state: State, now: Io.Timestamp) void {
-            const slot = &self.slots[index];
-            slot.state = state;
-            if (state == .write) {
+            if (interest.contains(.write)) {
                 if (slot.write_started == null) slot.write_started = now;
             } else {
                 slot.write_started = null;
             }
-            if (state == .free) {
-                self.wait.remove(.{ .slot = index });
-                return;
-            }
-            const interest = if (state == .write)
-                wait.Interest.initOne(.write)
-            else
-                wait.Interest.initOne(.read);
+
             self.wait.set(.{ .slot = index }, slot.fd, interest) catch {
                 self.closeSlot(index);
             };
         }
 
+        /// Move queued h2 bytes into the transport. The transport accepts a
+        /// prefix and keeps its wire output; the tail stays in `send_buffer`.
+        fn pump(self: *Self, index: usize) void {
+            const slot = &self.slots[index];
+            while (true) {
+                if (slot.send_start == slot.send_end) {
+                    slot.send_start = 0;
+                    slot.send_end = slot.conn.send(slot.send_buffer);
+                    if (slot.send_end == 0) break;
+                }
+
+                const n = slot.transport.write(
+                    slot.send_buffer[slot.send_start..slot.send_end],
+                ) catch |err| {
+                    self.handler.vtable.report_error(self.handler.ptr, err);
+                    self.closeSlot(index);
+                    return;
+                };
+                if (n == 0) break;
+                slot.send_start += n;
+                if (slot.send_start < slot.send_end) break;
+            }
+
+            if (slot.send_start == slot.send_end) {
+                slot.send_start = 0;
+                slot.send_end = 0;
+            }
+        }
+
         fn closeSlot(self: *Self, index: usize) void {
             const slot = &self.slots[index];
-            if (slot.state == .free) return;
+            if (!slot.used) return;
             slot.conn.deinit();
+            slot.transport.deinit();
             P.close(slot.fd);
             slot.fd = -1;
-            slot.state = .free;
-            slot.out_start = 0;
-            slot.out_end = 0;
+            slot.used = false;
+            slot.send_start = 0;
+            slot.send_end = 0;
             slot.started = .zero;
             slot.last_active = .zero;
             slot.write_started = null;
+            slot.input_closed = false;
+            slot.allow_write = false;
             self.wait.remove(.{ .slot = index });
             self.active -= 1;
         }
@@ -410,7 +501,7 @@ pub fn Server(comptime Wait: type) type {
                 if (self.drain_deadline) |until| {
                     if (now.durationTo(until).nanoseconds <= 0) {
                         for (self.slots, 0..) |*slot, index| {
-                            if (slot.state != .free) self.closeSlot(index);
+                            if (slot.used) self.closeSlot(index);
                         }
                         self.drain_deadline = null;
                     }
@@ -425,7 +516,7 @@ pub fn Server(comptime Wait: type) type {
             }
 
             for (self.slots, 0..) |*slot, index| {
-                if (slot.state == .free) continue;
+                if (!slot.used) continue;
                 const deadline = self.slotDeadline(slot) orelse continue;
                 if (now.durationTo(deadline).nanoseconds > 0) continue;
                 self.closeSlot(index);
@@ -443,7 +534,7 @@ pub fn Server(comptime Wait: type) type {
                     slot.last_active.addDuration(self.config.idle_timeout),
                 );
             }
-            if (self.config.write_timeout.nanoseconds > 0 and slot.state == .write) {
+            if (self.config.write_timeout.nanoseconds > 0 and slot.write_started != null) {
                 const start = slot.write_started orelse slot.last_active;
                 deadline = earliest(
                     deadline,
@@ -460,7 +551,7 @@ pub fn Server(comptime Wait: type) type {
             var deadline: ?Io.Timestamp = self.accept_paused_until;
             if (self.drain_deadline) |at| deadline = earliest(deadline, at);
             for (self.slots) |*slot| {
-                if (slot.state == .free) continue;
+                if (!slot.used) continue;
                 if (self.slotDeadline(slot)) |at| {
                     deadline = earliest(deadline, at);
                 }
@@ -474,7 +565,7 @@ pub fn Server(comptime Wait: type) type {
 
         fn freeSlot(self: *Self) ?usize {
             for (self.slots, 0..) |*slot, index| {
-                if (slot.state == .free) return index;
+                if (!slot.used) return index;
             }
             return null;
         }
