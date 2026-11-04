@@ -38,8 +38,10 @@ All notable changes to http are recorded here. The format follows
   memory and does no I/O. The caller supplies the request buffer, field
   storage, response head buffer, and time. It handles keep-alive and
   pipelining, buffers request bodies up to a limit, answers `Expect:
-  100-continue`, and queues policy responses. HEAD responses keep
-  Content-Length and omit the body. Chunked request bodies return 501 for now.
+  100-continue`, and queues policy responses. Call `start` after accept so a
+  silent connection has a deadline. HEAD responses keep Content-Length and
+  omit the body. Chunked request bodies return 501 for now. A final 1xx
+  response is rejected; an HTTP/1.0 request never receives 100 Continue.
 - `h1.framing.request` and `h1.framing.response`: body framing per RFC 9112
   §6.3. A request returns `RequestBody`: `.none`, `.length`, or `.chunked`. A
   response returns `ResponseBody`, which adds `.close` and `.tunnel`. TE with

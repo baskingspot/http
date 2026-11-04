@@ -4,6 +4,8 @@
 //! request buffer, the field storage, and the response head buffer, then drives
 //! the machine from a socket loop:
 //!
+//!     var conn = h1.ServerConn.init(.{ ... });
+//!     conn.start(now);                    // before the first read
 //!     const dst = conn.recvBuffer();      // read into this
 //!     switch (conn.received(n, now)) { ... }
 //!     conn.respond(.{ .status = .ok }, body);
@@ -11,8 +13,10 @@
 //!     switch (conn.sent(n, now)) { ... }
 //!
 //! After `.keep_alive`, call `advance` before the next read; it parses a
-//! pipelined request already in the buffer. Call `eof` when the peer closes
-//! and `tick` when the poll deadline expires.
+//! pipelined request already in the buffer. `.sent` starts the idle head
+//! timer on `.keep_alive`. After `.read`, read the request body. Call `eof`
+//! when the peer closes and `tick` when the poll deadline expires; `tick`
+//! covers every phase.
 //!
 //! Policy responses are queued by the machine. The application never writes a
 //! 400, 408, 413, 417, 431, 501, or 505 path itself.
@@ -25,6 +29,7 @@ const Io = std.Io;
 const testing = std.testing;
 const assert = std.debug.assert;
 const ascii = std.ascii;
+const mem = std.mem;
 
 const Header = @import("../header.zig").Header;
 const Headers = @import("../header.zig").Headers;
@@ -39,10 +44,13 @@ const ServerConn = @This();
 pub const Limits = struct {
     /// Largest buffered request body. The request buffer must also hold it.
     body_bytes: usize = 64 * 1024,
-    /// Zero disables the deadline.
+    /// Zero disables the deadline. Starts at accept and after a keep-alive
+    /// response; it covers the idle wait and the head.
     head_timeout: Io.Duration = .fromSeconds(5),
+    /// Zero disables the deadline.
     body_timeout: Io.Duration = .fromSeconds(10),
     write_timeout: Io.Duration = .fromSeconds(10),
+    /// Zero disables the deadline. Starts with the first request byte.
     total_timeout: Io.Duration = .fromSeconds(30),
 };
 
@@ -76,7 +84,8 @@ pub const Event = union(enum) {
     need_more,
     /// A complete request. Respond, then drain `sendSlices`.
     request: Request,
-    /// The machine queued this policy response. Send it, then close.
+    /// The machine queued this policy response. Send it, then close. `sent`
+    /// reports whether the engine must drain input before the close.
     reject: Status,
     /// The peer closed with no partial request.
     closed,
@@ -90,14 +99,30 @@ pub const Slices = struct {
 pub const Done = union(enum) {
     /// More response bytes remain.
     more,
+    /// The interim response is complete; read the request body.
+    read,
     /// The response is complete and the connection can parse the next request.
     keep_alive,
     /// The response is complete and the connection must close.
+    close,
+    /// The response is complete. The request body was not fully read; drain
+    /// input before close so a reset does not discard the response.
+    close_after_drain,
+};
+
+/// The action for an expired poll deadline.
+pub const Tick = union(enum) {
+    /// No deadline has expired.
+    none,
+    /// The machine queued this 408. Send it, then close.
+    reject: Status,
+    /// Close now. Part of a response is already on the wire.
     close,
 };
 
 pub const RespondError = h1.Writer.Error || error{
     InvalidState,
+    InvalidStatus,
     ResponseHeadTooLarge,
 };
 
@@ -119,6 +144,9 @@ body_len: usize,
 keep_alive: bool,
 head_only: bool,
 body_allowed: bool,
+head_parsed: bool,
+body_chunked: bool,
+drain_close: bool,
 
 response: []const u8,
 response_head_len: usize,
@@ -149,6 +177,9 @@ pub fn init(config: Config) ServerConn {
         .keep_alive = true,
         .head_only = false,
         .body_allowed = true,
+        .head_parsed = false,
+        .body_chunked = false,
+        .drain_close = false,
 
         .response = "",
         .response_head_len = 0,
@@ -161,6 +192,15 @@ pub fn init(config: Config) ServerConn {
         .phase_deadline = null,
         .total_deadline = null,
     };
+}
+
+/// Start the idle head deadline. Call once after accept, before the first read.
+/// Without it a silent connection has no deadline. The total request timeout
+/// starts with the first input byte.
+pub fn start(self: *ServerConn, now: Io.Timestamp) void {
+    assert(self.phase == .head);
+    self.last_now = now;
+    self.startPhase(now, self.limits.head_timeout);
 }
 
 /// Where the engine should read. Empty while a response or the application
@@ -178,8 +218,8 @@ pub fn received(self: *ServerConn, n: usize, now: Io.Timestamp) Event {
     assert(n <= self.request_buffer.len - self.used);
 
     self.last_now = now;
-    self.startDeadlines(now);
-    if (self.timedOut(now)) return self.reject(.request_timeout);
+    self.startInputDeadlines(now);
+    if (self.timedOut(now)) return self.reject(.request_timeout, false);
 
     if (n == 0) return self.eof(now);
 
@@ -196,10 +236,16 @@ pub fn received(self: *ServerConn, n: usize, now: Io.Timestamp) Event {
 pub fn advance(self: *ServerConn, now: Io.Timestamp) Event {
     assert(self.phase == .head or self.phase == .body);
     self.last_now = now;
-    self.startDeadlines(now);
-    if (self.timedOut(now)) return self.reject(.request_timeout);
-    if (self.used == 0) return .need_more;
 
+    if (self.used == 0) {
+        assert(self.phase == .head);
+        self.startIdleDeadline(now);
+        if (self.timedOut(now)) return self.reject(.request_timeout, false);
+        return .need_more;
+    }
+
+    self.startInputDeadlines(now);
+    if (self.timedOut(now)) return self.reject(.request_timeout, false);
     return switch (self.phase) {
         .head => self.parseHead(now),
         .body => self.parseBody(),
@@ -213,18 +259,36 @@ pub fn eof(self: *ServerConn, now: Io.Timestamp) Event {
     self.last_now = now;
     if (self.phase == .head and self.used == 0) {
         self.phase = .closed;
+        self.clearDeadlines();
         return .closed;
     }
-    return self.reject(.bad_request);
+    return self.reject(.bad_request, false);
 }
 
-/// The poll deadline fired. Only for a head or body wait; a write stall is the
-/// engine's close, not a queued response.
-pub fn tick(self: *ServerConn, now: Io.Timestamp) ?Event {
-    assert(self.phase == .head or self.phase == .body);
+/// The poll deadline fired. Covers every phase. A head, body, or application
+/// timeout queues a 408. A response timeout closes, because part of the
+/// response may be on the wire.
+pub fn tick(self: *ServerConn, now: Io.Timestamp) Tick {
     self.last_now = now;
-    if (self.timedOut(now)) return self.reject(.request_timeout);
-    return null;
+    if (!self.timedOut(now)) return .none;
+
+    return switch (self.phase) {
+        .head, .body, .app => self.rejectTick(),
+        .response => {
+            self.phase = .closed;
+            self.clearDeadlines();
+            return .close;
+        },
+        .closed => .none,
+    };
+}
+
+fn rejectTick(self: *ServerConn) Tick {
+    return switch (self.reject(.request_timeout, false)) {
+        .reject => |status| .{ .reject = status },
+        .closed => .close,
+        else => unreachable,
+    };
 }
 
 /// Queue a final response. Only valid after a `.request` event. The body must
@@ -237,6 +301,9 @@ pub fn respond(
     body: []const u8,
 ) RespondError!void {
     if (self.phase != .app) return error.InvalidState;
+    if (options.status.class()) |class| {
+        if (class == .informational) return error.InvalidStatus;
+    }
 
     self.queueResponse(options, body, .final) catch |err| switch (err) {
         error.WriteFailed => return error.ResponseHeadTooLarge,
@@ -285,12 +352,15 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
         self.response_body_sent = 0;
         self.phase = .body;
         self.startPhase(now, self.limits.body_timeout);
-        return .more;
+        return .read;
     }
 
     if (!self.keep_alive) {
         self.phase = .closed;
-        return .close;
+        self.clearDeadlines();
+        const done: Done = if (self.drain_close) .close_after_drain else .close;
+        self.drain_close = false;
+        return done;
     }
 
     const consumed = self.body_start + self.body_len;
@@ -305,13 +375,19 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
     self.body_start = 0;
     self.body_len = 0;
     self.head = undefined;
+    self.head_parsed = false;
+    self.body_chunked = false;
+    self.drain_close = false;
     self.version = .@"HTTP/1.1";
     self.head_only = false;
     self.body_allowed = true;
+    self.startIdleDeadline(now);
     return .keep_alive;
 }
 
-/// The earliest deadline for the current phase and the connection total.
+/// The earliest active deadline. Null when every timeout is disabled or the
+/// connection is closed. Call `start` after accept so a silent connection has
+/// a deadline.
 pub fn deadline(self: *const ServerConn) ?Io.Timestamp {
     return earliest(self.phase_deadline, self.total_deadline);
 }
@@ -324,48 +400,62 @@ fn parseHead(self: *ServerConn, now: Io.Timestamp) Event {
     ) catch |err| switch (err) {
         error.Incomplete => {
             if (self.used == self.request_buffer.len) {
-                return self.reject(.request_header_fields_too_large);
+                return self.reject(.request_header_fields_too_large, true);
             }
             return .need_more;
         },
-        error.Invalid => return self.reject(.bad_request),
-        error.UnsupportedVersion => return self.reject(.http_version_not_supported),
-        error.TooManyHeaders => return self.reject(.request_header_fields_too_large),
+        error.Invalid => return self.reject(.bad_request, true),
+        error.UnsupportedVersion => return self.reject(.http_version_not_supported, true),
+        error.TooManyHeaders => return self.reject(.request_header_fields_too_large, true),
     };
 
     self.version = parsed.head.version;
     self.head_only = if (parsed.head.method) |method| method == .HEAD else false;
     self.head = parsed.head;
     self.body_start = parsed.consumed;
+    self.head_parsed = true;
+    self.body_chunked = false;
 
-    const host_value = h1.host(self.head.headers) catch return self.reject(.bad_request);
-    if (self.head.version == .@"HTTP/1.1" and host_value == null) {
-        return self.reject(.bad_request);
-    }
-    self.keep_alive = h1.persistent(self.head.version, self.head.headers);
-
-    const expect_continue = expectsContinue(self.head.headers) catch
-        return self.reject(.expectation_failed);
-
-    const framing = h1.framing.request(self.head.version, self.head.headers) catch
-        return self.reject(.bad_request);
+    const framing = h1.framing.request(self.version, self.head.headers) catch {
+        // The framing is unknown, so a body may still arrive. Signal a drain.
+        self.body_chunked = true;
+        return self.reject(.bad_request, true);
+    };
     switch (framing) {
         .none => self.body_len = 0,
         .length => |length| {
-            if (length > self.limits.body_bytes) return self.reject(.payload_too_large);
-            const body_len: usize = @intCast(length);
-            if (body_len > self.request_buffer.len - self.body_start) {
-                return self.reject(.payload_too_large);
+            if (length > std.math.maxInt(usize)) {
+                self.body_len = std.math.maxInt(usize);
+                return self.reject(.payload_too_large, true);
             }
-            self.body_len = body_len;
+            self.body_len = @intCast(length);
+            if (self.body_len > self.limits.body_bytes) {
+                return self.reject(.payload_too_large, true);
+            }
+            if (self.body_len > self.request_buffer.len - self.body_start) {
+                return self.reject(.payload_too_large, true);
+            }
         },
-        .chunked => return self.reject(.not_implemented),
+        .chunked => {
+            self.body_len = 0;
+            self.body_chunked = true;
+            return self.reject(.not_implemented, true);
+        },
     }
+
+    const host_value = h1.host(self.head.headers) catch return self.reject(.bad_request, true);
+    if (self.version == .@"HTTP/1.1" and host_value == null) {
+        return self.reject(.bad_request, true);
+    }
+    self.keep_alive = h1.persistent(self.version, self.head.headers);
+
+    const expect_continue = expectsContinue(self.head.headers) catch
+        return self.reject(.expectation_failed, true);
 
     if (self.used - self.body_start >= self.body_len) return self.completeRequest();
 
-    if (expect_continue) {
-        self.queueContinue() catch return self.reject(.internal_server_error);
+    if (expect_continue and self.version != .@"HTTP/1.0") {
+        self.queueContinue() catch return self.reject(.internal_server_error, false);
         return .need_more;
     }
 
@@ -376,7 +466,7 @@ fn parseHead(self: *ServerConn, now: Io.Timestamp) Event {
 
 fn parseBody(self: *ServerConn) Event {
     if (self.used - self.body_start >= self.body_len) return self.completeRequest();
-    if (self.used == self.request_buffer.len) return self.reject(.payload_too_large);
+    if (self.used == self.request_buffer.len) return self.reject(.payload_too_large, true);
     return .need_more;
 }
 
@@ -390,14 +480,23 @@ fn completeRequest(self: *ServerConn) Event {
     } };
 }
 
-fn reject(self: *ServerConn, status: Status) Event {
+fn reject(self: *ServerConn, status: Status, drain: bool) Event {
     self.keep_alive = false;
+    self.drain_close = drain and self.unreadBody();
+    self.total_deadline = null;
     self.queueResponse(.{ .status = status }, "", .final) catch {
         self.phase = .closed;
+        self.clearDeadlines();
         return .closed;
     };
     self.phase = .response;
     return .{ .reject = status };
+}
+
+fn unreadBody(self: *const ServerConn) bool {
+    if (!self.head_parsed) return self.used > 0;
+    if (self.body_chunked) return true;
+    return self.used - self.body_start < self.body_len;
 }
 
 fn queueResponse(
@@ -415,7 +514,7 @@ fn queueResponse(
     if (self.body_allowed) try w.contentLength(@intCast(body.len));
     if (!self.keep_alive) {
         try w.field("Connection", "close");
-    } else if (self.head.version == .@"HTTP/1.0") {
+    } else if (self.version == .@"HTTP/1.0") {
         try w.field("Connection", "keep-alive");
     }
     for (options.headers) |header| try w.field(header.name, header.value);
@@ -459,16 +558,29 @@ fn statusAllowsBody(status: Status) bool {
     };
 }
 
-fn startDeadlines(self: *ServerConn, now: Io.Timestamp) void {
+fn clearDeadlines(self: *ServerConn) void {
+    self.phase_start = null;
+    self.phase_deadline = null;
+    self.total_deadline = null;
+}
+
+fn startInputDeadlines(self: *ServerConn, now: Io.Timestamp) void {
     if (self.total_deadline == null) {
         self.total_deadline = addDeadline(now, self.limits.total_timeout);
     }
-    if (self.phase_start == null and (self.phase == .head or self.phase == .body)) {
+    if (self.phase_start == null) {
         self.startPhase(now, switch (self.phase) {
             .head => self.limits.head_timeout,
             .body => self.limits.body_timeout,
             else => unreachable,
         });
+    }
+}
+
+fn startIdleDeadline(self: *ServerConn, now: Io.Timestamp) void {
+    assert(self.phase == .head);
+    if (self.phase_start == null) {
+        self.startPhase(now, self.limits.head_timeout);
     }
 }
 
@@ -560,7 +672,7 @@ const TestConn = struct {
             const done = self.conn.sent(slices.head.len + slices.body.len, self.clock.now);
             switch (done) {
                 .more => {},
-                .keep_alive, .close => return done,
+                .read, .keep_alive, .close, .close_after_drain => return done,
             }
         }
     }
@@ -598,8 +710,8 @@ test "a request and a response" {
     try t.conn.respond(.{ .status = .ok, .content_type = "text/plain" }, "hello");
     const done = try t.drain();
     try testing.expectEqual(.keep_alive, std.meta.activeTag(done));
-    try testing.expect(std.mem.startsWith(u8, t.out(), "HTTP/1.1 200 OK\r\n"));
-    try testing.expect(std.mem.endsWith(u8, t.out(), "\r\n\r\nhello"));
+    try testing.expect(mem.startsWith(u8, t.out(), "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(mem.endsWith(u8, t.out(), "\r\n\r\nhello"));
 }
 
 test "a body that arrives in pieces" {
@@ -631,8 +743,8 @@ test "pipelined requests keep the leftover" {
     try t.conn.respond(.{ .status = .ok }, "two");
     try testing.expectEqual(.keep_alive, std.meta.activeTag(try t.drain()));
 
-    try testing.expect(std.mem.find(u8, t.out(), "one") != null);
-    try testing.expect(std.mem.find(u8, t.out(), "two") != null);
+    try testing.expect(mem.find(u8, t.out(), "one") != null);
+    try testing.expect(mem.find(u8, t.out(), "two") != null);
 }
 
 test "Expect: 100-continue queues the interim response" {
@@ -643,8 +755,8 @@ test "Expect: 100-continue queues the interim response" {
         "POST / HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n",
     )));
 
-    try testing.expectEqual(.more, std.meta.activeTag(try t.drain()));
-    try testing.expect(std.mem.startsWith(u8, t.out(), "HTTP/1.1 100 Continue\r\n\r\n"));
+    try testing.expectEqual(.read, std.meta.activeTag(try t.drain()));
+    try testing.expect(mem.startsWith(u8, t.out(), "HTTP/1.1 100 Continue\r\n\r\n"));
 
     const request = try expectRequest(try t.feed("hello"));
     try testing.expectEqualStrings("hello", request.body);
@@ -657,8 +769,8 @@ test "policy responses are queued without the application" {
     try expectReject(try t.feed(
         "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\n",
     ), .payload_too_large);
-    try testing.expectEqual(.close, std.meta.activeTag(try t.drain()));
-    try testing.expect(std.mem.startsWith(u8, t.out(), "HTTP/1.1 413 "));
+    try testing.expectEqual(.close_after_drain, std.meta.activeTag(try t.drain()));
+    try testing.expect(mem.startsWith(u8, t.out(), "HTTP/1.1 413 "));
 
     t = undefined;
     t.init(.{});
@@ -684,8 +796,8 @@ test "a full request buffer is 431" {
     var full: [1024]u8 = undefined;
     @memset(&full, 'A');
     try expectReject(try t.feed(&full), .request_header_fields_too_large);
-    try testing.expectEqual(.close, std.meta.activeTag(try t.drain()));
-    try testing.expect(std.mem.startsWith(u8, t.out(), "HTTP/1.1 431 "));
+    try testing.expectEqual(.close_after_drain, std.meta.activeTag(try t.drain()));
+    try testing.expect(mem.startsWith(u8, t.out(), "HTTP/1.1 431 "));
 }
 
 test "HEAD sends the length but not the body" {
@@ -696,8 +808,8 @@ test "HEAD sends the length but not the body" {
     try t.conn.respond(.{ .status = .ok, .content_type = "text/plain" }, "hello");
 
     try testing.expectEqual(.keep_alive, std.meta.activeTag(try t.drain()));
-    try testing.expect(std.mem.find(u8, t.out(), "Content-Length: 5") != null);
-    try testing.expect(std.mem.find(u8, t.out(), "hello") == null);
+    try testing.expect(mem.find(u8, t.out(), "Content-Length: 5") != null);
+    try testing.expect(mem.find(u8, t.out(), "hello") == null);
 }
 
 test "partial sends advance the head and body" {
@@ -723,8 +835,10 @@ test "a timeout is a 408 policy response" {
     try testing.expectEqual(.need_more, std.meta.activeTag(try t.feed("GET /")));
     t.clock.advance(2 * std.time.ns_per_s);
 
-    const event = t.conn.tick(t.clock.now) orelse return error.TestExpectedTimeout;
-    try expectReject(event, .request_timeout);
+    switch (t.conn.tick(t.clock.now)) {
+        .reject => |status| try testing.expectEqual(Status.request_timeout, status),
+        else => return error.TestExpectedTimeout,
+    }
 }
 
 test "eof closes a clean connection and rejects a partial head" {
@@ -747,7 +861,7 @@ test "Connection: close closes after the response" {
     ));
     try t.conn.respond(.{ .status = .ok }, "");
     try testing.expectEqual(.close, std.meta.activeTag(try t.drain()));
-    try testing.expect(std.mem.find(u8, t.out(), "Connection: close") != null);
+    try testing.expect(mem.find(u8, t.out(), "Connection: close") != null);
 }
 
 test "HTTP/1.0 keep-alive is explicit in the response" {
@@ -759,7 +873,7 @@ test "HTTP/1.0 keep-alive is explicit in the response" {
     ));
     try t.conn.respond(.{ .status = .ok }, "");
     try testing.expectEqual(.keep_alive, std.meta.activeTag(try t.drain()));
-    try testing.expect(std.mem.find(u8, t.out(), "Connection: keep-alive") != null);
+    try testing.expect(mem.find(u8, t.out(), "Connection: keep-alive") != null);
 }
 
 test "a 204 omits Content-Length and the body" {
@@ -770,9 +884,93 @@ test "a 204 omits Content-Length and the body" {
     try t.conn.respond(.{ .status = .no_content }, "nope");
 
     try testing.expectEqual(.keep_alive, std.meta.activeTag(try t.drain()));
-    try testing.expect(std.mem.find(u8, t.out(), "Content-Length") == null);
-    try testing.expect(std.mem.find(u8, t.out(), "nope") == null);
-    try testing.expect(std.mem.startsWith(u8, t.out(), "HTTP/1.1 204 No Content\r\n"));
+    try testing.expect(mem.find(u8, t.out(), "Content-Length") == null);
+    try testing.expect(mem.find(u8, t.out(), "nope") == null);
+    try testing.expect(mem.startsWith(u8, t.out(), "HTTP/1.1 204 No Content\r\n"));
+}
+
+test "start gives a silent connection a deadline" {
+    var t: TestConn = undefined;
+    t.init(.{});
+    try testing.expect(t.conn.deadline() == null);
+
+    t.conn.start(t.clock.now);
+    try testing.expect(t.conn.deadline() != null);
+
+    t.clock.advance(6 * std.time.ns_per_s);
+    switch (t.conn.tick(t.clock.now)) {
+        .reject => |status| try testing.expectEqual(Status.request_timeout, status),
+        else => return error.TestExpectedTimeout,
+    }
+}
+
+test "the total timeout starts with the first request byte" {
+    var t: TestConn = undefined;
+    t.init(.{ .head_timeout = .fromSeconds(60), .total_timeout = .fromSeconds(30) });
+    t.conn.start(t.clock.now);
+
+    t.clock.advance(29 * std.time.ns_per_s);
+    try testing.expectEqual(.need_more, std.meta.activeTag(try t.feed("GET /")));
+
+    t.clock.advance(2 * std.time.ns_per_s);
+    try testing.expectEqual(.none, std.meta.activeTag(t.conn.tick(t.clock.now)));
+}
+
+test "keep-alive leaves an idle deadline" {
+    var t: TestConn = undefined;
+    t.init(.{});
+
+    _ = try expectRequest(try t.feed("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
+    try t.conn.respond(.{ .status = .ok }, "");
+    try testing.expectEqual(.keep_alive, std.meta.activeTag(try t.drain()));
+    try testing.expect(t.conn.deadline() != null);
+}
+
+test "HTTP/1.0 does not receive 100 Continue" {
+    var t: TestConn = undefined;
+    t.init(.{});
+
+    try testing.expectEqual(.need_more, std.meta.activeTag(try t.feed(
+        "POST / HTTP/1.0\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n",
+    )));
+    try testing.expectEqual(.more, std.meta.activeTag(try t.drain()));
+    try testing.expectEqual(0, t.out().len);
+
+    const request = try expectRequest(try t.feed("hello"));
+    try testing.expectEqualStrings("hello", request.body);
+}
+
+test "a response timeout closes the connection" {
+    var t: TestConn = undefined;
+    t.init(.{ .total_timeout = .fromSeconds(1), .write_timeout = .fromSeconds(30) });
+
+    _ = try expectRequest(try t.feed("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
+    try t.conn.respond(.{ .status = .ok }, "");
+    t.clock.advance(2 * std.time.ns_per_s);
+    try testing.expectEqual(.close, std.meta.activeTag(t.conn.tick(t.clock.now)));
+}
+
+test "a final 1xx response is rejected" {
+    var t: TestConn = undefined;
+    t.init(.{});
+
+    _ = try expectRequest(try t.feed("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
+    try testing.expectError(
+        error.InvalidStatus,
+        t.conn.respond(.{ .status = .@"continue" }, ""),
+    );
+    try testing.expectError(
+        error.InvalidStatus,
+        t.conn.respond(.{ .status = .switching_protocols }, ""),
+    );
+}
+
+test "a reject with no unread body closes without draining" {
+    var t: TestConn = undefined;
+    t.init(.{});
+
+    try expectReject(try t.feed("GET / HTTP/1.1\r\n\r\n"), .bad_request);
+    try testing.expectEqual(.close, std.meta.activeTag(try t.drain()));
 }
 
 test "respond outside a request is an error" {
