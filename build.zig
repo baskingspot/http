@@ -117,6 +117,25 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_engine_tests.addArgs(args);
     test_step.dependOn(&run_engine_tests.step);
 
+    // The poll engine is Linux-only for now. The test artifact is present on
+    // every target in the source tree, but only Linux gets a build target.
+    if (target.result.os.tag == .linux) {
+        const poll_tests_mod = b.createModule(.{
+            .root_source_file = b.path("tests/engine_poll.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "http", .module = mod }},
+        });
+        const poll_tests = b.addTest(.{
+            .root_module = poll_tests_mod,
+            .test_runner = test_runner,
+        });
+        const run_poll_tests = b.addRunArtifact(poll_tests);
+        run_poll_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
+        if (b.args) |args| run_poll_tests.addArgs(args);
+        test_step.dependOn(&run_poll_tests.step);
+    }
+
     // Fuzzing needs the built-in runner: testingx's main rejects fuzz mode
     // because the fuzzer speaks a private protocol. `just fuzz` drives this.
     const fuzz_tests = b.addTest(.{ .root_module = mod });
@@ -144,6 +163,28 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_example.addArgs(args);
     b.step("example", "Run the HTTP/1.1 example server")
         .dependOn(&run_example.step);
+
+    // The poll example is Linux-only for now. The steps exist everywhere so
+    // `check-example` is portable; only Linux gets a target to build.
+    const poll_example_bin = b.step("example-poll-bin", "Build the HTTP/1.1 poll example server");
+    const poll_example_run = b.step("example-poll", "Run the HTTP/1.1 poll example server");
+    if (target.result.os.tag == .linux) {
+        const poll_mod = b.createModule(.{
+            .root_source_file = b.path("examples/http1_poll.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "http", .module = mod }},
+        });
+        const poll = b.addExecutable(.{
+            .name = "http1-poll",
+            .root_module = poll_mod,
+        });
+        poll_example_bin.dependOn(&poll.step);
+
+        const run_poll = b.addRunArtifact(poll);
+        if (b.args) |args| run_poll.addArgs(args);
+        poll_example_run.dependOn(&run_poll.step);
+    }
 
     // The io_uring example is Linux-only. The steps exist everywhere so
     // `check-example` is portable; only Linux gets a target to build.

@@ -27,6 +27,16 @@ connection deadlines, so the blocking engine sets every timeout to zero. A
 chunked request body gets 501 for now. The poll engine will replace this one
 for the admin plane.
 
+## Poll server
+
+```sh
+just example-poll
+```
+
+Linux only for now. The same handler as the blocking example runs over the
+poll engine: fixed slots, nonblocking sockets, connection deadlines, accept
+backoff, keep-alive and pipelining, and a stop eventfd.
+
 ## io_uring
 
 ```sh

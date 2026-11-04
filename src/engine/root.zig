@@ -5,7 +5,11 @@
 //! I/O.
 
 pub const blocking = @import("blocking.zig");
+pub const poll = @import("poll.zig");
+pub const Exchange = @import("common.zig").Exchange;
 
 test {
     _ = blocking;
+    _ = poll;
+    _ = Exchange;
 }

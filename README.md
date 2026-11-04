@@ -80,6 +80,11 @@ ready to depend on.
   parsing, framing, keep-alive, pipelining, and policy responses. The blocking
   engine sets every timeout to zero because a blocking syscall cannot enforce
   them; the evented engines are separate.
+- `engine.poll`: a Linux `poll(2)` server with fixed slots, nonblocking
+  sockets, accept backoff, connection deadlines, keep-alive and pipelining, and
+  a stop eventfd. It uses the same comptime handler and `Exchange` as the
+  blocking engine. Epoll and kqueue become backends for this readiness loop;
+  io_uring is separate.
 - `prefix_int`: HPACK and QPACK prefix integers (RFC 7541 §5.1), shared by
   both. Up to 32 bits, with the representation's tag bits left to the caller.
 - `huffman`: the RFC 7541 Appendix B Huffman code, shared by HPACK and QPACK.

@@ -1,4 +1,4 @@
-# Blocking engine
+# Server engines
 
 ## Scope
 
@@ -80,11 +80,51 @@ gets 501.
 HEAD responses keep Content-Length and omit the body. A 204 or 304 response
 omits Content-Length and the body. A 1xx status is not a final response.
 
+## Poll engine
+
+`engine.poll` is Linux-only for now. It uses `poll(2)` over raw nonblocking
+descriptors. `std.Io` supplies the listener, the clock, and the listener close.
+The connection machine is the same `h1.ServerConn`.
+
+`Server(Handler)` takes the handler type at comptime. The caller creates it
+with an address, a handler pointer, and a `Config` that holds the allocator,
+the slot count, the buffer sizes, the connection limits, and the accept
+backoff. The server allocates all slots and buffers once, in `init`; it does no
+allocation per request.
+
+The methods are `init`, `run`, `stop`, `deinit`, and `port`. `run` blocks in
+`poll`. `stop` writes a stop eventfd; `run` returns after the next wake.
+
+The poll set contains:
+
+- The stop eventfd.
+- The listener, only when a slot is free and accept is not backed off.
+- Every active slot, with `POLLIN` for read or drain and `POLLOUT` for write.
+
+The timeout is the earliest connection deadline or the accept-backoff
+deadline. After each wait, the engine services readable and writable slots and
+then expires due connections with `tick`. A head, body, or application timeout
+queues a 408; a response or drain timeout closes.
+
+A read feeds `recvBuffer` and `received`. A request calls the comptime handler.
+A write sends `sendSlices` and calls `sent`. After 100 Continue the slot
+returns to read. After keep-alive the engine calls `advance` before the next
+read, so a pipelined request needs no syscall. `.close_after_drain` switches
+the slot to drain; the engine reads into scratch and discards until EOF or the
+drain deadline.
+
+Accept uses `accept4` in a loop. `EMFILE`, `ENFILE`, and resource exhaustion
+pause the listener for the accept backoff. A full slot table means the listener
+is not polled; the backlog holds the connection.
+
+Epoll and kqueue replace the wait and registration part of this loop. The slot
+state machine does not change. io_uring is a separate completion engine.
+
 ## Future
 
-The evented engines are separate:
+The remaining evented engines are separate:
 
-- Poll, epoll, and kqueue share a readiness loop.
+- Epoll and kqueue share the poll engine's readiness loop.
 - io_uring has its own completion loop.
 - Do not use `std.Io.Evented` for these engines. It is an experimental fiber
   runtime.
