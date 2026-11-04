@@ -358,3 +358,11 @@ test "poll a slow reader hits the write deadline" {
     try testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(got.len < 4 * 1024 * 1024);
 }
+
+test "poll accept backoff defaults to 50 ms" {
+    const config: engine.Config = .{
+        .allocator = testing.allocator,
+        .max_connections = 1,
+    };
+    try testing.expectEqual(50 * std.time.ns_per_ms, config.accept_backoff.nanoseconds);
+}

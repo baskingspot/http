@@ -36,7 +36,7 @@ pub const Config = struct {
     drain_bytes: usize = 4 * 1024,
     body_bytes: usize = 64 * 1024,
     limits: h1.ServerConn.Limits = .{},
-    accept_backoff: Io.Duration = .fromSeconds(1),
+    accept_backoff: Io.Duration = .fromMilliseconds(50),
 };
 
 const State = enum { free, read, write, drain };

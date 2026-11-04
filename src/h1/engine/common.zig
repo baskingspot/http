@@ -12,6 +12,8 @@ pub const Exchange = struct {
     /// convenience, not a limit on the body size.
     response_body: []u8,
 
+    /// The body may borrow handler-owned memory that outlives the response.
+    /// `response_body` is scratch for convenience, not a body size limit.
     pub fn respond(
         self: *Exchange,
         options: h1.ServerConn.ResponseOptions,
