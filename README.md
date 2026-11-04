@@ -147,8 +147,9 @@ ready to depend on.
   engines. One thread, fixed connection slots, nonblocking sockets, and the same
   `Connection` core and `Exchange` handler. poll and epoll are Linux; kqueue is
   macOS. The wait backends and platform edge move to `src/transport`, shared
-  with the h1 engines. `just conformance-run-readiness` runs h2spec against the
-  readiness example.
+  with the h1 engines. Optional idle, write, and total deadlines and an accept
+  backoff are in `Config`. `just conformance-run-readiness` runs h2spec against
+  the readiness example.
 - `content_length`: `Content-Length` parsing and combination. Repeated values
   must agree, a comma list of identical values is accepted, and non-digits,
   conflicts, and overflow are errors. `null` means the field was absent.

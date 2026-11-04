@@ -61,16 +61,20 @@ const Harness = struct {
     thread: std.Thread,
 
     fn init(self: *Harness) !void {
+        try self.initWithConfig(.{
+            .allocator = testing.allocator,
+            .max_connections = 4,
+            .max_streams = 4,
+            .body_bytes = 1024,
+        });
+    }
+
+    fn initWithConfig(self: *Harness, config: Engine.Config) !void {
         self.io = testing.io;
         self.app = .{};
         const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
         self.server = .{
-            .engine = try Engine.Server.init(self.io, address, self.app.handler(), .{
-                .allocator = testing.allocator,
-                .max_connections = 4,
-                .max_streams = 4,
-                .body_bytes = 1024,
-            }),
+            .engine = try Engine.Server.init(self.io, address, self.app.handler(), config),
         };
         self.thread = try .spawn(.{}, Server.run, .{&self.server});
     }
@@ -180,4 +184,28 @@ test "the readiness engine serves a request over a socket" {
 
     try testing.expect(response_seen);
     try testing.expectEqual(@as(usize, 1), harness.app.seen);
+}
+
+test "an idle deadline closes the connection" {
+    var harness: Harness = undefined;
+    try harness.initWithConfig(.{
+        .allocator = testing.allocator,
+        .max_connections = 4,
+        .max_streams = 4,
+        .body_bytes = 1024,
+        .idle_timeout = .fromMilliseconds(50),
+    });
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var buf: [16]u8 = undefined;
+    var vecs: [1][]u8 = .{&buf};
+    const n = reader.interface.readVec(&vecs) catch |err| switch (err) {
+        error.EndOfStream => return,
+        error.ReadFailed => return err,
+    };
+    try testing.expectEqual(@as(usize, 0), n);
 }

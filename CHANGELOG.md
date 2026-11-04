@@ -68,6 +68,13 @@ All notable changes to http are recorded here. The format follows
   sans-I/O `h2.engine.Connection` core holds the session, slots, arenas, and
   handler; the blocking engine is a transport driver around it, and the h2c
   example uses it with a thread per connection.
+- `h2.engine.poll`, `h2.engine.epoll`, and `h2.engine.kqueue`: the h2
+  readiness engines over the same exchange core. One thread, fixed connection
+  slots, nonblocking sockets, partial writes, optional idle/write/total
+  deadlines, and accept backoff. poll and epoll are Linux; kqueue is macOS. The
+  wait backends and platform edge live in `src/transport`, shared with the h1
+  engines. `just conformance-run-readiness` runs h2spec against the readiness
+  example.
 - `Status`: the status codes as an open enum. Named codes are constants; any
   other three-digit code is still a value. `Status.code()`, `Status.class()`,
   `Status.phrase()`, and `Status.parse()` work on the wire number, and the

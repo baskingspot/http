@@ -30,6 +30,11 @@ pub const Config = struct {
     body_bytes: usize = 64 * 1024,
     arena_retain_bytes: usize = 4 * 1024,
     session: SessionOptions = .{ .role = .server },
+    /// Zero disables the deadline.
+    idle_timeout: Io.Duration = .zero,
+    write_timeout: Io.Duration = .zero,
+    total_timeout: Io.Duration = .zero,
+    accept_backoff: Io.Duration = .fromMilliseconds(50),
 };
 
 const State = enum { free, read, write };
@@ -42,6 +47,9 @@ const Slot = struct {
     out_buffer: []u8,
     out_start: usize = 0,
     out_end: usize = 0,
+    started: Io.Timestamp = .zero,
+    last_active: Io.Timestamp = .zero,
+    write_started: ?Io.Timestamp = null,
 };
 
 pub fn Server(comptime Wait: type) type {
@@ -58,6 +66,7 @@ pub fn Server(comptime Wait: type) type {
         slots: []Slot,
         wait: Wait,
         active: usize,
+        accept_paused_until: ?Io.Timestamp = null,
 
         pub fn init(
             io: Io,
@@ -106,6 +115,7 @@ pub fn Server(comptime Wait: type) type {
                 .slots = slots,
                 .wait = waiter,
                 .active = 0,
+                .accept_paused_until = null,
             };
         }
 
@@ -132,18 +142,34 @@ pub fn Server(comptime Wait: type) type {
 
         pub fn run(self: *Self) !void {
             while (true) {
-                const ready = try self.wait.wait(-1);
+                const now = clock(self.io);
+                try self.expire(now);
+
+                const ready = self.wait.wait(self.pollTimeout(now)) catch |err| switch (err) {
+                    error.SystemResources => {
+                        self.io.sleep(self.config.accept_backoff, .awake) catch |sleep_err| {
+                            switch (sleep_err) {
+                                error.Canceled => return,
+                            }
+                        };
+                        continue;
+                    },
+                    else => return err,
+                };
+                if (ready.len == 0) continue;
+
+                const after = clock(self.io);
                 for (ready) |event| switch (event.owner) {
                     .stop => return,
                     .listener => {
-                        if (event.flags.contains(.readable)) try self.acceptAll();
+                        if (event.flags.contains(.readable)) try self.acceptAll(after);
                     },
-                    .slot => |index| self.handleSlot(index, event.flags),
+                    .slot => |index| self.handleSlot(index, event.flags, after),
                 };
             }
         }
 
-        fn acceptAll(self: *Self) !void {
+        fn acceptAll(self: *Self, now: Io.Timestamp) !void {
             while (true) {
                 const index = self.freeSlot() orelse {
                     const maybe = P.accept(self.listener.fd) catch return;
@@ -152,7 +178,12 @@ pub fn Server(comptime Wait: type) type {
                 };
                 const maybe = P.accept(self.listener.fd) catch |err| switch (err) {
                     error.ConnectionAborted => continue,
-                    error.ListenerFailed, error.SystemResources => return error.AcceptFailed,
+                    error.ListenerFailed => return error.AcceptFailed,
+                    error.SystemResources => {
+                        self.accept_paused_until = now.addDuration(self.config.accept_backoff);
+                        self.wait.remove(.listener);
+                        return;
+                    },
                 };
                 const fd = maybe orelse return;
 
@@ -160,6 +191,9 @@ pub fn Server(comptime Wait: type) type {
                 slot.fd = fd;
                 slot.out_start = 0;
                 slot.out_end = 0;
+                slot.started = now;
+                slot.last_active = now;
+                slot.write_started = null;
                 slot.conn = Connection.init(.{
                     .allocator = self.allocator,
                     .handler = self.handler,
@@ -179,7 +213,7 @@ pub fn Server(comptime Wait: type) type {
             }
         }
 
-        fn handleSlot(self: *Self, index: usize, flags: wait.Flags) void {
+        fn handleSlot(self: *Self, index: usize, flags: wait.Flags, now: Io.Timestamp) void {
             const slot = &self.slots[index];
             if (slot.state == .free) return;
 
@@ -189,15 +223,15 @@ pub fn Server(comptime Wait: type) type {
             }
 
             if (slot.state == .read and flags.contains(.readable)) {
-                self.readSlot(index);
+                self.readSlot(index, now);
                 return;
             }
             if (slot.state == .write and flags.contains(.writable)) {
-                self.writeSlot(index);
+                self.writeSlot(index, now);
             }
         }
 
-        fn readSlot(self: *Self, index: usize) void {
+        fn readSlot(self: *Self, index: usize, now: Io.Timestamp) void {
             const slot = &self.slots[index];
             while (true) {
                 const n = P.read(slot.fd, slot.read_buffer) catch |err| switch (err) {
@@ -209,12 +243,13 @@ pub fn Server(comptime Wait: type) type {
                 };
                 if (n == 0) {
                     if (slot.conn.hasPendingOutput()) {
-                        self.transition(index, .write);
+                        self.transition(index, .write, now);
                     } else {
                         self.closeSlot(index);
                     }
                     return;
                 }
+                slot.last_active = now;
 
                 var offset: usize = 0;
                 while (offset < n) {
@@ -227,29 +262,29 @@ pub fn Server(comptime Wait: type) type {
                     self.closeSlot(index);
                     return;
                 };
-                self.afterRead(index);
+                self.afterRead(index, now);
                 if (slot.state != .read) return;
             }
         }
 
-        fn afterRead(self: *Self, index: usize) void {
+        fn afterRead(self: *Self, index: usize, now: Io.Timestamp) void {
             const slot = &self.slots[index];
             if (slot.conn.isClosed()) {
                 if (slot.conn.hasPendingOutput()) {
-                    self.transition(index, .write);
+                    self.transition(index, .write, now);
                 } else {
                     self.closeSlot(index);
                 }
                 return;
             }
             if (slot.conn.hasPendingOutput()) {
-                self.transition(index, .write);
+                self.transition(index, .write, now);
             } else {
-                self.transition(index, .read);
+                self.transition(index, .read, now);
             }
         }
 
-        fn writeSlot(self: *Self, index: usize) void {
+        fn writeSlot(self: *Self, index: usize, now: Io.Timestamp) void {
             const slot = &self.slots[index];
             while (true) {
                 if (slot.out_start == slot.out_end) {
@@ -266,7 +301,7 @@ pub fn Server(comptime Wait: type) type {
                             if (slot.conn.isClosed()) {
                                 self.closeSlot(index);
                             } else {
-                                self.transition(index, .read);
+                                self.transition(index, .read, now);
                             }
                             return;
                         }
@@ -285,14 +320,20 @@ pub fn Server(comptime Wait: type) type {
                     self.closeSlot(index);
                     return;
                 }
+                slot.last_active = now;
                 slot.out_start += n;
                 if (slot.out_start < slot.out_end) return;
             }
         }
 
-        fn transition(self: *Self, index: usize, state: State) void {
+        fn transition(self: *Self, index: usize, state: State, now: Io.Timestamp) void {
             const slot = &self.slots[index];
             slot.state = state;
+            if (state == .write) {
+                if (slot.write_started == null) slot.write_started = now;
+            } else {
+                slot.write_started = null;
+            }
             if (state == .free) {
                 self.wait.remove(.{ .slot = index });
                 return;
@@ -315,8 +356,63 @@ pub fn Server(comptime Wait: type) type {
             slot.state = .free;
             slot.out_start = 0;
             slot.out_end = 0;
+            slot.started = .zero;
+            slot.last_active = .zero;
+            slot.write_started = null;
             self.wait.remove(.{ .slot = index });
             self.active -= 1;
+        }
+
+        fn expire(self: *Self, now: Io.Timestamp) !void {
+            if (self.accept_paused_until) |until| {
+                if (now.durationTo(until).nanoseconds <= 0) {
+                    self.accept_paused_until = null;
+                    try self.wait.set(.listener, self.listener.fd, .initOne(.read));
+                }
+            }
+
+            for (self.slots, 0..) |*slot, index| {
+                if (slot.state == .free) continue;
+                const deadline = self.slotDeadline(slot) orelse continue;
+                if (now.durationTo(deadline).nanoseconds > 0) continue;
+                self.closeSlot(index);
+            }
+        }
+
+        fn slotDeadline(self: *const Self, slot: *const Slot) ?Io.Timestamp {
+            var deadline: ?Io.Timestamp = null;
+            if (self.config.total_timeout.nanoseconds > 0) {
+                deadline = slot.started.addDuration(self.config.total_timeout);
+            }
+            if (self.config.idle_timeout.nanoseconds > 0) {
+                deadline = earliest(
+                    deadline,
+                    slot.last_active.addDuration(self.config.idle_timeout),
+                );
+            }
+            if (self.config.write_timeout.nanoseconds > 0 and slot.state == .write) {
+                const start = slot.write_started orelse slot.last_active;
+                deadline = earliest(
+                    deadline,
+                    start.addDuration(self.config.write_timeout),
+                );
+            }
+            return deadline;
+        }
+
+        fn pollTimeout(self: *const Self, now: Io.Timestamp) i32 {
+            var deadline: ?Io.Timestamp = self.accept_paused_until;
+            for (self.slots) |*slot| {
+                if (slot.state == .free) continue;
+                if (self.slotDeadline(slot)) |at| {
+                    deadline = earliest(deadline, at);
+                }
+            }
+            const at = deadline orelse return -1;
+            const ns = now.durationTo(at).nanoseconds;
+            if (ns <= 0) return 0;
+            const ms = @divTrunc(ns + 999_999, 1_000_000);
+            return @intCast(@min(ms, std.math.maxInt(i32)));
         }
 
         fn freeSlot(self: *Self) ?usize {
@@ -326,4 +422,13 @@ pub fn Server(comptime Wait: type) type {
             return null;
         }
     };
+}
+
+fn earliest(a: ?Io.Timestamp, b: Io.Timestamp) Io.Timestamp {
+    const at = a orelse return b;
+    return if (at.nanoseconds <= b.nanoseconds) at else b;
+}
+
+fn clock(io: Io) Io.Timestamp {
+    return Io.Clock.awake.now(io);
 }
