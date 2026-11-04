@@ -18,13 +18,21 @@ const testing = std.testing;
 const ows = @import("ows.zig");
 const token_list = @import("token_list.zig");
 
-/// One field line, as the parser found it. `std.http.Header` is the same pair;
-/// the contract above describes how this package treats the value.
-pub const Header = std.http.Header;
+/// One field line, as the parser found it. Both slices are borrowed from the
+/// message buffer; the header owns nothing.
+pub const Header = struct {
+    name: []const u8,
+    value: []const u8,
+};
 
 /// A borrowed view of every field line in a message, in wire order.
 pub const Headers = struct {
     items: []const Header,
+
+    /// The number of field lines in the section.
+    pub fn len(self: Headers) usize {
+        return self.items.len;
+    }
 
     /// The first value named `name`, or null. Use this only for fields the RFC
     /// defines as a singleton (`Host`, `Content-Length`). A list-valued field

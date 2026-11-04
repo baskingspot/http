@@ -21,20 +21,23 @@ ready to depend on.
   `contains(field, token)` tests membership without allocating; `iterator`
   yields trimmed elements. Empty elements are ignored, and the comparison
   folds ASCII case.
-- `Method`: `std.http.Method`, the conventional nine, with `method.token(.GET)`
-  as `"GET"` and `method.parse("GET")` exact and case-sensitive. The parser
-  still returns the token; this is the caller-facing vocabulary, not the
-  registry.
-- `StatusCode`: the status codes as an exhaustive enum, built from
-  `std.http.Status`'s named fields. `status.code(.ok)` is the wire number,
-  `status.parse(200)` is `.ok`, and a code the enum does not name returns
-  null. The parser still returns the `u16` from the wire.
-- `Header` / `Headers`: `Header` is `std.http.Header`; `Headers` is an
+- `Method`: the conventional nine request methods as a local enum.
+  `Method.token(.GET)` is `"GET"`, and `Method.parse("GET")` is exact and
+  case-sensitive. An unlisted token stays a slice and `parse` returns null.
+  `safe`, `idempotent`, `cacheable`, `requestHasBody`, and `responseHasBody`
+  follow RFC 9110 §9.2.
+- `Status`: status codes as an open enum. `.ok`, `.not_found`, and the rest
+  are named; any other three-digit code is still a value, so `class` returns
+  null only outside 100..599. `Status.parse(200)` is `.ok`, `status.code()` is
+  the wire number, and `phrase()` returns null for an unnamed code.
+- `Header` / `Headers`: `Header` is a borrowed name/value pair. `Headers` is an
   ordered, case-insensitive view over a field section. `get` returns the first
   value for singleton fields, `values` yields every line separately
   (`Set-Cookie` needs that), and `containsToken` tests list membership across
   all lines. Lookups trim OWS; the raw spans stay in `Headers.items`.
-- `h1`: sans-I/O HTTP/1.1 head parsing into shared `Headers`.
+- `h1`: sans-I/O HTTP/1.1 head parsing. `RequestHead.method` is the common
+  method as `?Method`, and `method_token` is always the exact wire bytes;
+  `ResponseHead.status` is `Status`. Both heads carry `Headers`.
   `parseRequest` and `parseResponse` return `error.Incomplete` until a whole
   head arrives, and take `last_len` so a client trickling bytes cannot force a
   rescan. Strict where RFC 9112 allows leniency: bare LF, obs-fold, whitespace
@@ -46,8 +49,8 @@ ready to depend on.
   both frame a request.
 
 Ranges, entity tags, dates, media types, and form decoding are next. No server,
-no middleware, and no request or response types: those depend on an I/O
-runtime, and this package stops at the field value.
+no middleware, and no message or connection types: those depend on an I/O
+runtime, and this package stops at the message head.
 
 ## Usage
 

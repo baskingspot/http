@@ -81,11 +81,13 @@ h3/                  QUIC varint, frame header, typed payloads, SETTINGS,
 ```
 
 `h1/`'s field-section scanner is written in this repo. It follows
-picohttpparser's incremental-read contract (consumed bytes, `last_len`) and
-ports its test cases, but not its C. hparse 0.2.0 stays a benchmark reference:
-its validation changes at the 16-byte vector boundary (a short `Bad name` is
-accepted, a long `Bad name with space` is rejected), its cursor over-reads the
-buffer end, and it leaves trailing OWS to callers.
+picohttpparser's incremental-read contract (consumed bytes, `last_len`), but
+not its C. The hand-written tests pin the cases where the RFC allows a choice;
+the pico corpus is not ported yet. hparse 0.2.0 is the reference to benchmark
+against, not a conformance oracle: its validation changes at the 16-byte vector
+boundary (a short `Bad name` is accepted, a long `Bad name with space` is
+rejected), its cursor over-reads the buffer end, and it leaves trailing OWS to
+callers.
 
 `h3/` is sequenced last. It needs QUIC varints and QUIC stream delivery, and
 neither belongs in this package yet. No work there until a QUIC primitive

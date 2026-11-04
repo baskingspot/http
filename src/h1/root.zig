@@ -13,13 +13,14 @@
 //! - A line before the first field that starts with SP/HTAB is rejected.
 //!   RFC 9112 §2.2 permits rejecting or consuming it.
 //!
-//! `last_len` is the number of bytes already searched for the end of the head
-//! (normally the buffer length on the previous call). It lets the completeness
-//! check look only at the new bytes, so a client trickling one octet at a time
-//! cannot force a rescan of the whole buffer. Parsing itself always starts at
-//! the beginning. Invalid syntax before a terminator is reported on the first
-//! call (`last_len == 0`); after that the gate returns `error.Incomplete`
-//! until the terminator arrives.
+//! `last_len` is the number of bytes already searched for the end of the head:
+//! the buffer length on the previous call, or 0 on the first. The caller sets
+//! it only when the previous call returned `error.Incomplete`, and resets it to
+//! 0 for the next message. It lets the completeness check look only at the new
+//! bytes, so a client trickling one octet at a time cannot force a rescan of
+//! the whole buffer. Parsing itself always starts at the beginning. Invalid
+//! syntax before a terminator is reported on the first call (`last_len == 0`);
+//! after that the gate returns `error.Incomplete` until the terminator arrives.
 
 const std = @import("std");
 const testing = std.testing;
@@ -27,13 +28,17 @@ const assert = std.debug.assert;
 const mem = std.mem;
 const fmt = std.fmt;
 const math = std.math;
-/// `std.http.Version`, whose tags are the start-line spelling. A message with
-/// major version 1 and a higher minor version is processed as 1.1
-/// (RFC 9110 §2.5).
-pub const Version = std.http.Version;
 const builtin = @import("builtin");
 
 const Header = @import("../header.zig").Header;
+const Headers = @import("../header.zig").Headers;
+const Method = @import("../method.zig").Method;
+const Status = @import("../status.zig").Status;
+
+/// The HTTP/1.x versions this parser processes. The tags are the start-line
+/// spelling. A message with major version 1 and a higher minor version is
+/// processed as 1.1 (RFC 9110 §2.5).
+pub const Version = enum { @"HTTP/1.0", @"HTTP/1.1" };
 
 pub const Error = error{
     /// The buffer ends before the head does. Read more and retry.
@@ -47,20 +52,24 @@ pub const Error = error{
 };
 
 pub const RequestHead = struct {
-    method: []const u8,
+    /// The common method, or null when the wire token is not one of them.
+    method: ?Method,
+    /// The exact wire token, always. Methods are case-sensitive (RFC 9110
+    /// §9.1), and the registry is open.
+    method_token: []const u8,
     target: []const u8,
     version: Version,
-    headers: []const Header,
+    headers: Headers,
 };
 
 pub const ResponseHead = struct {
     version: Version,
-    /// The three decimal digits as a number. RFC 9110 §15 makes 100..599 the
-    /// valid range; this parser returns what the wire said and leaves the
+    /// The three digits as an open `Status`. RFC 9110 §15 makes 100..599 the
+    /// meaningful range; this parser returns what the wire said and leaves the
     /// range check to the caller.
-    status: u16,
+    status: Status,
     reason: []const u8,
-    headers: []const Header,
+    headers: Headers,
 };
 
 pub const ParsedRequest = struct {
@@ -76,9 +85,10 @@ pub const ParsedResponse = struct {
 
 /// Parse a request head from `buf`.
 ///
-/// `storage` receives the field lines; the returned `head.headers` is the used
-/// prefix. `last_len` is the previously searched length, or 0 on the first
-/// call. `buf` must be shorter than 4 GiB; a real head limit is far smaller.
+/// `storage` receives the field lines; the returned `head.headers.items` is
+/// the used prefix. `last_len` is the previously searched length: 0, or the
+/// buffer length of the call that returned `error.Incomplete`. `buf` must be
+/// shorter than 4 GiB; a real head limit is far smaller.
 pub fn parseRequest(buf: []const u8, last_len: u32, storage: []Header) Error!ParsedRequest {
     assert(buf.len <= math.maxInt(u32));
     if (last_len != 0 and !headComplete(buf, last_len)) return error.Incomplete;
@@ -87,7 +97,7 @@ pub fn parseRequest(buf: []const u8, last_len: u32, storage: []Header) Error!Par
     // RFC 9112 §2.2: a server SHOULD ignore empty lines before the request-line.
     try skipLeadingEmptyLines(&cursor);
 
-    const method = try scanToken(&cursor, ' ');
+    const method_token = try scanToken(&cursor, ' ');
     try cursor.expect(' ');
     const target = try scanTarget(&cursor);
     try cursor.expect(' ');
@@ -97,7 +107,8 @@ pub fn parseRequest(buf: []const u8, last_len: u32, storage: []Header) Error!Par
     const headers = try parseHeaders(&cursor, storage);
     return .{
         .head = .{
-            .method = method,
+            .method = Method.parse(method_token),
+            .method_token = method_token,
             .target = target,
             .version = version,
             .headers = headers,
@@ -259,62 +270,96 @@ fn skipLeadingEmptyLines(cursor: *Cursor) Error!void {
 
 /// `token` from RFC 9110 §5.6.2, which is also `method` (RFC 9112 §3.1) and
 /// `field-name` (RFC 9112 §5). The delimiter is consumed by the caller.
+///
+/// One scalar pass, not `findScalarPos` followed by a validation pass. Tokens
+/// are short in practice, and the call into std's vector search costs more than
+/// the table lookups it replaces. Measured on the bench corpus; a long name is
+/// still faster this way than the two-pass version.
 fn scanToken(cursor: *Cursor, delimiter: u8) Error![]const u8 {
     const start = cursor.pos;
-    const found = mem.findScalarPos(u8, cursor.buf, @intCast(start), delimiter);
-    const end: u32 = if (found) |index| @intCast(index) else @intCast(cursor.buf.len);
-
     var index = start;
-    while (index < end) : (index += 1) {
-        if (!tchar_table[cursor.at(index)]) return error.Invalid;
-    }
-    if (found == null) return error.Incomplete;
-    if (end == start) return error.Invalid;
 
-    cursor.pos = end;
-    return cursor.slice(start, end);
+    while (@as(usize, index) < cursor.buf.len) : (index += 1) {
+        const byte = cursor.at(index);
+        if (byte == delimiter) {
+            if (index == start) return error.Invalid;
+            cursor.pos = index;
+            return cursor.slice(start, index);
+        }
+        if (!tchar_table[byte]) return error.Invalid;
+    }
+    return error.Incomplete;
 }
 
 /// RFC 9112 §3.2: no whitespace is allowed in the request-target. The form
 /// itself (origin, absolute, authority, asterisk) is routing policy and is not
-/// validated here.
+/// validated here. The scan stops at SP and rejects anything outside printable
+/// US-ASCII in the same pass.
 fn scanTarget(cursor: *Cursor) Error![]const u8 {
     const start = cursor.pos;
-    const found = mem.findScalarPos(u8, cursor.buf, @intCast(start), ' ');
-    const end: u32 = if (found) |index| @intCast(index) else @intCast(cursor.buf.len);
+    var index: usize = start;
 
-    if (found == null) return error.Incomplete;
-    if (end == start) return error.Invalid;
-
-    const target = cursor.slice(start, end);
-    if (target.len >= block) {
-        if (!allTargetBytes(target)) return error.Invalid;
-    } else {
-        for (target) |byte| if (!target_table[byte]) return error.Invalid;
+    if (comptime vector_scans) {
+        while (index + block <= cursor.buf.len) : (index += block) {
+            const chunk: Vec = cursor.buf[index..][0..block].*;
+            const bad = (chunk < @as(Vec, @splat(0x21))) |
+                (chunk > @as(Vec, @splat(0x7e)));
+            if (@reduce(.Or, bad)) {
+                const mask: Mask = @bitCast(bad);
+                const at = index + @as(usize, @ctz(mask));
+                if (cursor.buf[at] != ' ' or at == start) return error.Invalid;
+                cursor.pos = @intCast(at);
+                return cursor.slice(start, @intCast(at));
+            }
+        }
     }
 
-    cursor.pos = end;
-    return target;
+    while (index < cursor.buf.len) : (index += 1) {
+        const byte = cursor.buf[index];
+        if (byte == ' ') {
+            if (index == start) return error.Invalid;
+            cursor.pos = @intCast(index);
+            return cursor.slice(start, @intCast(index));
+        }
+        if (!target_table[byte]) return error.Invalid;
+    }
+    return error.Incomplete;
 }
 
-/// One line up to, but not including, its CR. Validation is the field-value or
-/// reason-phrase character set; the caller decides whether to trim OWS.
+/// One line up to, but not including, its CR. A bare LF is not a terminator
+/// and is rejected. Validation is the field-value or reason-phrase character
+/// set; the caller decides whether to trim OWS. The scan stops at CR and
+/// rejects an invalid byte in the same pass.
 fn scanLine(cursor: *Cursor) Error![]const u8 {
     const start = cursor.pos;
-    const found = mem.findScalarPos(u8, cursor.buf, @intCast(start), '\r');
-    const end: u32 = if (found) |index| @intCast(index) else @intCast(cursor.buf.len);
+    var index: usize = start;
 
-    if (found == null) return error.Incomplete;
-
-    const line = cursor.slice(start, end);
-    if (line.len >= block) {
-        if (!allFieldValueBytes(line)) return error.Invalid;
-    } else {
-        for (line) |byte| if (!field_value_table[byte]) return error.Invalid;
+    if (comptime vector_scans) {
+        while (index + block <= cursor.buf.len) : (index += block) {
+            const chunk: Vec = cursor.buf[index..][0..block].*;
+            const ctl = (chunk < @as(Vec, @splat(0x20))) &
+                (chunk != @as(Vec, @splat('\t')));
+            const del = chunk == @as(Vec, @splat(0x7f));
+            const stop = ctl | del;
+            if (@reduce(.Or, stop)) {
+                const mask: Mask = @bitCast(stop);
+                const at = index + @as(usize, @ctz(mask));
+                if (cursor.buf[at] != '\r') return error.Invalid;
+                cursor.pos = @intCast(at);
+                return cursor.slice(start, @intCast(at));
+            }
+        }
     }
 
-    cursor.pos = end;
-    return line;
+    while (index < cursor.buf.len) : (index += 1) {
+        const byte = cursor.buf[index];
+        if (byte == '\r') {
+            cursor.pos = @intCast(index);
+            return cursor.slice(start, @intCast(index));
+        }
+        if (!field_value_table[byte]) return error.Invalid;
+    }
+    return error.Incomplete;
 }
 
 /// `HTTP-version` from RFC 9112 §2.3: `%s"HTTP" "/" DIGIT "." DIGIT`, exactly
@@ -347,11 +392,12 @@ fn parseVersion(cursor: *Cursor) Error!Version {
 }
 
 /// RFC 9112 §4: `status-code = 3DIGIT`.
-fn parseStatus(cursor: *Cursor) Error!u16 {
+fn parseStatus(cursor: *Cursor) Error!Status {
     const hundreds = try cursor.expectDigit();
     const tens = try cursor.expectDigit();
     const ones = try cursor.expectDigit();
-    return @as(u16, hundreds) * 100 + @as(u16, tens) * 10 + ones;
+    const value = @as(u16, hundreds) * 100 + @as(u16, tens) * 10 + ones;
+    return @as(Status, @enumFromInt(@as(u10, @intCast(value))));
 }
 
 /// RFC 9112 §4: `reason-phrase = 1*( HTAB / SP / VCHAR / obs-text )`, made
@@ -363,7 +409,7 @@ fn scanReason(cursor: *Cursor) Error![]const u8 {
 }
 
 /// `*( field-line CRLF ) CRLF` from RFC 9112 §2.1.
-fn parseHeaders(cursor: *Cursor, storage: []Header) Error![]const Header {
+fn parseHeaders(cursor: *Cursor, storage: []Header) Error!Headers {
     var count: u32 = 0;
     while (true) {
         if (cursor.atEnd()) return error.Incomplete;
@@ -371,7 +417,7 @@ fn parseHeaders(cursor: *Cursor, storage: []Header) Error![]const Header {
 
         if (first == '\r') {
             try cursor.expectCrlf();
-            return storage[0..@intCast(count)];
+            return .{ .items = storage[0..@intCast(count)] };
         }
         // A leading bare LF is not an empty line, and a line beginning with
         // SP/HTAB is obs-fold or whitespace before the first field. RFC 9112
@@ -427,42 +473,6 @@ fn isTargetByte(byte: u8) bool {
     return byte >= 0x21 and byte <= 0x7e;
 }
 
-/// RFC 9112 §3.2: printable US-ASCII. The scalar tail uses `target_table`.
-fn allTargetBytes(bytes: []const u8) bool {
-    var index: usize = 0;
-    if (comptime vector_scans) {
-        while (index + block <= bytes.len) : (index += block) {
-            const chunk: Vec = bytes[index..][0..block].*;
-            const bad = (chunk < @as(Vec, @splat(0x21))) |
-                (chunk > @as(Vec, @splat(0x7e)));
-            if (@reduce(.Or, bad)) return false;
-        }
-    }
-    while (index < bytes.len) : (index += 1) {
-        if (!target_table[bytes[index]]) return false;
-    }
-    return true;
-}
-
-/// RFC 9110 §5.5: no NUL, other CTL, or DEL. The scalar tail uses
-/// `field_value_table`.
-fn allFieldValueBytes(bytes: []const u8) bool {
-    var index: usize = 0;
-    if (comptime vector_scans) {
-        while (index + block <= bytes.len) : (index += block) {
-            const chunk: Vec = bytes[index..][0..block].*;
-            const ctl = (chunk < @as(Vec, @splat(0x20))) &
-                (chunk != @as(Vec, @splat('\t')));
-            const del = chunk == @as(Vec, @splat(0x7f));
-            if (@reduce(.Or, ctl | del)) return false;
-        }
-    }
-    while (index < bytes.len) : (index += 1) {
-        if (!field_value_table[bytes[index]]) return false;
-    }
-    return true;
-}
-
 fn makeTable(comptime predicate: fn (u8) bool) [256]bool {
     var table: [256]bool = undefined;
     for (0..256) |index| table[index] = predicate(@intCast(index));
@@ -491,16 +501,17 @@ test "request: a typical head (RFC 9112 §2.1, §3, §5)" {
     var storage: [8]Header = undefined;
     const parsed = try parseRequest(typical, 0, &storage);
 
-    try testing.expectEqualStrings("GET", parsed.head.method);
+    try testing.expectEqualStrings("GET", parsed.head.method_token);
+    try testing.expect(parsed.head.method == .GET);
     try testing.expectEqualStrings("/metrics?x=1", parsed.head.target);
     try testing.expectEqual(.@"HTTP/1.1", parsed.head.version);
     try testing.expectEqual(typical.len, parsed.consumed);
-    try testing.expectEqual(4, parsed.head.headers.len);
+    try testing.expectEqual(4, parsed.head.headers.len());
 
-    try testing.expectEqualStrings("Host", parsed.head.headers[0].name);
-    try testing.expectEqualStrings("example.com", parsed.head.headers[0].value);
-    try testing.expectEqualStrings("Accept-Encoding", parsed.head.headers[3].name);
-    try testing.expectEqualStrings("gzip, br", parsed.head.headers[3].value);
+    try testing.expectEqualStrings("Host", parsed.head.headers.items[0].name);
+    try testing.expectEqualStrings("example.com", parsed.head.headers.items[0].value);
+    try testing.expectEqualStrings("Accept-Encoding", parsed.head.headers.items[3].name);
+    try testing.expectEqualStrings("gzip, br", parsed.head.headers.items[3].value);
 }
 
 test "request: method is a token (RFC 9112 §3.1, RFC 9110 §5.6.2)" {
@@ -510,7 +521,7 @@ test "request: method is a token (RFC 9112 §3.1, RFC 9110 §5.6.2)" {
         defer testing.allocator.free(buf);
         var storage: [1]Header = undefined;
         const parsed = try parseRequest(buf, 0, &storage);
-        try testing.expectEqualStrings(method, parsed.head.method);
+        try testing.expectEqualStrings(method, parsed.head.method_token);
     }
 
     for ([_][]const u8{ "GE(T", "GE T", "" }) |method| {
@@ -571,7 +582,7 @@ test "request: leading empty lines are skipped (RFC 9112 §2.2)" {
     const buf = "\r\n\r\nGET / HTTP/1.1\r\n\r\n";
     const parsed = try parseRequest(buf, 0, &storage);
     try testing.expectEqual(buf.len, parsed.consumed);
-    try testing.expectEqualStrings("GET", parsed.head.method);
+    try testing.expectEqualStrings("GET", parsed.head.method_token);
 }
 
 test "field-line: name colon OWS value OWS (RFC 9112 §5, §5.1)" {
@@ -584,13 +595,13 @@ test "field-line: name colon OWS value OWS (RFC 9112 §5, §5.1)" {
         "\r\n";
     const parsed = try parseRequest(buf, 0, &storage);
 
-    try testing.expectEqual(3, parsed.head.headers.len);
-    try testing.expectEqualStrings("Name", parsed.head.headers[0].name);
-    try testing.expectEqualStrings("value", parsed.head.headers[0].value);
-    try testing.expectEqualStrings("Empty", parsed.head.headers[1].name);
-    try testing.expectEqualStrings("", parsed.head.headers[1].value);
-    try testing.expectEqualStrings("Padded", parsed.head.headers[2].name);
-    try testing.expectEqualStrings("spaced", parsed.head.headers[2].value);
+    try testing.expectEqual(3, parsed.head.headers.len());
+    try testing.expectEqualStrings("Name", parsed.head.headers.items[0].name);
+    try testing.expectEqualStrings("value", parsed.head.headers.items[0].value);
+    try testing.expectEqualStrings("Empty", parsed.head.headers.items[1].name);
+    try testing.expectEqualStrings("", parsed.head.headers.items[1].value);
+    try testing.expectEqualStrings("Padded", parsed.head.headers.items[2].name);
+    try testing.expectEqualStrings("spaced", parsed.head.headers.items[2].value);
 }
 
 test "field-line: whitespace before the colon is rejected (RFC 9112 §5.1)" {
@@ -632,6 +643,23 @@ test "field-line: bare LF is rejected; bare CR is invalid (RFC 9112 §2.2)" {
     );
 }
 
+test "field value and reason: a bare LF is rejected without waiting for CR" {
+    var storage: [1]Header = undefined;
+    try testing.expectError(
+        error.Invalid,
+        parseRequest("GET / HTTP/1.1\r\nX: a\n\r\n", 0, &storage),
+    );
+    try testing.expectError(
+        error.Invalid,
+        parseResponse("HTTP/1.1 200 OK\n\r\n", 0, &storage),
+    );
+    // No CR anywhere: still invalid, not `error.Incomplete`.
+    try testing.expectError(
+        error.Invalid,
+        parseResponse("HTTP/1.1 200 OK\n", 0, &storage),
+    );
+}
+
 test "field value: CTLs and NUL are invalid (RFC 9110 §5.5)" {
     var storage: [1]Header = undefined;
     for ([_][]const u8{ "a\x00b", "a\x01b", "a\x0bb", "a\x7fb" }) |value| {
@@ -652,8 +680,8 @@ test "field value: obs-text and HTAB are allowed (RFC 9110 §5.5)" {
         0,
         &storage,
     );
-    try testing.expectEqualStrings("caf\xc3\xa9", parsed.head.headers[0].value);
-    try testing.expectEqualStrings("a\tb", parsed.head.headers[1].value);
+    try testing.expectEqualStrings("caf\xc3\xa9", parsed.head.headers.items[0].value);
+    try testing.expectEqualStrings("a\tb", parsed.head.headers.items[1].value);
 }
 
 test "fields: order and duplicates are preserved" {
@@ -663,9 +691,9 @@ test "fields: order and duplicates are preserved" {
         0,
         &storage,
     );
-    try testing.expectEqual(3, parsed.head.headers.len);
-    try testing.expectEqualStrings("Set-Cookie", parsed.head.headers[0].name);
-    try testing.expectEqualStrings("set-cookie", parsed.head.headers[2].name);
+    try testing.expectEqual(3, parsed.head.headers.len());
+    try testing.expectEqualStrings("Set-Cookie", parsed.head.headers.items[0].name);
+    try testing.expectEqualStrings("set-cookie", parsed.head.headers.items[2].name);
 }
 
 test "fields: storage exhaustion is distinct from invalid syntax" {
@@ -699,17 +727,18 @@ test "response: a typical head (RFC 9112 §4, §5)" {
     const parsed = try parseResponse(typical_response, 0, &storage);
 
     try testing.expectEqual(.@"HTTP/1.1", parsed.head.version);
-    try testing.expectEqual(200, parsed.head.status);
+    try testing.expectEqual(Status.ok, parsed.head.status);
+    try testing.expect(parsed.head.status == .ok);
     try testing.expectEqualStrings("OK", parsed.head.reason);
-    try testing.expectEqual(2, parsed.head.headers.len);
-    try testing.expectEqualStrings("Content-Length", parsed.head.headers[1].name);
-    try testing.expectEqualStrings("0", parsed.head.headers[1].value);
+    try testing.expectEqual(2, parsed.head.headers.len());
+    try testing.expectEqualStrings("Content-Length", parsed.head.headers.items[1].name);
+    try testing.expectEqualStrings("0", parsed.head.headers.items[1].value);
 }
 
 test "status-line: the second SP is required, even with no reason (RFC 9112 §4)" {
     var storage: [1]Header = undefined;
     const no_reason = try parseResponse("HTTP/1.1 204 \r\n\r\n", 0, &storage);
-    try testing.expectEqual(204, no_reason.head.status);
+    try testing.expectEqual(Status.no_content, no_reason.head.status);
     try testing.expectEqualStrings("", no_reason.head.reason);
 
     try testing.expectError(error.Invalid, parseResponse("HTTP/1.1 204\r\n\r\n", 0, &storage));
@@ -721,11 +750,11 @@ test "status code: three digits are returned; the range is the caller's (RFC 911
     var storage: [1]Header = undefined;
     try testing.expectEqual(
         999,
-        (try parseResponse("HTTP/1.1 999 X\r\n\r\n", 0, &storage)).head.status,
+        (try parseResponse("HTTP/1.1 999 X\r\n\r\n", 0, &storage)).head.status.code(),
     );
     try testing.expectEqual(
         0,
-        (try parseResponse("HTTP/1.1 000 X\r\n\r\n", 0, &storage)).head.status,
+        (try parseResponse("HTTP/1.1 000 X\r\n\r\n", 0, &storage)).head.status.code(),
     );
 }
 
@@ -768,27 +797,54 @@ test "head terminator: every placement, vector and scalar (RFC 9112 §2.1)" {
     try testing.expect(findHeadEnd(&buf, 0) == null);
 }
 
-test "value validation: vector and scalar agree (RFC 9110 §5.5, RFC 9112 §3.2)" {
+test "target scanner: every byte at every position (RFC 9112 §3.2)" {
     var buf: [block + 3]u8 = undefined;
     for (0..256) |value| {
         for (0..buf.len) |at| {
             @memset(&buf, 'a');
             buf[at] = @intCast(value);
 
-            try testing.expectEqual(scalarTarget(&buf), allTargetBytes(&buf));
-            try testing.expectEqual(scalarFieldValue(&buf), allFieldValueBytes(&buf));
+            var cursor: Cursor = .{ .buf = &buf };
+            const byte: u8 = @intCast(value);
+
+            if (byte == ' ') {
+                if (at == 0) {
+                    try testing.expectError(error.Invalid, scanTarget(&cursor));
+                } else {
+                    const target = try scanTarget(&cursor);
+                    try testing.expectEqual(at, target.len);
+                    try testing.expectEqual(at, @as(usize, cursor.pos));
+                }
+            } else if (!target_table[byte]) {
+                try testing.expectError(error.Invalid, scanTarget(&cursor));
+            } else {
+                try testing.expectError(error.Incomplete, scanTarget(&cursor));
+            }
         }
     }
 }
 
-fn scalarTarget(bytes: []const u8) bool {
-    for (bytes) |byte| if (!target_table[byte]) return false;
-    return true;
-}
+test "line scanner: every byte at every position (RFC 9110 §5.5)" {
+    var buf: [block + 3]u8 = undefined;
+    for (0..256) |value| {
+        for (0..buf.len) |at| {
+            @memset(&buf, 'a');
+            buf[at] = @intCast(value);
 
-fn scalarFieldValue(bytes: []const u8) bool {
-    for (bytes) |byte| if (!field_value_table[byte]) return false;
-    return true;
+            var cursor: Cursor = .{ .buf = &buf };
+            const byte: u8 = @intCast(value);
+
+            if (byte == '\r') {
+                const line = try scanLine(&cursor);
+                try testing.expectEqual(at, line.len);
+                try testing.expectEqual(at, @as(usize, cursor.pos));
+            } else if (!field_value_table[byte]) {
+                try testing.expectError(error.Invalid, scanLine(&cursor));
+            } else {
+                try testing.expectError(error.Incomplete, scanLine(&cursor));
+            }
+        }
+    }
 }
 
 test "fuzz head terminator against std" {
@@ -830,9 +886,9 @@ test "fuzz request head" {
             };
 
             try testing.expect(parsed.consumed <= input.len);
-            try testing.expect(parsed.head.method.len != 0);
+            try testing.expect(parsed.head.method_token.len != 0);
             try testing.expect(parsed.head.target.len != 0);
-            for (parsed.head.headers) |header| {
+            for (parsed.head.headers.items) |header| {
                 try testing.expect(within(input, header.name));
                 try testing.expect(within(input, header.value));
             }
@@ -863,8 +919,8 @@ test "fuzz response head" {
             };
 
             try testing.expect(parsed.consumed <= input.len);
-            try testing.expect(parsed.head.status <= 999);
-            for (parsed.head.headers) |header| {
+            try testing.expect(parsed.head.status.code() <= 999);
+            for (parsed.head.headers.items) |header| {
                 try testing.expect(within(input, header.name));
                 try testing.expect(within(input, header.value));
             }

@@ -20,11 +20,30 @@ pub fn build(b: *std.Build) void {
 
     if (b.pkg_hash.len != 0) return;
 
+    // The bench suite runs ReleaseFast, but an imported module keeps its own
+    // optimize mode. Build bench-specific copies so the suite does not call
+    // Debug parser code. `testingx.addBench` builds its own suite module at
+    // ReleaseFast; these are the imports it reaches.
+    const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
+    const bench_stdx = b.dependency("stdx", .{ .target = target, .optimize = bench_optimize });
+    const bench_mod = b.addModule("http-bench", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = bench_optimize,
+        .imports = &.{.{ .name = "stdx", .module = bench_stdx.module("stdx") }},
+    });
+
     // testingx provides the test runner and the bench engine. It is lazy
     // because only the root build uses it; a consumer never fetches it. On the
     // first configure pass it is not fetched yet, `lazyDependency` returns
     // null, and the build runner fetches it and reruns this script.
     const testingx_dep = b.lazyDependency("testingx", .{ .target = target });
+    // The reference parser for the benchmark comparison. Dev-only and lazy:
+    // it never enters a consumer's fetch path.
+    const hparse_dep = b.lazyDependency(
+        "hparse",
+        .{ .target = target, .optimize = bench_optimize },
+    );
     const test_runner: ?std.Build.Step.Compile.TestRunner = if (testingx_dep) |dep|
         .{ .path = dep.path("src/runner.zig"), .mode = .simple }
     else
@@ -51,14 +70,21 @@ pub fn build(b: *std.Build) void {
 
     if (b.lazyImport(@This(), "testingx")) |testingx| {
         const dep = testingx_dep orelse unreachable;
-        const run_bench = testingx.addBench(b, .{
-            .module = dep.module("testingx"),
-            .root_source_file = b.path("bench/bench.zig"),
-            .imports = &.{.{ .name = "http", .module = mod }},
-            .target = target,
-        });
-        if (b.args) |args| run_bench.addArgs(args);
+        // hparse is fetched by the same lazy pass. If it is still null, the
+        // build runner fetches it and reruns this script, then adds the step.
+        if (hparse_dep) |hparse| {
+            const run_bench = testingx.addBench(b, .{
+                .module = dep.module("testingx"),
+                .root_source_file = b.path("bench/bench.zig"),
+                .imports = &.{
+                    .{ .name = "http", .module = bench_mod },
+                    .{ .name = "hparse", .module = hparse.module("hparse") },
+                },
+                .target = target,
+            });
+            if (b.args) |args| run_bench.addArgs(args);
 
-        b.step("bench", "Run benchmarks").dependOn(&run_bench.step);
+            b.step("bench", "Run benchmarks").dependOn(&run_bench.step);
+        }
     }
 }

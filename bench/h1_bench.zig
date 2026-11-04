@@ -45,7 +45,7 @@ pub fn benchmarkRequestTypical(b: *testingx.B) !void {
     var sink: usize = 0;
     while (try b.loop()) {
         const parsed = try h1.parseRequest(buf, 0, &storage);
-        sink +%= parsed.head.target.len + parsed.head.headers.len;
+        sink +%= parsed.head.target.len + parsed.head.headers.len();
     }
     b.keepAlive(sink);
     b.keepAlive(&storage);
@@ -57,7 +57,7 @@ pub fn benchmarkRequestWide(b: *testingx.B) !void {
     var sink: usize = 0;
     while (try b.loop()) {
         const parsed = try h1.parseRequest(buf, 0, &storage);
-        sink +%= parsed.head.target.len + parsed.head.headers.len;
+        sink +%= parsed.head.target.len + parsed.head.headers.len();
     }
     b.keepAlive(sink);
     b.keepAlive(&storage);
@@ -69,7 +69,7 @@ pub fn benchmarkResponse(b: *testingx.B) !void {
     var sink: usize = 0;
     while (try b.loop()) {
         const parsed = try h1.parseResponse(buf, 0, &storage);
-        sink +%= parsed.head.reason.len + parsed.head.headers.len;
+        sink +%= parsed.head.reason.len + parsed.head.headers.len();
     }
     b.keepAlive(sink);
     b.keepAlive(&storage);
@@ -87,7 +87,7 @@ pub fn benchmarkRequestLongValue(b: *testingx.B) !void {
     var sink: usize = 0;
     while (try b.loop()) {
         const parsed = try h1.parseRequest(buf, 0, &storage);
-        sink +%= parsed.head.headers[1].value.len;
+        sink +%= parsed.head.headers.items[1].value.len;
     }
     b.keepAlive(sink);
     b.keepAlive(&storage);

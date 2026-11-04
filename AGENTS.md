@@ -15,9 +15,9 @@ Zig 0.16 only. The flake is the tool contract, from `baskingspot/nix`: `nix deve
 - Pure functions over bytes. No `std.Io`, no allocator, no server types, and
   no dependency on `compress`. A parser takes a slice and returns borrowed
   slices or fills caller-owned storage; a list parser is an iterator.
-- No server, no middleware, no request or response types, and no header map.
-  Those depend on the host's I/O runtime; this package stops at the field
-  value.
+- No server, no middleware, no message or connection types, and no header map.
+  Those depend on the host's I/O runtime; this package stops at the message
+  head.
 - stdx is first-party, not third-party: when it already solves the problem
   (`fmt.atoi` for decimal parsing, `buffer`, `time`), use it instead of
   reimplementing the primitive here. The ban above is on `compress`, because a
@@ -27,7 +27,11 @@ Zig 0.16 only. The flake is the tool contract, from `baskingspot/nix`: `nix deve
   to brotli, and so on. The set is an open IANA registry (RFC 9110 §8.4.1,
   IETF Review), so an enum here is a release behind, and a non-exhaustive enum
   cannot carry an unknown string token.
-- One module per field family. The root exports namespaces:
+- `Method` and `Status` are the exception to the token rule: they are caller
+  vocabulary, and the wire value stays authoritative. `RequestHead.method_token`
+  always holds the exact bytes, and `Status` is non-exhaustive so an unnamed
+  three-digit code is still a value. Never let the enum replace the wire form.
+- One module per field family or protocol head. The root exports namespaces:
   `pub const encoding = @import("encoding.zig");`.
 - Tests cite the RFC section they pin. Every parser gets hostile-input cases;
   a parser with a loop gets a fuzz target.

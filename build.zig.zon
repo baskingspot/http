@@ -39,6 +39,13 @@
             .hash = "testingx-0.2.0-ib95-5lNAwA8WZQH6Q6eDm2hgfC3ixFJuhkOrR8gcZAm",
             .lazy = true,
         },
+        // The reference parser for the benchmark rows. Lazy and dev-only:
+        // a consumer never fetches it, and the package itself does not use it.
+        .hparse = .{
+            .url = "https://github.com/nikneym/hparse/archive/4fb3d836e804eab0469bb128f521ad00b1085731.tar.gz",
+            .hash = "hparse-0.2.0-IukW0s67AADCDZ7ROogFU5EJAVLyI8aiR0LPNvZd88OK",
+            .lazy = true,
+        },
         .stdx = .{
             .url = "git+https://github.com/baskingspot/stdx#27b6247e5c9d1504bf816754a01e4cbcac0c966d",
             .hash = "stdx-0.0.0-CcWegh26CwCsynntg4eHJGQHFxArmLJnuJYbS0Tt0Oj1",
