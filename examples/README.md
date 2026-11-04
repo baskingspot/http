@@ -85,3 +85,16 @@ Builds `tools/http1-interop`, starts its Go `net/http` server on
 127.0.0.1:8091, and runs `examples/http1_client.zig` against the
 Content-Length, chunked, and request-body echo routes. The client uses
 `h1.client.blocking.fetch` with caller-owned buffers.
+
+## HTTP/1.1 over TLS
+
+```sh
+just example-h1-tls          # server on 127.0.0.1:8443
+just example-h1-tls-client   # in another terminal
+```
+
+The server and client use the blocking `tls_std` integration from
+`baskingspot/tls` and ALPN `http/1.1`. The HTTP code sees only plaintext
+`Io.Reader` and `Io.Writer` interfaces; `just interop-tls` runs the pair in CI.
+The example certificate and scalar are the public test fixture from
+`baskingspot/tls`.

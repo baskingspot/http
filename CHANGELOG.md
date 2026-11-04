@@ -28,6 +28,14 @@ All notable changes to http are recorded here. The format follows
   `Exchange.arena` is the engine-owned allocator; it is reset to
   `Config.arena_retain_bytes` after completion.
 
+- `h1.engine.blocking.serveIo` and `h1.client.blocking.fetchIo`: plaintext
+  reader/writer seams for the blocking engines. The TLS examples use them
+  after the `tls_std` handshake, so the HTTP layers stay free of a TLS
+  dependency.
+
+- `examples/http1_tls.zig` and `examples/http1_tls_client.zig`: HTTP/1.1 over
+  TLS 1.3 through `baskingspot/tls`. `just interop-tls` runs the pair.
+
 - `h1.client.blocking`: the first client adapter. `fetch` writes a request,
   drives `ClientConn`, and copies the body into caller-owned storage. It has
   no allocator and no connection reuse. `just interop` checks it against a Go

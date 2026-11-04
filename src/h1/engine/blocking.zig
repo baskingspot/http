@@ -69,11 +69,21 @@ pub fn serve(
     // `readVec` writes straight into the ServerConn request buffer. A nonzero
     // reader buffer would accept bytes outside that buffer.
     var stream_reader = stream.reader(io, &.{});
-    const reader = &stream_reader.interface;
     var write_buffer: [1024]u8 = undefined;
     var stream_writer = stream.writer(io, &write_buffer);
-    const writer = &stream_writer.interface;
+    return serveIo(io, &stream_reader.interface, &stream_writer.interface, handler, config);
+}
 
+/// Serve one connection over a caller-owned plaintext reader and writer.
+/// TLS adapters call this after the handshake; the stream adapters call it
+/// from `serve`.
+pub fn serveIo(
+    io: Io,
+    reader: *Io.Reader,
+    writer: *Io.Writer,
+    handler: Handler,
+    config: Config,
+) !void {
     var arena: ArenaAllocator = .init(config.allocator);
     defer arena.deinit();
 

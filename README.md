@@ -203,7 +203,9 @@ runner, and `just example` runs the HTTP/1.1 server example.
 http://127.0.0.1:8081/`, or with the devshell's `nghttp -v
 http://127.0.0.1:8081/` to see the frames. `just example-h2-tls` runs the same
 engine over TLS 1.3 on `https://127.0.0.1:8443/`, using the blocking `tls_std`
-integration from `baskingspot/tls` and ALPN `h2`. `just conformance-run` and
+integration from `baskingspot/tls` and ALPN `h2`. `just example-h1-tls` serves
+HTTP/1.1 over the same TLS layer, `just example-h1-tls-client` fetches from it,
+and `just interop-tls` runs both. `just conformance-run` and
 `just conformance-run-tls` start their own example, run h2spec, and stop it
 (pass `-S` for strict); `just conformance` targets an example you already
 started, and `just load` runs h2load.

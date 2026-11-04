@@ -182,6 +182,8 @@ check-example:
     zig build example-h2-bin
     zig build example-h2-readiness-bin
     zig build example-h2-tls-bin
+    zig build example-h1-tls-bin
+    zig build example-h1-tls-client-bin
     zig build interop-client-bin
 
 [doc("Run the HTTP/1 client against a Go net/http server")]
@@ -202,6 +204,32 @@ interop:
     done
     zig build interop-client
 
+[doc("Run the HTTP/1.1 TLS example server on 127.0.0.1:8443")]
+[group("example")]
+example-h1-tls:
+    zig build example-h1-tls
+
+[doc("Run the HTTP/1.1 TLS example client against 127.0.0.1:8443")]
+[group("example")]
+example-h1-tls-client:
+    zig build example-h1-tls-client
+
+[doc("Run the HTTP/1.1 TLS client against the TLS example server")]
+[group("test")]
+interop-tls:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    zig build example-h1-tls >/tmp/http1-tls.log 2>&1 &
+    server_pid=$!
+    trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+    for _ in {1..50}; do
+        if curl -kfsS https://127.0.0.1:8443/ >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.2
+    done
+    zig build example-h1-tls-client
+
 [doc("Build and start the readiness example, run h2spec strict, and stop it")]
 [group("test")]
 conformance-ci:
@@ -210,4 +238,4 @@ conformance-ci:
 
 [doc("Everything CI runs")]
 [group("ci")]
-ci: test lint interop check-example conformance-ci
+ci: test lint interop interop-tls check-example conformance-ci

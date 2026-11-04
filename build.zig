@@ -383,6 +383,73 @@ pub fn build(b: *std.Build) void {
         h2_tls_example_run.dependOn(&run_h2_tls.step);
     }
 
+    // The HTTP/1 TLS examples use the blocking tls_std integration from
+    // baskingspot/tls. Both are Linux and macOS only.
+    const h1_tls_example_bin = b.step(
+        "example-h1-tls-bin",
+        "Build the HTTP/1.1 TLS example server",
+    );
+    const h1_tls_example_run = b.step(
+        "example-h1-tls",
+        "Run the HTTP/1.1 TLS example server",
+    );
+    const h1_tls_client_bin = b.step(
+        "example-h1-tls-client-bin",
+        "Build the HTTP/1.1 TLS example client",
+    );
+    const h1_tls_client_run = b.step(
+        "example-h1-tls-client",
+        "Run the HTTP/1.1 TLS example client",
+    );
+    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+        const tls_dep = b.dependency("tls", .{
+            .target = target,
+            .optimize = optimize,
+        });
+        const h1_tls_mod = b.createModule(.{
+            .root_source_file = b.path("examples/http1_tls.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "tls", .module = tls_dep.module("tls") },
+                .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
+            },
+        });
+        h1_tls_mod.link_libc = true;
+        h1_tls_mod.linkSystemLibrary("crypto", .{});
+        const h1_tls = b.addExecutable(.{
+            .name = "http1-tls",
+            .root_module = h1_tls_mod,
+        });
+        h1_tls_example_bin.dependOn(&h1_tls.step);
+
+        const run_h1_tls = b.addRunArtifact(h1_tls);
+        if (b.args) |args| run_h1_tls.addArgs(args);
+        h1_tls_example_run.dependOn(&run_h1_tls.step);
+
+        const h1_tls_client_mod = b.createModule(.{
+            .root_source_file = b.path("examples/http1_tls_client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
+            },
+        });
+        h1_tls_client_mod.link_libc = true;
+        h1_tls_client_mod.linkSystemLibrary("crypto", .{});
+        const h1_tls_client = b.addExecutable(.{
+            .name = "http1-tls-client",
+            .root_module = h1_tls_client_mod,
+        });
+        h1_tls_client_bin.dependOn(&h1_tls_client.step);
+
+        const run_h1_tls_client = b.addRunArtifact(h1_tls_client);
+        if (b.args) |args| run_h1_tls_client.addArgs(args);
+        h1_tls_client_run.dependOn(&run_h1_tls_client.step);
+    }
+
     // The poll example is Linux-only for now. The steps exist everywhere so
     // `check-example` is portable; only Linux gets a target to build.
     const poll_example_bin = b.step("example-poll-bin", "Build the HTTP/1.1 poll example server");

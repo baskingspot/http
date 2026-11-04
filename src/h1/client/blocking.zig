@@ -51,7 +51,18 @@ pub fn fetch(
     config: Config,
 ) !Response {
     var stream_writer = stream.writer(io, config.write_buffer);
-    const writer = &stream_writer.interface;
+    var stream_reader = stream.reader(io, &.{});
+    return fetchIo(&stream_reader.interface, &stream_writer.interface, request, config);
+}
+
+/// Write one request and read one response over caller-owned plaintext
+/// reader and writer interfaces. TLS adapters call this after the handshake.
+pub fn fetchIo(
+    reader: *Io.Reader,
+    writer: *Io.Writer,
+    request: Request,
+    config: Config,
+) !Response {
     var w: h1.Writer = .init(writer);
 
     try w.requestLine(request.method, request.target, .@"HTTP/1.1");
@@ -69,8 +80,6 @@ pub fn fetch(
     if (request.body.len != 0) try w.body(request.body);
     try writer.flush();
 
-    var stream_reader = stream.reader(io, &.{});
-    const reader = &stream_reader.interface;
     var conn: h1.ClientConn = .init(.{
         .recv_buffer = config.recv_buffer,
         .headers = config.headers,
