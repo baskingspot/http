@@ -28,6 +28,11 @@ All notable changes to http are recorded here. The format follows
   reject controls and edge whitespace, and the connection-specific fields are
   rejected. The regular fields come back as `Headers`; cookie lines are not
   combined.
+- `h2.settings`, `h2.flow`, `h2.stream`, and `h2.header_block`: the h2 state
+  pieces. `settings.apply` validates a peer's SETTINGS with the RFC 9113
+  defaults; `flow.Window` accounts DATA and WINDOW_UPDATE with signed windows;
+  `stream.transition` implements the §5.1 states and `stream.Ids` allocates by
+  role parity; `header_block.Assembler` joins CONTINUATION fragments.
 - `Status`: the status codes as an open enum. Named codes are constants; any
   other three-digit code is still a value. `Status.code()`, `Status.class()`,
   `Status.phrase()`, and `Status.parse()` work on the wire number, and the

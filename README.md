@@ -112,6 +112,12 @@ ready to depend on.
   regular fields come back as `Headers`, and CONNECT and extended CONNECT are
   handled. Malformed sections are a stream error PROTOCOL_ERROR. Cookie lines
   are not combined; the caller owns that storage.
+- `h2.settings`, `h2.flow`, `h2.stream`, and `h2.header_block`: the state
+  pieces the h2 session composes. Settings carry the RFC 9113 defaults and
+  validate a peer's values; flow-control windows are signed for a shrunk
+  initial window; stream transitions follow §5.1 and allocate identifiers by
+  role parity; header-block assembly joins CONTINUATION fragments into a
+  caller-owned buffer.
 - `content_length`: `Content-Length` parsing and combination. Repeated values
   must agree, a comma list of identical values is accepted, and non-digits,
   conflicts, and overflow are errors. `null` means the field was absent.

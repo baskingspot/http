@@ -64,6 +64,7 @@ fn serveConnection(io: Io, stream: Io.net.Stream) !void {
 
     var payload_buf: [max_frame]u8 = undefined;
     var block_buf: [32 * 1024]u8 = undefined;
+    var assembler = http.h2.header_block.Assembler.init(&block_buf);
     var decode_bytes: [16 * 1024]u8 = undefined;
     var response_block: [4096]u8 = undefined;
     var headers: [max_headers]http.Header = undefined;
@@ -112,11 +113,12 @@ fn serveConnection(io: Io, stream: Io.net.Stream) !void {
 
             .headers => |headers_frame| {
                 const stream_id = header.stream_id;
-                var block_len: usize = 0;
-                try appendFragment(&block_buf, &block_len, headers_frame.block);
-
-                var end_headers = header.flags & frame.flags.end_headers != 0;
-                while (!end_headers) {
+                var request_block = try assembler.start(
+                    stream_id,
+                    headers_frame.block,
+                    header.flags & frame.flags.end_headers != 0,
+                );
+                while (request_block == null) {
                     const next_header = try readHeader(r);
                     if (next_header.stream_id != stream_id or next_header.type != .continuation) {
                         return error.UnexpectedFrame;
@@ -124,12 +126,15 @@ fn serveConnection(io: Io, stream: Io.net.Stream) !void {
                     const next_payload = payload_buf[0..next_header.length];
                     try r.readSliceAll(next_payload);
                     const next_body = try frame.body(next_header, next_payload);
-                    try appendFragment(&block_buf, &block_len, next_body.continuation.block);
-                    end_headers = next_header.flags & frame.flags.end_headers != 0;
+                    request_block = try assembler.continuation(
+                        stream_id,
+                        next_body.continuation.block,
+                        next_header.flags & frame.flags.end_headers != 0,
+                    );
                 }
 
                 const request = decoder.decode(
-                    block_buf[0..block_len],
+                    request_block.?,
                     &headers,
                     &decode_bytes,
                 ) catch |err| {
@@ -210,10 +215,4 @@ fn sendGoAway(writer: *Io.Writer, last_stream_id: u31, code: frame.ErrorCode) !v
     mem.writeInt(u32, payload[0..4], last_stream_id, .big);
     mem.writeInt(u32, payload[4..8], @intFromEnum(code), .big);
     try send(writer, .goaway, 0, 0, &payload);
-}
-
-fn appendFragment(dest: []u8, len: *usize, fragment: []const u8) !void {
-    if (fragment.len > dest.len - len.*) return error.HeaderBlockTooLarge;
-    @memcpy(dest[len.*..][0..fragment.len], fragment);
-    len.* += fragment.len;
 }

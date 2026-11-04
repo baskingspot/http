@@ -21,8 +21,10 @@ const mem = std.mem;
 /// The client connection preface (RFC 9113 §3.4).
 pub const preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
-/// The default and largest SETTINGS_MAX_FRAME_SIZE values (RFC 9113 §6.5.2).
-pub const default_max_frame_size: u32 = 16_384;
+/// The smallest, default, and largest SETTINGS_MAX_FRAME_SIZE values
+/// (RFC 9113 §6.5.2).
+pub const min_max_frame_size: u32 = 16_384;
+pub const default_max_frame_size: u32 = min_max_frame_size;
 pub const max_frame_size_limit: u32 = 0xff_ffff;
 
 /// Frame types defined by RFC 9113 §6, plus the open registry.
