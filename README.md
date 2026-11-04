@@ -37,7 +37,9 @@ ready to depend on.
   all lines. Lookups trim OWS; the raw spans stay in `Headers.items`.
 - `h1`: sans-I/O HTTP/1.1 head parsing. `RequestHead.method` is the common
   method as `?Method`, and `method_token` is always the exact wire bytes;
-  `ResponseHead.status` is `Status`. Both heads carry `Headers`.
+  `ResponseHead.status` is `Status`. `version` is the effective version after
+  RFC 9110 §6.2, and `wire_version` keeps the exact major and minor. Both heads
+  carry `Headers`.
   `parseRequest` and `parseResponse` return `error.Incomplete` until a whole
   head arrives, and take `last_len` so a client trickling bytes cannot force a
   rescan. Strict where RFC 9112 allows leniency: bare LF, obs-fold, whitespace

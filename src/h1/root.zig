@@ -35,9 +35,15 @@ const Headers = @import("../header.zig").Headers;
 const Method = @import("../method.zig").Method;
 const Status = @import("../status.zig").Status;
 
-/// The HTTP/1.x versions this parser processes. The tags are the start-line
-/// spelling. A message with major version 1 and a higher minor version is
-/// processed as 1.1 (RFC 9110 §2.5).
+/// The two decimal digits from the start-line, exactly as sent.
+/// RFC 9112 §2.3: `HTTP-version = HTTP-name "/" DIGIT "." DIGIT`.
+pub const WireVersion = packed struct(u16) {
+    major: u8,
+    minor: u8,
+};
+
+/// The version this parser processes a message as. A message with major
+/// version 1 and a higher minor version is processed as 1.1 (RFC 9110 §6.2).
 pub const Version = enum { @"HTTP/1.0", @"HTTP/1.1" };
 
 pub const Error = error{
@@ -58,12 +64,19 @@ pub const RequestHead = struct {
     /// §9.1), and the registry is open.
     method_token: []const u8,
     target: []const u8,
+    /// The effective version, after RFC 9110 §6.2.
     version: Version,
+    /// The exact digits from the wire. `HTTP/1.9` is `.{ .major = 1, .minor = 9 }`
+    /// here, while `version` is `HTTP/1.1`.
+    wire_version: WireVersion,
     headers: Headers,
 };
 
 pub const ResponseHead = struct {
+    /// The effective version, after RFC 9110 §6.2.
     version: Version,
+    /// The exact digits from the wire.
+    wire_version: WireVersion,
     /// The three digits as an open `Status`. RFC 9110 §15 makes 100..599 the
     /// meaningful range; this parser returns what the wire said and leaves the
     /// range check to the caller.
@@ -101,7 +114,8 @@ pub fn parseRequest(buf: []const u8, last_len: u32, storage: []Header) Error!Par
     try cursor.expect(' ');
     const target = try scanTarget(&cursor);
     try cursor.expect(' ');
-    const version = try parseVersion(&cursor);
+    const wire_version = try parseVersion(&cursor);
+    const version = try effectiveVersion(wire_version);
     try cursor.expectCrlf();
 
     const headers = try parseHeaders(&cursor, storage);
@@ -111,6 +125,7 @@ pub fn parseRequest(buf: []const u8, last_len: u32, storage: []Header) Error!Par
             .method_token = method_token,
             .target = target,
             .version = version,
+            .wire_version = wire_version,
             .headers = headers,
         },
         .consumed = cursor.pos,
@@ -123,7 +138,8 @@ pub fn parseResponse(buf: []const u8, last_len: u32, storage: []Header) Error!Pa
     if (last_len != 0 and !headComplete(buf, last_len)) return error.Incomplete;
 
     var cursor: Cursor = .{ .buf = buf };
-    const version = try parseVersion(&cursor);
+    const wire_version = try parseVersion(&cursor);
+    const version = try effectiveVersion(wire_version);
     try cursor.expect(' ');
     const status = try parseStatus(&cursor);
     // RFC 9112 §4: the space is required even when the reason is absent.
@@ -135,6 +151,7 @@ pub fn parseResponse(buf: []const u8, last_len: u32, storage: []Header) Error!Pa
     return .{
         .head = .{
             .version = version,
+            .wire_version = wire_version,
             .status = status,
             .reason = reason,
             .headers = headers,
@@ -363,12 +380,9 @@ fn scanLine(cursor: *Cursor) Error![]const u8 {
 }
 
 /// `HTTP-version` from RFC 9112 §2.3: `%s"HTTP" "/" DIGIT "." DIGIT`, exactly
-/// one digit each and case-sensitive.
-///
-/// RFC 9110 §2.5 says a recipient that implements a major version should
-/// process a higher minor version as its highest supported minor, so 1.2
-/// through 1.9 become 1.1.
-fn parseVersion(cursor: *Cursor) Error!Version {
+/// one digit each and case-sensitive. Returns the wire pair; `effectiveVersion`
+/// applies the recipient rule.
+fn parseVersion(cursor: *Cursor) Error!WireVersion {
     // RFC 9112 §2.3: the name is case-sensitive. A little-endian read of the
     // five bytes is one compare instead of five branches.
     const http_prefix: u40 = 'H' |
@@ -385,9 +399,17 @@ fn parseVersion(cursor: *Cursor) Error!Version {
     try cursor.expect('.');
     const minor = try cursor.expectDigit();
 
-    return switch (major) {
-        1 => if (minor == 0) .@"HTTP/1.0" else .@"HTTP/1.1",
-        else => error.UnsupportedVersion,
+    return .{ .major = major, .minor = minor };
+}
+
+/// RFC 9110 §6.2: a recipient that implements major version 1 and receives a
+/// higher minor version processes the message as its highest supported minor.
+/// The wire pair stays in `wire_version`; this is the effective version.
+fn effectiveVersion(wire: WireVersion) Error!Version {
+    return switch (wire) {
+        .{ .major = 1, .minor = 0 } => .@"HTTP/1.0",
+        .{ .major = 1, .minor = 1 } => .@"HTTP/1.1",
+        else => if (wire.major == 1) .@"HTTP/1.1" else error.UnsupportedVersion,
     };
 }
 
@@ -548,18 +570,18 @@ test "request-target: no whitespace, and non-empty (RFC 9112 §3.2)" {
     try testing.expectError(error.Invalid, parseRequest("GET /\xff HTTP/1.1\r\n\r\n", 0, &storage));
 }
 
-test "HTTP-version: syntax and support (RFC 9112 §2.3, RFC 9110 §2.5)" {
+test "HTTP-version: syntax, wire pair, and support (RFC 9112 §2.3, RFC 9110 §6.2)" {
     var storage: [1]Header = undefined;
 
-    try testing.expectEqual(
-        Version.@"HTTP/1.0",
-        (try parseRequest("GET / HTTP/1.0\r\n\r\n", 0, &storage)).head.version,
-    );
-    // Minor versions above 1 are processed as 1.1.
-    try testing.expectEqual(
-        Version.@"HTTP/1.1",
-        (try parseRequest("GET / HTTP/1.9\r\n\r\n", 0, &storage)).head.version,
-    );
+    const v10 = try parseRequest("GET / HTTP/1.0\r\n\r\n", 0, &storage);
+    try testing.expectEqual(Version.@"HTTP/1.0", v10.head.version);
+    try testing.expectEqual(WireVersion{ .major = 1, .minor = 0 }, v10.head.wire_version);
+
+    // A higher minor within major 1 is processed as the highest supported
+    // minor, and the wire pair is kept.
+    const v19 = try parseRequest("GET / HTTP/1.9\r\n\r\n", 0, &storage);
+    try testing.expectEqual(Version.@"HTTP/1.1", v19.head.version);
+    try testing.expectEqual(WireVersion{ .major = 1, .minor = 9 }, v19.head.wire_version);
 
     // The name is case-sensitive and each component is one digit.
     try testing.expectError(error.Invalid, parseRequest("GET / http/1.1\r\n\r\n", 0, &storage));

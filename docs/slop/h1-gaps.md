@@ -30,7 +30,7 @@ Same input, hparse and `baskingspot/http`:
 | `X: a` then ` b: c` | accepts as second field `" b"` | `Invalid` (obs-fold) |
 | `X: a\tb` | `Invalid` | accepts |
 | bare LF line endings | accepts | `Invalid` / `Incomplete` |
-| `HTTP/1.2` | `Invalid` | parsed as 1.1 |
+| `HTTP/1.2` | `Invalid` | parsed as 1.1, wire pair `1.2` |
 | `PROPFIND` | `Invalid` | method null, token `PROPFIND` |
 | `X: y \t` | `Invalid` (HTAB); `X: y ` keeps the space | trims OWS |
 | leading empty line | `Invalid` | skipped |

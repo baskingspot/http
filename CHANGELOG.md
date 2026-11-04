@@ -29,7 +29,9 @@ All notable changes to http are recorded here. The format follows
   case-insensitive membership.
 - `h1.parseRequest` and `h1.parseResponse`: sans-I/O HTTP/1.1 head parsing.
   `RequestHead.method` is `?Method` and `method_token` keeps the exact wire
-  bytes; `ResponseHead.status` is `Status`; both heads carry `Headers`. Both
+  bytes; `ResponseHead.status` is `Status`; `version` is the effective version
+  after RFC 9110 §6.2 and `wire_version` keeps the wire pair. Both heads carry
+  `Headers`. Both
   report `error.Incomplete` until a whole head arrives, take `last_len` for a
   resumable completeness check, and reject bare LF, obs-fold, and whitespace
   before the colon.
