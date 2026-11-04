@@ -1,7 +1,7 @@
 //! An HTTP/1.1 server over TLS 1.3 on the blocking engine.
 //!
 //!     just example-h1-tls
-//!     curl -k https://127.0.0.1:8443/
+//!     curl -k https://127.0.0.1:8444/
 //!
 //! TLS comes from `baskingspot/tls` through `tls_std`. The handshake is
 //! eager; its reader and writer are the plaintext transport for the h1
@@ -16,7 +16,7 @@ const http = @import("http");
 const tls = @import("tls");
 const tls_std = @import("tls_std");
 
-const address_text = "127.0.0.1:8443";
+const address_text = "127.0.0.1:8444";
 const response_body = "h1 over tls hello\n";
 
 const cert_b64 =

@@ -89,7 +89,7 @@ Content-Length, chunked, and request-body echo routes. The client uses
 ## HTTP/1.1 over TLS
 
 ```sh
-just example-h1-tls          # server on 127.0.0.1:8443
+just example-h1-tls          # server on 127.0.0.1:8444
 just example-h1-tls-client   # in another terminal
 ```
 
