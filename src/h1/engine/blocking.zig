@@ -14,6 +14,7 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const Header = @import("../../header.zig").Header;
 const h1 = @import("../root.zig");
 pub const Exchange = @import("common.zig").Exchange;
+pub const Handler = @import("common.zig").Handler;
 
 /// Buffers and policy for one connection. The request buffer holds the head
 /// and body.
@@ -27,23 +28,11 @@ pub const Config = struct {
     body_bytes: usize = 64 * 1024,
 };
 
-// A handler type must provide:
-//
-//   pub fn handle(self: *Handler, exchange: *Exchange) anyerror!void
-//
-// It may also provide:
-//
-//   pub fn onError(self: *Handler, err: anyerror) void
-//
-// The engine takes the type at comptime; there is no function pointer or
-// context value.
-
 /// Accept connections until an unrecoverable accept error.
 pub fn run(
-    comptime Handler: type,
     io: Io,
     listener: *Io.net.Server,
-    handler: *Handler,
+    handler: Handler,
     config: Config,
 ) !void {
     while (true) {
@@ -63,8 +52,8 @@ pub fn run(
         };
         defer stream.close(io);
 
-        serve(Handler, io, stream, handler, config) catch |err| {
-            report(Handler, handler, err);
+        serve(io, stream, handler, config) catch |err| {
+            handler.vtable.report_error(handler.ptr, err);
             continue;
         };
     }
@@ -72,10 +61,9 @@ pub fn run(
 
 /// Serve one connection until it closes.
 pub fn serve(
-    comptime Handler: type,
     io: Io,
     stream: Io.net.Stream,
-    handler: *Handler,
+    handler: Handler,
     config: Config,
 ) !void {
     // `readVec` writes straight into the ServerConn request buffer. A nonzero
@@ -110,7 +98,6 @@ pub fn serve(
         switch (event) {
             .request => |request| {
                 const done = try handleRequest(
-                    Handler,
                     io,
                     &conn,
                     writer,
@@ -162,11 +149,10 @@ pub fn serve(
 }
 
 fn handleRequest(
-    comptime Handler: type,
     io: Io,
     conn: *h1.ServerConn,
     writer: *Io.Writer,
-    handler: *Handler,
+    handler: Handler,
     config: Config,
     arena: *ArenaAllocator,
     request: h1.ServerConn.Request,
@@ -177,48 +163,41 @@ fn handleRequest(
         .request = request,
         .arena = arena.allocator(),
     };
-    handler.handle(&exchange) catch |err| {
-        report(Handler, handler, err);
+    handler.vtable.handle(handler.ptr, &exchange) catch |err| {
+        handler.vtable.report_error(handler.ptr, err);
         if (conn.sendSlices().head.len == 0) {
             exchange.respond(.{ .status = .internal_server_error }, "") catch |resp_err| {
-                complete(Handler, handler, &exchange, arena, config.arena_retain_bytes);
+                complete(handler, &exchange, arena, config.arena_retain_bytes);
                 return resp_err;
             };
         }
     };
 
     const done = writePending(io, conn, writer) catch |err| {
-        complete(Handler, handler, &exchange, arena, config.arena_retain_bytes);
+        complete(handler, &exchange, arena, config.arena_retain_bytes);
         return err;
     };
     if (done) |value| {
         switch (value) {
             .keep_alive, .close, .close_after_drain => {
-                complete(Handler, handler, &exchange, arena, config.arena_retain_bytes);
+                complete(handler, &exchange, arena, config.arena_retain_bytes);
             },
             .read, .more => {},
         }
         return value;
     }
-    complete(Handler, handler, &exchange, arena, config.arena_retain_bytes);
+    complete(handler, &exchange, arena, config.arena_retain_bytes);
     return error.NoResponse;
 }
 
 fn complete(
-    comptime Handler: type,
-    handler: *Handler,
+    handler: Handler,
     exchange: *Exchange,
     arena: *ArenaAllocator,
     retain_bytes: usize,
 ) void {
-    if (@hasDecl(Handler, "onExchangeComplete")) {
-        handler.onExchangeComplete(exchange);
-    }
+    handler.vtable.complete(handler.ptr, exchange);
     _ = arena.reset(.{ .retain_with_limit = retain_bytes });
-}
-
-fn report(comptime Handler: type, handler: *Handler, err: anyerror) void {
-    if (@hasDecl(Handler, "onError")) handler.onError(err);
 }
 
 fn writePending(
@@ -288,7 +267,15 @@ const TestClient = struct {
 };
 
 const TestHandler = struct {
-    pub fn handle(_: *TestHandler, exchange: *Exchange) anyerror!void {
+    fn handler(_: *TestHandler) Handler {
+        return .{ .ptr = undefined, .vtable = &.{
+            .handle = handle,
+            .complete = Handler.noopComplete,
+            .report_error = Handler.noopReportError,
+        } };
+    }
+
+    fn handle(_: *anyopaque, exchange: *Exchange) anyerror!void {
         const body = try exchange.arena.dupe(u8, "hello\n");
         try exchange.respond(.{ .status = .ok, .content_type = "text/plain" }, body);
     }
@@ -312,7 +299,7 @@ test "serve one blocking connection" {
     var headers: [16]Header = undefined;
     var response_head: [256]u8 = undefined;
     var test_handler: TestHandler = .{};
-    serve(TestHandler, testing.io, stream, &test_handler, .{
+    serve(testing.io, stream, test_handler.handler(), .{
         .allocator = testing.allocator,
         .request_buffer = &request_buffer,
         .headers = &headers,

@@ -61,7 +61,7 @@ pub fn main(init: std.process.Init) !void {
             // No concurrency available: drop the connection rather than
             // serialize it into the accept loop.
             stream.close(io);
-            app.onError(err);
+            App.reportError(undefined, err);
         };
     }
 }
@@ -95,13 +95,21 @@ fn serveConnection(
     defer stream.close(io);
 
     var connection: Connection = .{};
-    engine.serve(App, io, stream, handler, connection.config(allocator)) catch |err| {
-        handler.onError(err);
+    engine.serve(io, stream, handler.handler(), connection.config(allocator)) catch |err| {
+        App.reportError(undefined, err);
     };
 }
 
 const App = struct {
-    pub fn handle(_: *App, exchange: *engine.Exchange) anyerror!void {
+    fn handler(self: *App) engine.Handler {
+        return .{ .ptr = self, .vtable = &.{
+            .handle = handle,
+            .complete = engine.Handler.noopComplete,
+            .report_error = reportError,
+        } };
+    }
+
+    fn handle(_: *anyopaque, exchange: *engine.Exchange) anyerror!void {
         const head = exchange.request.head;
         const target = head.target;
 
@@ -131,7 +139,7 @@ const App = struct {
         }, body);
     }
 
-    pub fn onError(_: *App, err: anyerror) void {
+    fn reportError(_: *anyopaque, err: anyerror) void {
         print("http1-server: {s}\n", .{@errorName(err)});
     }
 };

@@ -9,25 +9,26 @@ All notable changes to http are recorded here. The format follows
 
 - `h1.engine.poll` and `h1.engine.epoll`: Linux HTTP/1 readiness engines. They
   share fixed slots, nonblocking descriptors, accept backoff, connection
-  deadlines, keep-alive and pipelining, and a stop eventfd. The handler type is
-  comptime, the same as the blocking engine. The wait and registration live in
-  a backend; the slot state machine is shared. Kqueue is next; io_uring is
-  separate. `Config.tcp_defer_accept` sets Linux `TCP_DEFER_ACCEPT`. A wait
-  that returns `SystemResources` backs off and retries.
+  deadlines, keep-alive and pipelining, and a stop eventfd. The handler is the
+  shared `Handler` vtable, the same as the blocking engine. The wait and
+  registration live in a backend; the slot state machine is shared. Kqueue is
+  next; io_uring is separate. `Config.tcp_defer_accept` sets Linux
+  `TCP_DEFER_ACCEPT`. A wait that returns `SystemResources` backs off and
+  retries.
 
-- `Exchange.id` and `Handler.onExchangeComplete`: the engine reports when the
+- `Exchange.id` and `Handler.VTable.complete`: the engine reports when the
   final response bytes are written or the connection ends, so a handler can
   release a response body it owns. The slot id is stable for the exchange.
   `Exchange.arena` is the engine-owned allocator; it is reset to
   `Config.arena_retain_bytes` after completion.
 
 - `h1.engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
-  connection at a time; `serve` drives one stream. The handler is a comptime
-  type with `handle` and optional `onError`; there is no function pointer or
-  context value. A handler formats a response body into per-connection scratch.
-  The connection machine handles parsing, framing, keep-alive, pipelining, and
-  policy responses. Every timeout is zero: a blocking syscall cannot enforce
-  the connection deadlines. Evented engines are separate.
+  connection at a time; `serve` drives one stream. The handler is the shared
+  `Handler` vtable with `handle`, `complete`, and `report_error`. A handler
+  formats a response body with the exchange arena. The connection machine
+  handles parsing, framing, keep-alive, pipelining, and policy responses.
+  Every timeout is zero: a blocking syscall cannot enforce the connection
+  deadlines. Evented engines are separate.
 
 - `h2.head.request` and `h2.head.response`: field-section validation and the
   two heads. Pseudo-headers are ordered, deduplicated, and checked per

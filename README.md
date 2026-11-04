@@ -83,11 +83,11 @@ ready to depend on.
 - `h1.engine.poll` and `h1.engine.epoll`: Linux readiness servers with fixed
   slots, nonblocking sockets, accept backoff, connection deadlines, keep-alive
   and pipelining, and a stop eventfd. They share the slot state machine and
-  differ only in registration and wait. Both use the same comptime handler and
-  `Exchange` as the blocking engine. `onExchangeComplete` reports when a
+  differ only in registration and wait. Both use the same `Handler` vtable and
+  `Exchange` as the blocking engine. `Handler.VTable.complete` reports when a
   borrowed response body can be released. Each exchange owns an arena that is
-  reset after completion. Kqueue becomes the next backend for
-  this readiness loop; io_uring is separate.
+  reset after completion. Kqueue becomes the next backend for this readiness
+  loop; io_uring is separate.
 - `prefix_int`: HPACK and QPACK prefix integers (RFC 7541 §5.1), shared by
   both. Up to 32 bits, with the representation's tag bits left to the caller.
 - `huffman`: the RFC 7541 Appendix B Huffman code, shared by HPACK and QPACK.

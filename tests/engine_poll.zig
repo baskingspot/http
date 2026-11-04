@@ -15,7 +15,15 @@ const engine = if (options.epoll) h1.engine.epoll else h1.engine.poll;
 const TestApp = struct {
     complete_count: usize = 0,
 
-    pub fn handle(_: *TestApp, exchange: *engine.Exchange) anyerror!void {
+    fn handler(self: *TestApp) engine.Handler {
+        return .{ .ptr = self, .vtable = &.{
+            .handle = handle,
+            .complete = complete,
+            .report_error = engine.Handler.noopReportError,
+        } };
+    }
+
+    fn handle(_: *anyopaque, exchange: *engine.Exchange) anyerror!void {
         const target = exchange.request.head.target;
         if (mem.eql(u8, target, "/no-response")) return;
         if (mem.eql(u8, target, "/big")) {
@@ -42,13 +50,14 @@ const TestApp = struct {
         try exchange.respond(.{ .status = .ok, .content_type = "text/plain" }, body);
     }
 
-    pub fn onExchangeComplete(self: *TestApp, exchange: *engine.Exchange) void {
+    fn complete(ptr: *anyopaque, exchange: *engine.Exchange) void {
         _ = exchange;
+        const self: *TestApp = @ptrCast(@alignCast(ptr));
         self.complete_count += 1;
     }
 };
 
-const PollServer = engine.Server(TestApp);
+const PollServer = engine.Server;
 
 const Harness = struct {
     io: Io,
@@ -74,7 +83,7 @@ const Harness = struct {
         self.result = null;
         self.joined = false;
         const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
-        self.server = try .init(self.io, address, &self.app, .{
+        self.server = try .init(self.io, address, self.app.handler(), .{
             .allocator = testing.allocator,
             .max_connections = max_connections,
             .arena_retain_bytes = arena_retain_bytes,
@@ -343,10 +352,13 @@ test "poll listener does not set SO_REUSEPORT" {
     var address = h.address;
     address.setPort(h.server.port());
     var second_app: TestApp = .{};
-    try testing.expectError(error.BindFailed, PollServer.init(h.io, address, &second_app, .{
-        .allocator = testing.allocator,
-        .max_connections = 8,
-    }));
+    try testing.expectError(
+        error.BindFailed,
+        PollServer.init(h.io, address, second_app.handler(), .{
+            .allocator = testing.allocator,
+            .max_connections = 8,
+        }),
+    );
 }
 
 test "poll serves a body larger than the arena retain limit" {
@@ -489,7 +501,7 @@ test "poll reports exchange completion" {
 test "poll listener honors TCP_DEFER_ACCEPT" {
     var app: TestApp = .{};
     const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
-    var server = try PollServer.init(testing.io, address, &app, .{
+    var server = try PollServer.init(testing.io, address, app.handler(), .{
         .allocator = testing.allocator,
         .max_connections = 1,
         .tcp_defer_accept = true,

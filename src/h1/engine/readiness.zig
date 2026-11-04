@@ -20,6 +20,7 @@ const builtin = @import("builtin");
 const Header = @import("../../header.zig").Header;
 const h1 = @import("../root.zig");
 pub const Exchange = @import("common.zig").Exchange;
+pub const Handler = @import("common.zig").Handler;
 const wait = @import("wait.zig");
 
 comptime {
@@ -76,13 +77,13 @@ const Slot = struct {
     }
 };
 
-pub fn Server(comptime Handler: type, comptime Waiter: type) type {
+pub fn Server(comptime Waiter: type) type {
     return struct {
         const Self = @This();
 
         io: Io,
         allocator: Allocator,
-        handler: *Handler,
+        handler: Handler,
         config: Config,
         listener: Io.net.Server,
         stop_fd: linux.fd_t,
@@ -94,7 +95,7 @@ pub fn Server(comptime Handler: type, comptime Waiter: type) type {
         pub fn init(
             io: Io,
             address: Io.net.IpAddress,
-            handler: *Handler,
+            handler: Handler,
             config: Config,
         ) !Self {
             assert(config.max_connections > 0);
@@ -309,9 +310,7 @@ pub fn Server(comptime Handler: type, comptime Waiter: type) type {
         fn finishExchange(self: *Self, slot: *Slot) void {
             if (!slot.exchange_active) return;
             slot.exchange_active = false;
-            if (@hasDecl(Handler, "onExchangeComplete")) {
-                self.handler.onExchangeComplete(&slot.exchange);
-            }
+            self.handler.vtable.complete(self.handler.ptr, &slot.exchange);
             _ = slot.arena.reset(.{ .retain_with_limit = self.config.arena_retain_bytes });
             slot.exchange.request = undefined;
         }
@@ -409,7 +408,7 @@ pub fn Server(comptime Handler: type, comptime Waiter: type) type {
             assert(!slot.exchange_active);
             slot.exchange.request = request;
             slot.exchange_active = true;
-            self.handler.handle(&slot.exchange) catch |err| {
+            self.handler.vtable.handle(self.handler.ptr, &slot.exchange) catch |err| {
                 self.report(err);
             };
             if (slot.conn.sendSlices().head.len == 0) {
@@ -496,7 +495,7 @@ pub fn Server(comptime Handler: type, comptime Waiter: type) type {
         }
 
         fn report(self: *Self, err: anyerror) void {
-            if (@hasDecl(Handler, "onError")) self.handler.onError(err);
+            self.handler.vtable.report_error(self.handler.ptr, err);
         }
     };
 }

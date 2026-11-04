@@ -8,7 +8,5 @@ const Wait = @import("wait_epoll.zig").Wait;
 
 pub const Config = readiness.Config;
 pub const Exchange = readiness.Exchange;
-
-pub fn Server(comptime Handler: type) type {
-    return readiness.Server(Handler, Wait);
-}
+pub const Handler = readiness.Handler;
+pub const Server = readiness.Server(Wait);

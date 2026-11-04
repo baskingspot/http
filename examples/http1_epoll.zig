@@ -10,7 +10,7 @@ const print = std.debug.print;
 const http = @import("http");
 const engine = http.h1.engine.epoll;
 
-const EpollServer = engine.Server(App);
+const EpollServer = engine.Server;
 const address_text = "127.0.0.1:8080";
 const max_target = 256;
 
@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
     const address: Io.net.IpAddress = try .parseLiteral(address_text);
 
     var app: App = .{};
-    var server = try EpollServer.init(io, address, &app, .{
+    var server = try EpollServer.init(io, address, app.handler(), .{
         .allocator = init.gpa,
         .max_connections = 64,
         .body_bytes = 8 * 1024,
@@ -31,7 +31,15 @@ pub fn main(init: std.process.Init) !void {
 }
 
 const App = struct {
-    pub fn handle(_: *App, exchange: *engine.Exchange) anyerror!void {
+    fn handler(_: *App) engine.Handler {
+        return .{ .ptr = undefined, .vtable = &.{
+            .handle = handle,
+            .complete = engine.Handler.noopComplete,
+            .report_error = reportError,
+        } };
+    }
+
+    fn handle(_: *anyopaque, exchange: *engine.Exchange) anyerror!void {
         const head = exchange.request.head;
         const target = head.target;
 
@@ -61,7 +69,7 @@ const App = struct {
         }, body);
     }
 
-    pub fn onError(_: *App, err: anyerror) void {
+    fn reportError(_: *anyopaque, err: anyerror) void {
         print("http1-epoll: {s}\n", .{@errorName(err)});
     }
 };

@@ -29,35 +29,54 @@ The accept loop handles these errors:
 - `Canceled` returns.
 - Any other error returns.
 
-`run` reports a connection error through `Handler.onError` when the handler
-provides it. It then accepts the next connection.
+`run` reports a connection error through `Handler.VTable.report_error`. It then
+accepts the next connection.
 
 ## Handler
 
-A handler is a comptime type. The engine calls `Handler.handle` with an
-`Exchange`. The type must provide:
+A handler is `common.Handler`: a pointer plus a vtable. Every engine uses the
+same type. The vtable has three required entries:
 
 ```zig
-pub fn handle(self: *Handler, exchange: *Exchange) anyerror!void
+pub const Handler = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        handle: *const fn (ptr: *anyopaque, exchange: *Exchange) anyerror!void,
+        complete: *const fn (ptr: *anyopaque, exchange: *Exchange) void,
+        report_error: *const fn (ptr: *anyopaque, err: anyerror) void,
+    };
+
+    pub fn noopComplete(_: *anyopaque, _: *Exchange) void {}
+    pub fn noopReportError(_: *anyopaque, _: anyerror) void {}
+};
 ```
 
-It may also provide:
+`handle` builds the response and must call `exchange.respond` before it
+returns. `complete` runs once per exchange, after the final response bytes are
+written or after the connection closes first. The exchange arena is still
+readable there; the engine resets it after the callback. Do not respond from
+`complete`. `report_error` runs after `handle` returns an error; the engine has
+already queued the 500. A handler with no hooks passes `Handler.noopComplete`
+and `Handler.noopReportError`.
+
+A stateless handler passes `ptr = undefined`. A stateful handler sets `ptr` to
+its state and casts it back in each function. The vtable is usually built by a
+`handler()` method:
 
 ```zig
-pub fn onError(self: *Handler, err: anyerror) void
-pub fn onExchangeComplete(self: *Handler, exchange: *Exchange) void
+fn handler(self: *App) Handler {
+    return .{ .ptr = self, .vtable = &.{
+        .handle = handle,
+        .complete = Handler.noopComplete,
+        .report_error = reportError,
+    } };
+}
 ```
 
-`onExchangeComplete` runs once per exchange, after the final response bytes
-have been written or after the connection closes first. A body borrowed from
-handler-owned storage can be released there. The callback runs on the engine
-thread. Do not respond from it; the exchange is already complete. The
-`Exchange.id` is the engine slot, stable for the exchange and reused only
-after this callback.
-
-`run` and `serve` take the handler type and a pointer to the handler value.
-There is no function pointer or `?*anyopaque` context. The handler type is
-known when the engine is compiled.
+`handle` keeps `anyerror!void`. A vtable function pointer cannot carry a
+precise error set, and the engine only reports it and sends the 500.
 
 The exchange holds:
 
@@ -66,20 +85,19 @@ The exchange holds:
 - An engine-owned arena allocator.
 
 The request body borrows the request buffer. Use it before the response
-completes. The arena is valid from handler entry until `onExchangeComplete`
-returns. Build the response body there with `std.fmt.allocPrint`,
-`allocator.alloc`, or another allocator call, then pass the slice to
-`exchange.respond`.
+completes. The arena is valid from handler entry until `complete` returns.
+Build the response body there with `std.fmt.allocPrint`, `allocator.alloc`, or
+another allocator call, then pass the slice to `exchange.respond`.
 
 The body passed to `respond` may also point at handler-owned memory that
 outlives the response. In both cases the bytes must stay valid until the
-response completes. The engine resets the arena with
-`arena_retain_bytes` (default 16 KiB) after the completion callback, before the
-slot serves another request or connection.
+response completes. The engine resets the arena with `arena_retain_bytes`
+(default 16 KiB) after the completion callback, before the slot serves another
+request or connection.
 
 If `handle` returns an error before it responds, the engine queues a 500. If it
 returns an error after it responds, the engine sends that response. The engine
-reports the error through `onError` in both cases. A handler that returns
+reports the error through `report_error` in both cases. A handler that returns
 without responding also gets a 500.
 
 The handler is synchronous. It runs on the engine thread; a slow handler
@@ -110,12 +128,12 @@ changes it only when a slot's interest changes. `std.Io` supplies the listener,
 the clock, and the listener close. The connection machine is the same
 `h1.ServerConn`.
 
-`Server(Handler)` takes the handler type at comptime. The caller creates it
-with an address, a handler pointer, and a `Config` that holds the allocator,
-the slot count, the buffer sizes, the arena retain limit, the connection
-limits, and the accept backoff. The server allocates all slots and buffers
-once, in `init`; it allocates per request only when the handler uses the
-exchange arena.
+`Server` is a plain type, not a generic over the handler. The caller creates
+it with an address, a `Handler`, and a `Config` that holds the allocator, the
+slot count, the buffer sizes, the arena retain limit, the connection limits,
+and the accept backoff. The server allocates all slots and buffers once, in
+`init`; it allocates per request only when the handler uses the exchange
+arena.
 
 The methods are `init`, `run`, `stop`, `deinit`, and `port`. `run` blocks in
 the wait backend. `stop` writes a stop eventfd; `run` returns after the next
@@ -139,7 +157,7 @@ The listener option `tcp_defer_accept` sets Linux `TCP_DEFER_ACCEPT` with a
 one-second timeout. It is off by default; enable it when the server wants the
 listener to wake only after the peer sends data.
 
-A read feeds `recvBuffer` and `received`. A request calls the comptime handler.
+A read feeds `recvBuffer` and `received`. A request calls the handler vtable.
 A write sends `sendSlices` and calls `sent`. After 100 Continue the slot
 returns to read. After keep-alive the engine calls `advance` before the next
 read, so a pipelined request needs no syscall. `.close_after_drain` switches

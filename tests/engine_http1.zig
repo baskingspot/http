@@ -42,7 +42,7 @@ const Server = struct {
             return;
         };
         defer stream.close(self.io);
-        engine.serve(TestApp, self.io, stream, self.handler, self.config) catch |err| {
+        engine.serve(self.io, stream, self.handler.handler(), self.config) catch |err| {
             self.result = err;
         };
     }
@@ -141,7 +141,15 @@ const Client = struct {
 };
 
 const TestApp = struct {
-    pub fn handle(_: *TestApp, exchange: *engine.Exchange) anyerror!void {
+    fn handler(_: *TestApp) engine.Handler {
+        return .{ .ptr = undefined, .vtable = &.{
+            .handle = handle,
+            .complete = engine.Handler.noopComplete,
+            .report_error = engine.Handler.noopReportError,
+        } };
+    }
+
+    fn handle(_: *anyopaque, exchange: *engine.Exchange) anyerror!void {
         const target = exchange.request.head.target;
         if (mem.eql(u8, target, "/204")) {
             try exchange.respond(.{ .status = .no_content }, "");
