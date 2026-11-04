@@ -27,7 +27,11 @@
 //! Policy responses are queued by the machine. The application never writes a
 //! 400, 408, 413, 417, 431, 501, or 505 path itself.
 //!
-//! Request bodies are buffered. A body that does not fit is 413. Chunked
+//! Request bodies default to the request buffer. A `.request_head` event lets
+//! the application respond from the head alone or call `acceptBody` with its
+//! own storage. Body bytes already received are copied there; later reads land
+//! there directly. A body that does not fit the chosen storage is 413.
+//! `switchProtocols` sends a 101 and ends HTTP for this connection. Chunked
 //! request bodies are not implemented yet and are 501.
 
 const std = @import("std");
@@ -48,8 +52,12 @@ const ServerConn = @This();
 
 // ast-grep-ignore: public-struct-field-default -- options bag; the defaults are the policy
 pub const Limits = struct {
-    /// Largest buffered request body. The request buffer must also hold it.
+    /// Largest request body an application may accept.
     body_bytes: usize = 64 * 1024,
+    /// Minimum usable space in a read destination. When less space remains
+    /// while a head or default-buffered body is incomplete, reject it rather
+    /// than leave a transport unable to arm its read.
+    min_read_bytes: usize = 0,
     /// Zero disables the deadline. Starts at accept and after a keep-alive
     /// response, while the connection waits for the next request.
     idle_timeout: Io.Duration = .fromSeconds(5),
@@ -79,17 +87,30 @@ pub const Config = struct {
 /// Connection.
 pub const ResponseOptions = @import("../engine/common.zig").ResponseOptions;
 
+pub const Head = struct {
+    head: h1.RequestHead,
+    /// The complete Content-Length body size, before choosing a sink.
+    body_bytes: usize,
+};
+
 pub const Request = struct {
     /// Borrows the request buffer and the caller's header storage. Valid until
-    /// the response completes.
+    /// the response completes. A `request_head` head must survive the call to
+    /// `acceptBody` or `bufferBody`; then its storage must survive this request
+    /// event. If the caller responds from `request_head` without accepting a
+    /// body, it may instead copy what it needs and reuse the header storage
+    /// after the response. No field slice survives that reuse.
     head: h1.RequestHead,
-    /// A slice of the request buffer. Valid until the response completes.
+    /// A slice of the chosen body storage. Valid until the response completes.
     body: []const u8,
 };
 
 pub const Event = union(enum) {
     /// Read more bytes into `recvBuffer`, after draining `sendSlices`.
     need_more,
+    /// The request head is complete but the body is not. Respond immediately
+    /// to refuse or switch protocols, or call `acceptBody` or `bufferBody`.
+    request_head: Head,
     /// A complete request. Respond, then drain `sendSlices`.
     request: Request,
     /// The machine queued this policy response. Send it, then close. `sent`
@@ -113,6 +134,10 @@ pub const Done = union(enum) {
     keep_alive,
     /// The response is complete and the connection must close.
     close,
+    /// A 101 response is complete. The stream belongs to the next protocol;
+    /// `remainingInput` returns bytes read past the request, and HTTP
+    /// deadlines no longer apply.
+    switched,
     /// The response is complete. The request body was not fully read; drain
     /// the raw socket into scratch storage until `deadline` expires or the
     /// peer closes, so a reset does not discard the response. `recvBuffer` is
@@ -138,7 +163,7 @@ pub const RespondError = h1.Writer.Error || error{
     ResponseHeadTooLarge,
 };
 
-const Phase = enum { head, body, app, response, drain, closed };
+const Phase = enum { head, body, app, response, drain, switched, closed };
 const ResponseKind = enum { none, interim, final };
 
 request_buffer: []u8,
@@ -160,6 +185,17 @@ head_parsed: bool,
 body_chunked: bool,
 drain_close: bool,
 idle: bool,
+
+/// Target selected by `acceptBody` or `bufferBody`. Its length is the
+/// complete request body, not merely the currently available bytes.
+body_target: []u8,
+body_received: usize,
+/// First byte in the request buffer that does not belong to this request.
+/// With an external body target this can precede all later body reads.
+leftover_start: usize,
+external_body: bool,
+expect_continue: bool,
+switch_protocols: bool,
 
 response: []const u8,
 response_head_len: usize,
@@ -195,6 +231,13 @@ pub fn init(config: Config) ServerConn {
         .drain_close = false,
         .idle = true,
 
+        .body_target = &.{},
+        .body_received = 0,
+        .leftover_start = 0,
+        .external_body = false,
+        .expect_continue = false,
+        .switch_protocols = false,
+
         .response = "",
         .response_head_len = 0,
         .response_head_sent = 0,
@@ -221,23 +264,32 @@ pub fn start(self: *ServerConn, now: Io.Timestamp) void {
 /// Where the engine should read. Empty while a response, the application, or
 /// a drain owns the connection.
 pub fn recvBuffer(self: *ServerConn) []u8 {
+    if (self.phase == .body and self.external_body) {
+        return self.body_target[self.body_received..];
+    }
     return switch (self.phase) {
         .head, .body => self.request_buffer[self.used..],
-        .app, .response, .drain, .closed => self.request_buffer[0..0],
+        .app, .response, .drain, .switched, .closed => self.request_buffer[0..0],
     };
 }
 
 /// Account for `n` bytes read into `recvBuffer`.
 pub fn received(self: *ServerConn, n: usize, now: Io.Timestamp) Event {
     assert(self.phase == .head or self.phase == .body);
-    assert(n <= self.request_buffer.len - self.used);
 
     self.last_now = now;
     if (n == 0) return self.eof(now);
     if (self.timedOut(now)) return self.reject(.request_timeout, false);
     self.startInputDeadlines(now);
 
+    if (self.phase == .body and self.external_body) {
+        assert(n <= self.body_target.len - self.body_received);
+        self.body_received += n;
+        return self.parseBody();
+    }
+    assert(n <= self.request_buffer.len - self.used);
     self.used += n;
+    if (self.phase == .body) self.body_received += n;
     return switch (self.phase) {
         .head => self.parseHead(now),
         .body => self.parseBody(),
@@ -292,7 +344,7 @@ pub fn tick(self: *ServerConn, now: Io.Timestamp) Tick {
             self.clearDeadlines();
             return .close;
         },
-        .closed => .none,
+        .switched, .closed => .none,
     };
 }
 
@@ -304,19 +356,44 @@ fn rejectTick(self: *ServerConn) Tick {
     };
 }
 
-/// Queue a final response. Only valid after a `.request` event. The body must
-/// stay valid until the response completes. A HEAD request sends Content-Length
-/// and the head only. A 204 or 304 response ignores the body and omits
-/// Content-Length.
+/// Queue a final response after `.request` or `.request_head`. The body must
+/// stay valid until the response completes. An early response leaves request
+/// bytes unread and drains them before closing instead of treating them as
+/// another request. A HEAD request sends Content-Length and the head only.
+/// A 204 or 304 response ignores the body and omits Content-Length.
 pub fn respond(
     self: *ServerConn,
     options: ResponseOptions,
     body: []const u8,
 ) RespondError!void {
+    return self.respondInner(options, body, false);
+}
+
+/// Queue a 101 response after a request head, then hand the stream to the
+/// application. After `sent` returns `.switched`, HTTP is finished. Bytes
+/// already read past the head remain available through `remainingInput`.
+pub fn switchProtocols(self: *ServerConn, options: ResponseOptions) RespondError!void {
+    if (self.phase != .app) return error.InvalidState;
+    var switched = options;
+    switched.status = .switching_protocols;
+    return self.respondInner(switched, "", true);
+}
+
+fn respondInner(
+    self: *ServerConn,
+    options: ResponseOptions,
+    body: []const u8,
+    switching: bool,
+) RespondError!void {
     if (self.phase != .app) return error.InvalidState;
     if (options.status.class()) |class| {
-        if (class == .informational) return error.InvalidStatus;
+        if (class == .informational and !switching) return error.InvalidStatus;
     }
+    if (self.unreadBody() and !switching) {
+        self.keep_alive = false;
+        self.drain_close = true;
+    }
+    self.switch_protocols = switching;
 
     self.queueResponse(options, body, .final) catch |err| switch (err) {
         error.WriteFailed => return error.ResponseHeadTooLarge,
@@ -368,6 +445,13 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
         return .read;
     }
 
+    if (self.switch_protocols) {
+        self.switch_protocols = false;
+        self.phase = .switched;
+        self.clearDeadlines();
+        return .switched;
+    }
+
     if (!self.keep_alive) {
         const drain = self.drain_close;
         self.drain_close = false;
@@ -383,7 +467,8 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
         return .close;
     }
 
-    const consumed = self.body_start + self.body_len;
+    const consumed = self.leftover_start;
+    assert(consumed <= self.used);
     const leftover = self.used - consumed;
     @memmove(self.request_buffer[0..leftover], self.request_buffer[consumed..self.used]);
     self.used = leftover;
@@ -397,6 +482,12 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
     self.head = undefined;
     self.head_parsed = false;
     self.body_chunked = false;
+    self.body_target = &.{};
+    self.body_received = 0;
+    self.leftover_start = 0;
+    self.external_body = false;
+    self.expect_continue = false;
+    self.switch_protocols = false;
     self.drain_close = false;
     self.version = .@"HTTP/1.1";
     self.head_only = false;
@@ -406,6 +497,62 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
     return .keep_alive;
 }
 
+/// Bytes already read past the request that produced the 101. The stream
+/// stays open; these bytes are valid while `remainingInput` is called.
+pub fn remainingInput(self: *ServerConn) []const u8 {
+    assert(self.phase == .switched);
+    return self.request_buffer[self.leftover_start..self.used];
+}
+
+/// Accept this request body into memory chosen from the request head. Bytes
+/// already received are copied once; subsequent reads go there directly.
+/// When it is too small, return a 413 rather than waiting on the default buffer.
+pub fn acceptBody(self: *ServerConn, storage: []u8) Event {
+    assert(self.phase == .app);
+    assert(self.body_received < self.body_len);
+    if (self.body_len > storage.len) return self.reject(.payload_too_large, true);
+    return self.setBodyStorage(storage[0..self.body_len], true);
+}
+
+/// Keep the current default behavior: buffer the body in the request buffer.
+pub fn bufferBody(self: *ServerConn) Event {
+    if (self.phase != .app) return .need_more;
+    const end = self.body_start + self.body_len;
+    if (end > self.request_buffer.len) return self.reject(.payload_too_large, true);
+    return self.setBodyStorage(self.request_buffer[self.body_start..end], false);
+}
+
+fn setBodyStorage(self: *ServerConn, storage: []u8, external: bool) Event {
+    assert(self.body_received <= self.body_len);
+    assert(self.body_len == storage.len);
+    if (external) {
+        const already = self.used - self.body_start;
+        assert(self.body_received <= already);
+        if (self.body_received != 0) {
+            @memcpy(
+                storage[0..self.body_received],
+                self.request_buffer[self.body_start..][0..self.body_received],
+            );
+        }
+    }
+    if (external) {
+        self.leftover_start = self.body_start + self.body_received;
+    } else {
+        self.leftover_start = self.body_start + self.body_len;
+    }
+    self.body_target = storage;
+    self.external_body = external;
+    self.phase = .body;
+    self.startPhase(self.last_now, self.limits.body_timeout);
+    if (self.body_received == self.body_len) return self.completeRequest();
+    if (self.expect_continue and self.version != .@"HTTP/1.0") {
+        self.queueContinue() catch return self.reject(.internal_server_error, false);
+        self.expect_continue = false;
+        return .need_more;
+    }
+    return self.parseBody();
+}
+
 /// The earliest active deadline. Null when every timeout is disabled or the
 /// connection is closed. Call `start` after accept so a silent connection has
 /// a deadline.
@@ -413,14 +560,14 @@ pub fn deadline(self: *const ServerConn) ?Io.Timestamp {
     return earliest(self.phase_deadline, self.total_deadline);
 }
 
-fn parseHead(self: *ServerConn, now: Io.Timestamp) Event {
+fn parseHead(self: *ServerConn, _: Io.Timestamp) Event {
     const parsed = h1.parseRequest(
         self.request_buffer[0..self.used],
         &self.search,
         self.headers,
     ) catch |err| switch (err) {
         error.Incomplete => {
-            if (self.used == self.request_buffer.len) {
+            if (self.readTooSmall(self.request_buffer.len - self.used)) {
                 return self.reject(.request_header_fields_too_large, true);
             }
             return .need_more;
@@ -434,8 +581,10 @@ fn parseHead(self: *ServerConn, now: Io.Timestamp) Event {
     self.head_only = if (parsed.head.method) |method| method == .HEAD else false;
     self.head = parsed.head;
     self.body_start = parsed.consumed;
+    self.leftover_start = parsed.consumed;
     self.head_parsed = true;
     self.body_chunked = false;
+    self.external_body = false;
 
     const framing = h1.framing.request(self.version, self.head.headers) catch {
         // The framing is unknown, so a body may still arrive. Signal a drain.
@@ -453,9 +602,6 @@ fn parseHead(self: *ServerConn, now: Io.Timestamp) Event {
             if (self.body_len > self.limits.body_bytes) {
                 return self.reject(.payload_too_large, true);
             }
-            if (self.body_len > self.request_buffer.len - self.body_start) {
-                return self.reject(.payload_too_large, true);
-            }
         },
         .chunked => {
             self.body_len = 0;
@@ -470,25 +616,39 @@ fn parseHead(self: *ServerConn, now: Io.Timestamp) Event {
     }
     self.keep_alive = h1.persistent(self.version, self.head.headers);
 
-    const expect_continue = expectsContinue(self.head.headers) catch
+    self.expect_continue = expectsContinue(self.head.headers) catch
         return self.reject(.expectation_failed, true);
 
-    if (self.used - self.body_start >= self.body_len) return self.completeRequest();
-
-    if (expect_continue and self.version != .@"HTTP/1.0") {
-        self.queueContinue() catch return self.reject(.internal_server_error, false);
-        return .need_more;
+    const arrived = self.used - self.body_start;
+    if (arrived >= self.body_len) {
+        self.leftover_start = self.body_start + self.body_len;
+        self.body_received = self.body_len;
+        self.body_target = self.request_buffer[self.body_start..][0..self.body_len];
+        return self.completeRequest();
     }
 
-    self.phase = .body;
-    self.startPhase(now, self.limits.body_timeout);
-    return .need_more;
+    self.body_received = arrived;
+    self.phase = .app;
+    self.phase_start = null;
+    return .{ .request_head = .{
+        .head = self.head,
+        .body_bytes = self.body_len,
+    } };
 }
 
 fn parseBody(self: *ServerConn) Event {
-    if (self.used - self.body_start >= self.body_len) return self.completeRequest();
-    if (self.used == self.request_buffer.len) return self.reject(.payload_too_large, true);
+    if (self.body_received >= self.body_len) return self.completeRequest();
+    if (self.phase == .body and self.external_body) return .need_more;
+    const free = if (self.body_target.len == 0)
+        self.request_buffer.len - self.used
+    else
+        self.body_target.len - self.body_received;
+    if (self.readTooSmall(free)) return self.reject(.payload_too_large, true);
     return .need_more;
+}
+
+fn readTooSmall(self: *const ServerConn, free: usize) bool {
+    return free == 0 or (self.limits.min_read_bytes != 0 and free < self.limits.min_read_bytes);
 }
 
 fn completeRequest(self: *ServerConn) Event {
@@ -497,7 +657,10 @@ fn completeRequest(self: *ServerConn) Event {
     self.phase_deadline = null;
     return .{ .request = .{
         .head = self.head,
-        .body = self.request_buffer[self.body_start..][0..self.body_len],
+        .body = if (self.body_target.len == 0)
+            self.request_buffer[self.body_start..][0..self.body_len]
+        else
+            self.body_target,
     } };
 }
 
@@ -517,7 +680,8 @@ fn reject(self: *ServerConn, status: Status, drain: bool) Event {
 fn unreadBody(self: *const ServerConn) bool {
     if (!self.head_parsed) return self.used > 0;
     if (self.body_chunked) return true;
-    return self.used - self.body_start < self.body_len;
+    if (self.body_len == 0) return false;
+    return self.body_received < self.body_len or self.leftover_start == self.body_start;
 }
 
 fn queueResponse(
@@ -698,7 +862,7 @@ const TestConn = struct {
             const done = self.conn.sent(slices.head.len + slices.body.len, self.clock.now);
             switch (done) {
                 .more => {},
-                .read, .keep_alive, .close, .close_after_drain => return done,
+                .read, .keep_alive, .close, .close_after_drain, .switched => return done,
             }
         }
     }
@@ -744,9 +908,13 @@ test "a body that arrives in pieces" {
     var t: TestConn = undefined;
     t.init(.{});
 
-    try testing.expectEqual(.need_more, std.meta.activeTag(try t.feed(
+    switch (try t.feed(
         "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhe",
-    )));
+    )) {
+        .request_head => {},
+        else => return error.TestUnexpectedEvent,
+    }
+    _ = t.conn.bufferBody();
 
     const request = try expectRequest(try t.feed("llo"));
     try testing.expectEqualStrings("hello", request.body);
@@ -777,9 +945,13 @@ test "Expect: 100-continue queues the interim response" {
     var t: TestConn = undefined;
     t.init(.{});
 
-    try testing.expectEqual(.need_more, std.meta.activeTag(try t.feed(
+    switch (try t.feed(
         "POST / HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n",
-    )));
+    )) {
+        .request_head => {},
+        else => return error.TestUnexpectedEvent,
+    }
+    _ = t.conn.bufferBody();
 
     try testing.expectEqual(.read, std.meta.activeTag(try t.drain()));
     try testing.expect(mem.startsWith(u8, t.out(), "HTTP/1.1 100 Continue\r\n\r\n"));
@@ -991,9 +1163,13 @@ test "HTTP/1.0 does not receive 100 Continue" {
     var t: TestConn = undefined;
     t.init(.{});
 
-    try testing.expectEqual(.need_more, std.meta.activeTag(try t.feed(
+    switch (try t.feed(
         "POST / HTTP/1.0\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n",
-    )));
+    )) {
+        .request_head => {},
+        else => return error.TestUnexpectedEvent,
+    }
+    _ = t.conn.bufferBody();
     try testing.expectEqual(.more, std.meta.activeTag(try t.drain()));
     try testing.expectEqual(0, t.out().len);
 
@@ -1064,4 +1240,154 @@ test "respond outside a request is an error" {
     var t: TestConn = undefined;
     t.init(.{});
     try testing.expectError(error.InvalidState, t.conn.respond(.{}, ""));
+}
+
+test "a large body goes into application-provided memory" {
+    var t: TestConn = undefined;
+    t.init(.{ .body_bytes = 5 * 1024 * 1024 });
+    t.conn.start(t.clock.now);
+
+    const bytes = "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5242880\r\n\r\nhe";
+    switch (try t.feed(bytes)) {
+        .request_head => |head| try testing.expectEqual(5 * 1024 * 1024, head.body_bytes),
+        else => return error.TestUnexpectedEvent,
+    }
+
+    const memory = try testing.allocator.alloc(u8, 5 * 1024 * 1024);
+    defer testing.allocator.free(memory);
+    var filled: usize = 2;
+    var event = t.conn.acceptBody(memory);
+    while (filled < memory.len) {
+        const dst = t.conn.recvBuffer();
+        const n = @min(dst.len, 1021);
+        @memset(dst[0..n], 'x');
+        event = t.conn.received(n, t.clock.now);
+        filled += n;
+    }
+    switch (event) {
+        .request => |request| {
+            try testing.expectEqual(memory.len, request.body.len);
+            try testing.expectEqual('h', memory[0]);
+            try testing.expectEqual('e', memory[1]);
+            try testing.expectEqual('x', memory[memory.len - 1]);
+        },
+        else => return error.TestUnexpectedEvent,
+    }
+
+    try t.conn.respond(.{ .status = .ok }, "");
+    try testing.expectEqual(.keep_alive, std.meta.activeTag(try t.drain()));
+}
+
+test "a head can be refused without a body sink" {
+    var t: TestConn = undefined;
+    t.init(.{});
+
+    switch (try t.feed(
+        "POST /large HTTP/1.1\r\nHost: x\r\nContent-Length: 500\r\n\r\nxx",
+    )) {
+        .request_head => |head| {
+            try testing.expectEqualStrings("/large", head.head.target);
+            try testing.expectEqual(500, head.body_bytes);
+        },
+        else => return error.TestUnexpectedEvent,
+    }
+
+    try t.conn.respond(.{ .status = .service_unavailable }, "later");
+    try testing.expectEqual(.close_after_drain, std.meta.activeTag(try t.drain()));
+    try testing.expect(mem.startsWith(u8, t.out(), "HTTP/1.1 503 "));
+    try testing.expect(mem.endsWith(u8, t.out(), "\r\n\r\nlater"));
+}
+
+test "101 hands over the stream and its leftover bytes" {
+    var t: TestConn = undefined;
+    t.init(.{});
+    t.conn.start(t.clock.now);
+
+    _ = try expectRequest(try t.feed(
+        "GET /chat HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\n" ++
+            "Upgrade: websocket\r\n\r\nnext protocol",
+    ));
+    try t.conn.switchProtocols(.{ .headers = &.{
+        .{ .name = "Connection", .value = "Upgrade" },
+        .{ .name = "Upgrade", .value = "websocket" },
+    } });
+    try testing.expectEqual(.switched, std.meta.activeTag(try t.drain()));
+    try testing.expectEqualStrings("next protocol", t.conn.remainingInput());
+    try testing.expect(t.conn.deadline() == null);
+
+    t.clock.advance(60 * std.time.ns_per_s);
+    try testing.expectEqual(.none, std.meta.activeTag(t.conn.tick(t.clock.now)));
+    try testing.expectEqual(0, t.conn.recvBuffer().len);
+}
+
+test "a minimum read window rejects a nearly full head" {
+    var t: TestConn = undefined;
+    t.init(.{ .min_read_bytes = 64 });
+
+    var input: [1000]u8 = undefined;
+    @memset(&input, 'A');
+    try expectReject(try t.feed(&input), .request_header_fields_too_large);
+    try testing.expectEqual(.close_after_drain, std.meta.activeTag(try t.drain()));
+    try testing.expect(mem.startsWith(u8, t.out(), "HTTP/1.1 431 "));
+}
+
+test "a minimum read window rejects a default-buffered body" {
+    var t: TestConn = undefined;
+    t.init(.{ .min_read_bytes = 64 });
+
+    switch (try t.feed(
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nxx",
+    )) {
+        .request_head => {},
+        else => return error.TestUnexpectedEvent,
+    }
+    try testing.expectEqual(.need_more, std.meta.activeTag(t.conn.bufferBody()));
+
+    const bytes = [_]u8{'x'} ** 64;
+    try expectReject(try t.feed(&bytes), .payload_too_large);
+    try testing.expectEqual(.close_after_drain, std.meta.activeTag(try t.drain()));
+    try testing.expect(mem.startsWith(u8, t.out(), "HTTP/1.1 413 "));
+}
+
+test "a copied head permits shared field storage" {
+    var shared: [16]Header = undefined;
+    var a: TestConn = undefined;
+    var b: TestConn = undefined;
+    a.init(.{});
+    b.init(.{});
+    a.conn.headers = &shared;
+    b.conn.headers = &shared;
+
+    var target: [64]u8 = undefined;
+    switch (try a.feed(
+        "POST /large HTTP/1.1\r\nHost: x\r\nContent-Length: 500\r\n\r\n",
+    )) {
+        .request_head => |head| {
+            target = undefined;
+            @memcpy(target[0..head.head.target.len], head.head.target);
+        },
+        else => return error.TestUnexpectedEvent,
+    }
+    try a.conn.respond(.{ .status = .payload_too_large }, "");
+    try testing.expectEqual(.close_after_drain, std.meta.activeTag(try a.drain()));
+
+    const request = try expectRequest(try b.feed("GET /next HTTP/1.1\r\nHost: x\r\n\r\n"));
+    try testing.expectEqualStrings("/next", request.head.target);
+    try testing.expectEqualStrings("/large", target[0..6]);
+}
+
+test "an application body buffer that is too small is 413" {
+    var t: TestConn = undefined;
+    t.init(.{});
+
+    switch (try t.feed(
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 500\r\n\r\n",
+    )) {
+        .request_head => {},
+        else => return error.TestUnexpectedEvent,
+    }
+    var small: [10]u8 = undefined;
+    try expectReject(t.conn.acceptBody(&small), .payload_too_large);
+    try testing.expectEqual(.close_after_drain, std.meta.activeTag(try t.drain()));
+    try testing.expect(mem.startsWith(u8, t.out(), "HTTP/1.1 413 "));
 }

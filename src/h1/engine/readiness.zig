@@ -361,6 +361,9 @@ pub fn Server(comptime Waiter: type) type {
         /// Returns true when the read loop must stop.
         fn handleReadEvent(self: *Self, slot: *Slot, event: h1.ServerConn.Event) bool {
             switch (event) {
+                .request_head => {
+                    return self.handleReadEvent(slot, slot.conn.bufferBody());
+                },
                 .need_more => {
                     if (slot.conn.sendSlices().head.len != 0) {
                         slot.state = .write;
@@ -432,6 +435,11 @@ pub fn Server(comptime Waiter: type) type {
                         self.afterKeepAlive(slot, event);
                         return;
                     },
+                    .switched => {
+                        self.finishExchange(slot);
+                        self.closeSlot(slot);
+                        return;
+                    },
                     .close => {
                         self.finishExchange(slot);
                         self.closeSlot(slot);
@@ -448,6 +456,7 @@ pub fn Server(comptime Waiter: type) type {
 
         fn afterKeepAlive(self: *Self, slot: *Slot, event: h1.ServerConn.Event) void {
             switch (event) {
+                .request_head => self.afterKeepAlive(slot, slot.conn.bufferBody()),
                 .request => |request| {
                     if (self.handleRequest(slot, request)) slot.state = .write;
                 },

@@ -106,6 +106,7 @@ pub fn serveIo(
     var event = conn.advance(now(io));
     while (true) {
         switch (event) {
+            .request_head => event = conn.bufferBody(),
             .request => |request| {
                 const done = try handleRequest(
                     io,
@@ -118,7 +119,7 @@ pub fn serveIo(
                 );
                 switch (done) {
                     .keep_alive, .read => event = conn.advance(now(io)),
-                    .close, .close_after_drain => return,
+                    .close, .close_after_drain, .switched => return,
                     .more => unreachable,
                 }
             },
@@ -126,7 +127,7 @@ pub fn serveIo(
                 if (try writePending(io, &conn, writer)) |done| {
                     switch (done) {
                         .read, .keep_alive => event = conn.advance(now(io)),
-                        .close, .close_after_drain => return,
+                        .close, .close_after_drain, .switched => return,
                         .more => unreachable,
                     }
                 } else {
@@ -189,7 +190,7 @@ fn handleRequest(
     };
     if (done) |value| {
         switch (value) {
-            .keep_alive, .close, .close_after_drain => {
+            .keep_alive, .close, .close_after_drain, .switched => {
                 complete(handler, &exchange, arena, config.common.arena_retain_bytes);
             },
             .read, .more => {},

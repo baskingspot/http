@@ -8,6 +8,12 @@ All notable changes to http are recorded here. The format follows
 ### Changed
 
 - `h2.engine.transport.tls.Transport.Options.handshake` now takes reusable `tls.ServerHandshake.ServerConfig`. Accept loops no longer provide placeholder keypairs or random values (baskingspot/tls#168).
+- `h1.ServerConn`: a request head can arrive before an incomplete body.
+  `acceptBody` selects application-owned destination memory; `bufferBody`
+  preserves the old default. `switchProtocols` and `.switched` provide the 101
+  stream handoff with leftover bytes, `min_read_bytes` prevents undersized
+  transport reads, and the lifetime docs pin when header storage may be shared.
+
 - Align the h1/h2 engine foundations: `http.engine.Handler(Exchange)` is the
   shared vtable shape, `http.engine.ResponseOptions` is the common response
   type, and `Config.common` holds the body/arena knobs. Protocol-specific

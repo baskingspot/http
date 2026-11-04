@@ -116,9 +116,12 @@ The engine calls `advance` after a keep-alive response. A pipelined request in
 the buffer is therefore handled without a read. The engine reads into
 `ServerConn.recvBuffer` and writes `ServerConn.sendSlices` in order.
 
-The request buffer holds the whole head and body. A body over `body_bytes` or
-a body that does not fit the request buffer gets 413. A chunked request body
-gets 501.
+The request buffer holds the whole head and, in the default engine, the body.
+`h1.ServerConn` can deliver a head before the body so a direct driver can choose
+the body storage with `acceptBody`. The blocking and readiness engines keep the
+old behavior by calling `bufferBody`; an application sees the same complete
+request. A body over `common.body_bytes` or the chosen destination gets 413. A
+chunked request body gets 501.
 
 HEAD responses keep Content-Length and omit the body. A 204 or 304 response
 omits Content-Length and the body. A 1xx status is not a final response.
