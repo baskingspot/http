@@ -57,6 +57,23 @@ pub const Error = error{
     DuplicateContentLength,
 };
 
+/// The pseudo-header names this version defines (RFC 9113 §8.3, RFC 8441).
+/// A future extension name is `UnknownPseudo`, which is what the current
+/// validation requires for undefined pseudo-headers.
+const Pseudo = enum {
+    method,
+    scheme,
+    authority,
+    path,
+    protocol,
+    status,
+};
+
+fn pseudoFromName(name: []const u8) ?Pseudo {
+    if (name.len < 2 or name[0] != ':') return null;
+    return std.meta.stringToEnum(Pseudo, name[1..]);
+}
+
 pub const RequestHead = struct {
     /// The common method, or null when the token is not one of them.
     method: ?Method,
@@ -90,29 +107,34 @@ pub fn request(fields: Headers) Error!RequestHead {
         try validateValue(field.value);
         if (field.name.len != 0 and field.name[0] == ':') {
             if (seen_regular) return error.PseudoAfterField;
-            try validatePseudoName(field.name);
-            if (mem.eql(u8, field.name, ":method")) {
-                if (method != null) return error.DuplicatePseudo;
-                if (!validToken(field.value)) return error.InvalidMethod;
-                method = field.value;
-            } else if (mem.eql(u8, field.name, ":scheme")) {
-                if (scheme != null) return error.DuplicatePseudo;
-                if (!validScheme(field.value)) return error.InvalidScheme;
-                scheme = field.value;
-            } else if (mem.eql(u8, field.name, ":authority")) {
-                if (authority != null) return error.DuplicatePseudo;
-                if (field.value.len == 0) return error.InvalidAuthority;
-                authority = field.value;
-            } else if (mem.eql(u8, field.name, ":path")) {
-                if (path != null) return error.DuplicatePseudo;
-                if (field.value.len == 0) return error.InvalidPath;
-                path = field.value;
-            } else if (mem.eql(u8, field.name, ":protocol")) {
-                if (protocol != null) return error.DuplicatePseudo;
-                if (!validToken(field.value)) return error.InvalidProtocol;
-                protocol = field.value;
-            } else {
-                return error.UnknownPseudo;
+            const pseudo = pseudoFromName(field.name) orelse return error.UnknownPseudo;
+            switch (pseudo) {
+                .method => {
+                    if (method != null) return error.DuplicatePseudo;
+                    if (!validToken(field.value)) return error.InvalidMethod;
+                    method = field.value;
+                },
+                .scheme => {
+                    if (scheme != null) return error.DuplicatePseudo;
+                    if (!validScheme(field.value)) return error.InvalidScheme;
+                    scheme = field.value;
+                },
+                .authority => {
+                    if (authority != null) return error.DuplicatePseudo;
+                    if (field.value.len == 0) return error.InvalidAuthority;
+                    authority = field.value;
+                },
+                .path => {
+                    if (path != null) return error.DuplicatePseudo;
+                    if (field.value.len == 0) return error.InvalidPath;
+                    path = field.value;
+                },
+                .protocol => {
+                    if (protocol != null) return error.DuplicatePseudo;
+                    if (!validToken(field.value)) return error.InvalidProtocol;
+                    protocol = field.value;
+                },
+                .status => return error.UnknownPseudo,
             }
         } else {
             try validateFieldName(field.name);
@@ -200,8 +222,8 @@ pub fn response(fields: Headers) Error!ResponseHead {
         try validateValue(field.value);
         if (field.name.len != 0 and field.name[0] == ':') {
             if (seen_regular) return error.PseudoAfterField;
-            try validatePseudoName(field.name);
-            if (!mem.eql(u8, field.name, ":status")) return error.UnknownPseudo;
+            const pseudo = pseudoFromName(field.name) orelse return error.UnknownPseudo;
+            if (pseudo != .status) return error.UnknownPseudo;
             if (status != null) return error.DuplicatePseudo;
             status = try parseStatus(field.value);
         } else {
@@ -218,13 +240,6 @@ pub fn response(fields: Headers) Error!ResponseHead {
         .status = status orelse return error.MissingPseudo,
         .headers = .{ .items = fields.items[regular_start..] },
     };
-}
-
-fn validatePseudoName(name: []const u8) Error!void {
-    if (name.len < 2) return error.UnknownPseudo;
-    for (name[1..]) |byte| {
-        if (!isLowerTchar(byte)) return error.UnknownPseudo;
-    }
 }
 
 fn validateFieldName(name: []const u8) Error!void {
