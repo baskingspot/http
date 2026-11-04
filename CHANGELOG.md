@@ -8,11 +8,12 @@ All notable changes to http are recorded here. The format follows
 ### Added
 
 - `engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
-  connection at a time; `serve` drives one stream. A handler formats a response
-  body into per-connection scratch. The connection machine handles parsing,
-  framing, keep-alive, pipelining, and policy responses. Every timeout is zero:
-  a blocking syscall cannot enforce the connection deadlines. Evented engines
-  are separate.
+  connection at a time; `serve` drives one stream. The handler is a comptime
+  type with `handle` and optional `onError`; there is no function pointer or
+  context value. A handler formats a response body into per-connection scratch.
+  The connection machine handles parsing, framing, keep-alive, pipelining, and
+  policy responses. Every timeout is zero: a blocking syscall cannot enforce
+  the connection deadlines. Evented engines are separate.
 
 - `Status`: the status codes as an open enum. Named codes are constants; any
   other three-digit code is still a value. `Status.code()`, `Status.class()`,

@@ -31,7 +31,7 @@ const TestConfig = struct {
 const Server = struct {
     io: Io,
     listener: *Io.net.Server,
-    handler: engine.Handler,
+    handler: *TestApp,
     config: engine.Config,
     result: ?anyerror = null,
 
@@ -41,7 +41,7 @@ const Server = struct {
             return;
         };
         defer stream.close(self.io);
-        engine.serve(self.io, stream, self.handler, self.config) catch |err| {
+        engine.serve(TestApp, self.io, stream, self.handler, self.config) catch |err| {
             self.result = err;
         };
     }
@@ -51,11 +51,13 @@ const Harness = struct {
     io: Io,
     listener: Io.net.Server,
     address: Io.net.IpAddress,
+    handler: TestApp = .{},
     server: Server,
     thread: std.Thread,
 
-    fn init(self: *Harness, handler: engine.Handler, config: engine.Config) !void {
+    fn init(self: *Harness, config: engine.Config) !void {
         self.io = testing.io;
+        self.handler = .{};
         const address = try Io.net.IpAddress.parseLiteral("127.0.0.1:0");
         self.listener = try address.listen(self.io, .{
             .mode = .stream,
@@ -66,7 +68,7 @@ const Harness = struct {
         self.server = .{
             .io = self.io,
             .listener = &self.listener,
-            .handler = handler,
+            .handler = &self.handler,
             .config = config,
         };
         self.thread = try std.Thread.spawn(.{}, Server.run, .{&self.server});
@@ -136,33 +138,29 @@ const Client = struct {
     }
 };
 
-fn testHandler(_: ?*anyopaque, exchange: *engine.Exchange) anyerror!void {
-    const target = exchange.request.head.target;
-    if (std.mem.eql(u8, target, "/204")) {
-        try exchange.respond(.{ .status = .no_content }, "");
-        return;
-    }
-    if (std.mem.eql(u8, target, "/304")) {
-        try exchange.respond(.{ .status = .not_modified }, "");
-        return;
-    }
+const TestApp = struct {
+    pub fn handle(_: *TestApp, exchange: *engine.Exchange) anyerror!void {
+        const target = exchange.request.head.target;
+        if (std.mem.eql(u8, target, "/204")) {
+            try exchange.respond(.{ .status = .no_content }, "");
+            return;
+        }
+        if (std.mem.eql(u8, target, "/304")) {
+            try exchange.respond(.{ .status = .not_modified }, "");
+            return;
+        }
 
-    const body = try std.fmt.bufPrint(
-        exchange.response_body,
-        "{s} {d}\n",
-        .{ target, exchange.request.body.len },
-    );
-    try exchange.respond(.{ .status = .ok, .content_type = "text/plain" }, body);
-}
-
-const test_handler: engine.Handler = .{
-    .context = null,
-    .handle = testHandler,
-    .on_error = null,
+        const body = try std.fmt.bufPrint(
+            exchange.response_body,
+            "{s} {d}\n",
+            .{ target, exchange.request.body.len },
+        );
+        try exchange.respond(.{ .status = .ok, .content_type = "text/plain" }, body);
+    }
 };
 
 fn startTest(storage: *TestConfig, harness: *Harness, body_bytes: usize) !void {
-    try harness.init(test_handler, storage.config(body_bytes));
+    try harness.init(storage.config(body_bytes));
 }
 
 test "keep-alive and pipelined requests" {

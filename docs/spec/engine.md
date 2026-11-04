@@ -29,13 +29,29 @@ The accept loop handles these errors:
 - `Canceled` returns.
 - Any other error returns.
 
-`run` reports a connection error through `Handler.on_error`. It then accepts
-the next connection.
+`run` reports a connection error through `Handler.onError` when the handler
+provides it. It then accepts the next connection.
 
 ## Handler
 
-`Handler` has a context, a `handle` function, and an `on_error` function. The
-engine calls `handle` with an `Exchange`. The exchange holds:
+A handler is a comptime type. The engine calls `Handler.handle` with an
+`Exchange`. The type must provide:
+
+```zig
+pub fn handle(self: *Handler, exchange: *Exchange) anyerror!void
+```
+
+It may provide:
+
+```zig
+pub fn onError(self: *Handler, err: anyerror) void
+```
+
+`run` and `serve` take the handler type and a pointer to the handler value.
+There is no function pointer or `?*anyopaque` context. The handler type is
+known when the engine is compiled.
+
+The exchange holds:
 
 - The connection machine.
 - The complete request.
@@ -47,7 +63,7 @@ A handler formats the body there and calls `exchange.respond`.
 
 If `handle` returns an error before it responds, the engine queues a 500. If it
 returns an error after it responds, the engine sends that response. The engine
-reports the error through `on_error` in both cases.
+reports the error through `onError` in both cases.
 
 The handler is synchronous. A deferred response is not supported.
 

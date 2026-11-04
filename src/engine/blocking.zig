@@ -39,20 +39,23 @@ pub const Exchange = struct {
     }
 };
 
-pub const Handler = struct {
-    context: ?*anyopaque,
-    /// Respond with `exchange.respond` before returning. A returned error
-    /// queues a 500 when the handler did not already respond.
-    handle: *const fn (context: ?*anyopaque, exchange: *Exchange) anyerror!void,
-    /// Reports handler errors and connection errors. The engine never logs.
-    on_error: ?*const fn (context: ?*anyopaque, err: anyerror) void,
-};
+// A handler type must provide:
+//
+//   pub fn handle(self: *Handler, exchange: *Exchange) anyerror!void
+//
+// It may also provide:
+//
+//   pub fn onError(self: *Handler, err: anyerror) void
+//
+// The engine takes the type at comptime; there is no function pointer or
+// context value.
 
 /// Accept connections until an unrecoverable accept error.
 pub fn run(
+    comptime Handler: type,
     io: Io,
     listener: *Io.net.Server,
-    handler: Handler,
+    handler: *Handler,
     config: Config,
 ) !void {
     while (true) {
@@ -72,8 +75,8 @@ pub fn run(
         };
         defer stream.close(io);
 
-        serve(io, stream, handler, config) catch |err| {
-            if (handler.on_error) |report| report(handler.context, err);
+        serve(Handler, io, stream, handler, config) catch |err| {
+            report(Handler, handler, err);
             continue;
         };
     }
@@ -81,9 +84,10 @@ pub fn run(
 
 /// Serve one connection until it closes.
 pub fn serve(
+    comptime Handler: type,
     io: Io,
     stream: Io.net.Stream,
-    handler: Handler,
+    handler: *Handler,
     config: Config,
 ) !void {
     // `readVec` writes straight into the ServerConn request buffer. A nonzero
@@ -113,7 +117,15 @@ pub fn serve(
     while (true) {
         switch (event) {
             .request => |request| {
-                const done = try handleRequest(io, &conn, &writer, handler, config, request);
+                const done = try handleRequest(
+                    Handler,
+                    io,
+                    &conn,
+                    &writer,
+                    handler,
+                    config,
+                    request,
+                );
                 switch (done) {
                     .keep_alive, .read => event = conn.advance(now(io)),
                     .close, .close_after_drain => return,
@@ -157,10 +169,11 @@ pub fn serve(
 }
 
 fn handleRequest(
+    comptime Handler: type,
     io: Io,
     conn: *h1.ServerConn,
     writer: *Io.net.Stream.Writer,
-    handler: Handler,
+    handler: *Handler,
     config: Config,
     request: h1.ServerConn.Request,
 ) !h1.ServerConn.Done {
@@ -169,8 +182,8 @@ fn handleRequest(
         .request = request,
         .response_body = config.response_body_buffer,
     };
-    handler.handle(handler.context, &exchange) catch |err| {
-        if (handler.on_error) |report| report(handler.context, err);
+    handler.handle(&exchange) catch |err| {
+        report(Handler, handler, err);
         if (conn.sendSlices().head.len == 0) {
             exchange.respond(.{ .status = .internal_server_error }, "") catch
                 return error.NoResponse;
@@ -178,6 +191,10 @@ fn handleRequest(
     };
 
     return (try writePending(io, conn, writer)) orelse error.NoResponse;
+}
+
+fn report(comptime Handler: type, handler: *Handler, err: anyerror) void {
+    if (@hasDecl(Handler, "onError")) handler.onError(err);
 }
 
 fn writePending(
@@ -244,14 +261,16 @@ const TestClient = struct {
     }
 };
 
-fn testHandle(_: ?*anyopaque, exchange: *Exchange) anyerror!void {
-    const body = "hello\n";
-    @memcpy(exchange.response_body[0..body.len], body);
-    try exchange.respond(
-        .{ .status = .ok, .content_type = "text/plain" },
-        exchange.response_body[0..body.len],
-    );
-}
+const TestHandler = struct {
+    pub fn handle(_: *TestHandler, exchange: *Exchange) anyerror!void {
+        const body = "hello\n";
+        @memcpy(exchange.response_body[0..body.len], body);
+        try exchange.respond(
+            .{ .status = .ok, .content_type = "text/plain" },
+            exchange.response_body[0..body.len],
+        );
+    }
+};
 
 test "serve one blocking connection" {
     const address = try Io.net.IpAddress.parseLiteral("127.0.0.1:0");
@@ -271,11 +290,8 @@ test "serve one blocking connection" {
     var headers: [16]Header = undefined;
     var response_head: [256]u8 = undefined;
     var response_body: [256]u8 = undefined;
-    serve(testing.io, stream, .{
-        .context = null,
-        .handle = testHandle,
-        .on_error = null,
-    }, .{
+    var test_handler: TestHandler = .{};
+    serve(TestHandler, testing.io, stream, &test_handler, .{
         .request_buffer = &request_buffer,
         .headers = &headers,
         .response_head_buffer = &response_head,

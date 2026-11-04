@@ -32,12 +32,9 @@ pub fn main(init: std.process.Init) !void {
     var headers: [64]http.Header = undefined;
     var response_head: [1024]u8 = undefined;
     var response_body: [512]u8 = undefined;
+    var app: App = .{};
 
-    try engine.run(io, &listener, .{
-        .context = null,
-        .handle = handle,
-        .on_error = report,
-    }, .{
+    try engine.run(App, io, &listener, &app, .{
         .request_buffer = &request_buffer,
         .headers = &headers,
         .response_head_buffer = &response_head,
@@ -46,36 +43,38 @@ pub fn main(init: std.process.Init) !void {
     });
 }
 
-fn handle(_: ?*anyopaque, exchange: *engine.Exchange) anyerror!void {
-    const head = exchange.request.head;
-    const target = head.target;
+const App = struct {
+    pub fn handle(_: *App, exchange: *engine.Exchange) anyerror!void {
+        const head = exchange.request.head;
+        const target = head.target;
 
-    if (target.len > max_target) {
-        try exchange.respond(.{ .status = .uri_too_long }, "request target too long\n");
-        return;
+        if (target.len > max_target) {
+            try exchange.respond(.{ .status = .uri_too_long }, "request target too long\n");
+            return;
+        }
+        if (http.h1.targetForm(head.method, target) != .origin) {
+            try exchange.respond(.{ .status = .bad_request }, "unsupported request-target form\n");
+            return;
+        }
+
+        const is_root = std.mem.eql(u8, target, "/");
+        const method_name = if (head.method) |method| method.token() else "UNKNOWN";
+        const body = if (is_root)
+            try std.fmt.bufPrint(
+                exchange.response_body,
+                "{s} {s} ({d}-byte body)\n",
+                .{ method_name, target, exchange.request.body.len },
+            )
+        else
+            "not found\n";
+
+        try exchange.respond(.{
+            .status = if (is_root) .ok else .not_found,
+            .content_type = "text/plain; charset=utf-8",
+        }, body);
     }
-    if (http.h1.targetForm(head.method, target) != .origin) {
-        try exchange.respond(.{ .status = .bad_request }, "unsupported request-target form\n");
-        return;
+
+    pub fn onError(_: *App, err: anyerror) void {
+        print("http1-server: {s}\n", .{@errorName(err)});
     }
-
-    const is_root = std.mem.eql(u8, target, "/");
-    const method_name = if (head.method) |method| method.token() else "UNKNOWN";
-    const body = if (is_root)
-        try std.fmt.bufPrint(
-            exchange.response_body,
-            "{s} {s} ({d}-byte body)\n",
-            .{ method_name, target, exchange.request.body.len },
-        )
-    else
-        "not found\n";
-
-    try exchange.respond(.{
-        .status = if (is_root) .ok else .not_found,
-        .content_type = "text/plain; charset=utf-8",
-    }, body);
-}
-
-fn report(_: ?*anyopaque, err: anyerror) void {
-    print("http1-server: {s}\n", .{@errorName(err)});
-}
+};
