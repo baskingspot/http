@@ -52,7 +52,7 @@ pub const Headers = struct {
     /// Each field line is yielded separately. `Set-Cookie` needs this; so does
     /// anything that distinguishes "one field with a comma" from "two fields".
     pub fn values(self: Headers, name: []const u8) Values {
-        return .{ .headers = self, .name = name };
+        return .init(self, name);
     }
 
     /// True when any line named `name` contains `token` as a list element.
@@ -71,7 +71,11 @@ pub const Headers = struct {
 pub const Values = struct {
     headers: Headers,
     name: []const u8,
-    index: u32 = 0,
+    index: u32,
+
+    pub fn init(headers: Headers, name: []const u8) Values {
+        return .{ .headers = headers, .name = name, .index = 0 };
+    }
 
     pub fn next(self: *Values) ?[]const u8 {
         while (@as(usize, self.index) < self.headers.items.len) {

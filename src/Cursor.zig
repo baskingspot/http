@@ -21,12 +21,12 @@ const Cursor = @This();
 /// The bytes being read. Borrowed; the cursor owns nothing.
 buf: []const u8,
 /// The offset of the next byte to read.
-pos: u32 = 0,
+pos: u32,
 
 /// A cursor at the start of `buf`. `buf` must be shorter than 4 GiB.
 pub fn init(buf: []const u8) Cursor {
     assert(buf.len <= math.maxInt(u32));
-    return .{ .buf = buf };
+    return .{ .buf = buf, .pos = 0 };
 }
 
 pub fn atEnd(self: *const Cursor) bool {

@@ -42,10 +42,10 @@ pub const DynamicTable = struct {
     /// Caller-owned metadata; `slotCount` values.
     slots: []Slot,
     /// Ring index of the oldest entry.
-    head: usize = 0,
-    count: usize = 0,
+    head: usize,
+    count: usize,
     /// Sum of every live entry's size, overhead included (§4.1).
-    size: usize = 0,
+    size: usize,
     /// The current maximum, from the protocol settings and size updates.
     max_size: usize,
     /// Bottom of the used region. Everything below it is free.
@@ -59,7 +59,15 @@ pub const DynamicTable = struct {
     pub fn init(buf: []u8, slots: []Slot) DynamicTable {
         assert(buf.len <= math.maxInt(u32));
         assert(slots.len >= slotCount(buf.len));
-        return .{ .buf = buf, .slots = slots, .max_size = buf.len, .top = buf.len };
+        return .{
+            .buf = buf,
+            .slots = slots,
+            .head = 0,
+            .count = 0,
+            .size = 0,
+            .max_size = buf.len,
+            .top = buf.len,
+        };
     }
 
     /// The bytes the live entries occupy, which is their accounting size less

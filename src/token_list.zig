@@ -26,7 +26,11 @@ pub fn contains(field: []const u8, token: []const u8) bool {
 
 pub const Iterator = struct {
     field: []const u8,
-    pos: u32 = 0,
+    pos: u32,
+
+    pub fn init(field: []const u8) Iterator {
+        return .{ .field = field, .pos = 0 };
+    }
 
     pub fn next(self: *Iterator) ?[]const u8 {
         while (@as(usize, self.pos) <= self.field.len) {
@@ -42,7 +46,7 @@ pub const Iterator = struct {
 };
 
 pub fn iterator(field: []const u8) Iterator {
-    return .{ .field = field };
+    return .init(field);
 }
 
 /// The shape the tests compare against: split, trim, skip empties.

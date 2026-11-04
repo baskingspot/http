@@ -44,7 +44,7 @@ pub const Error = error{
 };
 
 pub fn summarize(headers: Headers) Error!Summary {
-    var iterator: Iterator = .{ .headers = headers };
+    var iterator: Iterator = .init(headers);
     var last: ?Coding = null;
     while (try iterator.next()) |coding| last = coding;
 
@@ -64,11 +64,22 @@ pub fn summarize(headers: Headers) Error!Summary {
 /// appears: no parameters and no repetition.
 pub const Iterator = struct {
     headers: Headers,
-    header_index: u32 = 0,
-    line: []const u8 = "",
-    pos: usize = 0,
-    present: bool = false,
-    seen_chunked: bool = false,
+    header_index: u32,
+    line: []const u8,
+    pos: usize,
+    present: bool,
+    seen_chunked: bool,
+
+    pub fn init(headers: Headers) Iterator {
+        return .{
+            .headers = headers,
+            .header_index = 0,
+            .line = "",
+            .pos = 0,
+            .present = false,
+            .seen_chunked = false,
+        };
+    }
 
     pub fn next(self: *Iterator) Error!?Coding {
         while (true) {

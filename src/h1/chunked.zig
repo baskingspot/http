@@ -54,15 +54,20 @@ pub const Step = struct {
 /// A resumable chunked body decoder. The state is caller-owned and survives
 /// reads; the trailer storage is caller-owned and must outlive the decoder.
 pub const Decoder = struct {
-    state: State = .size,
-    remaining: u64 = 0,
+    state: State,
+    remaining: u64,
     trailer_storage: []Header,
-    trailer_state: h1.SearchState = .init,
+    trailer_state: h1.SearchState,
 
     const State = enum { size, data, data_crlf, trailers, done };
 
     pub fn init(trailer_storage: []Header) Decoder {
-        return .{ .trailer_storage = trailer_storage };
+        return .{
+            .state = .size,
+            .remaining = 0,
+            .trailer_storage = trailer_storage,
+            .trailer_state = .init,
+        };
     }
 
     pub fn isDone(self: *const Decoder) bool {

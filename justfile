@@ -31,10 +31,11 @@ bench *ARGS:
 bench-smoke:
     zig build bench -- --benchtime=8x --count=1 --no-env
 
-[doc("Lint Zig, Nix, Markdown, the workflows, and this justfile: ziglint, zig fmt, nix fmt, oxfmt, actionlint, zizmor, and just --fmt")]
+[doc("Lint Zig, Nix, Markdown, the workflows, and this justfile: ziglint-0-16, the ast-grep house rules, zig fmt, nix fmt, oxfmt, actionlint, zizmor, and just --fmt")]
 [group("lint")]
 lint:
-    ziglint
+    ziglint-0-16
+    baskingspot-lint src
     zig fmt --check src tests bench examples build.zig build.zig.zon
     nix fmt -- --ci
     oxfmt --check README.md AGENTS.md .github

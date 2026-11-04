@@ -185,15 +185,15 @@ test "truncation is distinct from an oversized value" {
     var cursor: Cursor = .init(&.{0x1f});
     try testing.expectError(error.Truncated, decode(&cursor, 5));
 
-    cursor = .{ .buf = &.{ 0x1f, 0x80 } };
+    cursor = .init(&.{ 0x1f, 0x80 });
     try testing.expectError(error.Truncated, decode(&cursor, 5));
 
     // Zero-payload continuation octets can be repeated without moving value.
-    cursor = .{ .buf = &.{ 0x1f, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00 } };
+    cursor = .init(&.{ 0x1f, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00 });
     try testing.expectError(error.TooLarge, decode(&cursor, 5));
 
     // A group at shift 28 that overflows u32.
-    cursor = .{ .buf = &.{ 0x1f, 0x80, 0x80, 0x80, 0x80, 0x10 } };
+    cursor = .init(&.{ 0x1f, 0x80, 0x80, 0x80, 0x80, 0x10 });
     try testing.expectError(error.TooLarge, decode(&cursor, 5));
 }
 
