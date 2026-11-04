@@ -35,7 +35,7 @@ the next connection.
 ## Handler
 
 `Handler` has a context, a `handle` function, and an `on_error` function. The
-engine calls `handle` with a `Call`. The call holds:
+engine calls `handle` with an `Exchange`. The exchange holds:
 
 - The connection machine.
 - The complete request.
@@ -43,7 +43,7 @@ engine calls `handle` with a `Call`. The call holds:
 
 The request body borrows the request buffer. Use it before the response
 completes. The response body scratch stays valid until the response completes.
-A handler formats the body there and calls `conn.respond`.
+A handler formats the body there and calls `exchange.respond`.
 
 If `handle` returns an error before it responds, the engine queues a 500. If it
 returns an error after it responds, the engine sends that response. The engine

@@ -22,20 +22,28 @@ pub const Config = struct {
     body_bytes: usize = 64 * 1024,
 };
 
-/// One request handed to the application.
-pub const Call = struct {
+/// One request/response exchange handed to the application.
+pub const Exchange = struct {
     conn: *h1.ServerConn,
     request: h1.ServerConn.Request,
     /// The per-connection response body scratch. A slice of this buffer stays
     /// valid until the response completes.
     response_body: []u8,
+
+    pub fn respond(
+        self: *Exchange,
+        options: h1.ServerConn.ResponseOptions,
+        body: []const u8,
+    ) h1.ServerConn.RespondError!void {
+        return self.conn.respond(options, body);
+    }
 };
 
 pub const Handler = struct {
     context: ?*anyopaque,
-    /// Respond with `call.conn.respond` before returning. A returned error
+    /// Respond with `exchange.respond` before returning. A returned error
     /// queues a 500 when the handler did not already respond.
-    handle: *const fn (context: ?*anyopaque, call: *Call) anyerror!void,
+    handle: *const fn (context: ?*anyopaque, exchange: *Exchange) anyerror!void,
     /// Reports handler errors and connection errors. The engine never logs.
     on_error: ?*const fn (context: ?*anyopaque, err: anyerror) void,
 };
@@ -156,15 +164,15 @@ fn handleRequest(
     config: Config,
     request: h1.ServerConn.Request,
 ) !h1.ServerConn.Done {
-    var call: Call = .{
+    var exchange: Exchange = .{
         .conn = conn,
         .request = request,
         .response_body = config.response_body_buffer,
     };
-    handler.handle(handler.context, &call) catch |err| {
+    handler.handle(handler.context, &exchange) catch |err| {
         if (handler.on_error) |report| report(handler.context, err);
         if (conn.sendSlices().head.len == 0) {
-            conn.respond(.{ .status = .internal_server_error }, "") catch
+            exchange.respond(.{ .status = .internal_server_error }, "") catch
                 return error.NoResponse;
         }
     };
@@ -236,12 +244,12 @@ const TestClient = struct {
     }
 };
 
-fn testHandle(_: ?*anyopaque, call: *Call) anyerror!void {
+fn testHandle(_: ?*anyopaque, exchange: *Exchange) anyerror!void {
     const body = "hello\n";
-    @memcpy(call.response_body[0..body.len], body);
-    try call.conn.respond(
+    @memcpy(exchange.response_body[0..body.len], body);
+    try exchange.respond(
         .{ .status = .ok, .content_type = "text/plain" },
-        call.response_body[0..body.len],
+        exchange.response_body[0..body.len],
     );
 }
 

@@ -46,16 +46,16 @@ pub fn main(init: std.process.Init) !void {
     });
 }
 
-fn handle(_: ?*anyopaque, call: *engine.Call) anyerror!void {
-    const head = call.request.head;
+fn handle(_: ?*anyopaque, exchange: *engine.Exchange) anyerror!void {
+    const head = exchange.request.head;
     const target = head.target;
 
     if (target.len > max_target) {
-        try call.conn.respond(.{ .status = .uri_too_long }, "request target too long\n");
+        try exchange.respond(.{ .status = .uri_too_long }, "request target too long\n");
         return;
     }
     if (http.h1.targetForm(head.method, target) != .origin) {
-        try call.conn.respond(.{ .status = .bad_request }, "unsupported request-target form\n");
+        try exchange.respond(.{ .status = .bad_request }, "unsupported request-target form\n");
         return;
     }
 
@@ -63,14 +63,14 @@ fn handle(_: ?*anyopaque, call: *engine.Call) anyerror!void {
     const method_name = if (head.method) |method| method.token() else "UNKNOWN";
     const body = if (is_root)
         try std.fmt.bufPrint(
-            call.response_body,
+            exchange.response_body,
             "{s} {s} ({d}-byte body)\n",
-            .{ method_name, target, call.request.body.len },
+            .{ method_name, target, exchange.request.body.len },
         )
     else
         "not found\n";
 
-    try call.conn.respond(.{
+    try exchange.respond(.{
         .status = if (is_root) .ok else .not_found,
         .content_type = "text/plain; charset=utf-8",
     }, body);
