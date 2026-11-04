@@ -101,3 +101,7 @@ EOF end reuse. A 1xx head is not final and must not reset the connection.
 
 No client code should grow an allocator. If a caller wants an owned response,
 the adapter can offer one above `ClientConn`.
+
+Status 2026-11-05: `ClientConn` implements response heads, Content-Length,
+chunked, close-delimited, no-body, interim 1xx, keep-alive leftovers, and the
+body limit. The blocking adapter and Go interop lane are next.

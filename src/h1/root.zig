@@ -47,6 +47,7 @@ pub const Version = version_mod.Version;
 const effectiveVersion = version_mod.effective;
 pub const chunked = @import("chunked.zig");
 pub const ServerConn = @import("ServerConn.zig");
+pub const ClientConn = @import("ClientConn.zig");
 pub const engine = @import("engine/root.zig");
 pub const framing = @import("framing.zig");
 pub const persistent = @import("persistence.zig").persistent;
@@ -1139,5 +1140,6 @@ test {
     _ = chunked;
     _ = Writer;
     _ = ServerConn;
+    _ = ClientConn;
     _ = engine;
 }

@@ -7,6 +7,11 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `h1.ClientConn`: a sans-I/O HTTP/1 response machine for one request at a
+  time. It parses response heads, Content-Length, chunked, and close-delimited
+  bodies, preserves pipelined leftovers, and returns borrowed body slices
+  without allocating. The caller writes the request with `h1.Writer`.
+
 - `h1.engine.poll`, `h1.engine.epoll`, and `h1.engine.kqueue`: HTTP/1
   readiness engines. Poll and epoll are Linux; kqueue is macOS. They share
   fixed slots, nonblocking descriptors, accept backoff, connection deadlines,

@@ -74,6 +74,12 @@ ready to depend on.
   request body, keeps the leftover for a pipelined request, queues policy
   errors, and writes a response through a caller head buffer. It owns no
   memory and does no I/O.
+- `h1.ClientConn`: the sans-I/O response machine for one request at a time.
+  The caller writes the request with `h1.Writer`, feeds response bytes, and
+  consumes borrowed body slices. It handles Content-Length, chunked, and
+  close-delimited bodies, interim 1xx responses, keep-alive leftovers, and a
+  caller-owned body limit. It allocates nothing and does not own a socket.
+
 - `h1.engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
   connection at a time; `serve` drives one stream. The handler formats a
   response body with the exchange arena, and the connection machine handles
