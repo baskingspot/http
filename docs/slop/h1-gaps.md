@@ -128,21 +128,14 @@ Ordered by what blocks a usable HTTP/1.1 message parser.
 
 | Area | RFC 9112 | State | What is missing |
 | --- | --- | --- | --- |
-| Request-target form | §3.2 | chars only | origin / absolute / authority / asterisk. Deliberately routing policy today; revisit when a router consumes it. |
-| Host rules | §3.2 | not enforced | Exactly one Host in an HTTP/1.1 request. Server policy today. |
-| Interim responses | RFC 9110 §15.2 | caller loop | `parseResponse` returns the first head. `Status.class()` identifies 1xx, but the contract for "keep reading for the final response" is not documented. |
 
 The H1 message path is in place: head parsing, standalone field sections,
 Transfer-Encoding, the RFC 9112 §6.3 body decision, chunked decoding with
-trailers, and the §9.3 persistence rule. The examples use the chunked decoder
-for requests, and the io_uring example decodes a chunked response. The
-picohttpparser case table is ported in `tests/h1_corpus.zig`, with the
-deliberate divergences marked. The only remaining items are server policy.
+trailers, the §9.3 persistence rule, target-form classification, and the single
+Host helper. The examples use the chunked decoder for requests, and the io_uring
+example decodes a chunked response. The picohttpparser case table is ported in
+`tests/h1_corpus.zig`, with the deliberate divergences marked. The writer has a
+benchmark in `bench/writer_bench.zig`.
 
-## Recommended order
-
-Add policy helpers only if a consumer asks: request-target forms, Host
-uniqueness, interim responses.
-
-The H1 message path and the conformance corpus are complete. A protocol writer
-is the next feature, not a parser gap.
+No parser gaps remain. A protocol writer beyond `h1.Writer` is a separate
+feature, not a parser gap.

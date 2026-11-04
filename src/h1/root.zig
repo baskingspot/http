@@ -136,6 +136,69 @@ pub const ParsedResponse = struct {
     consumed: u32,
 };
 
+/// The request-target forms RFC 9112 §3.2 defines.
+pub const TargetForm = enum {
+    /// `absolute-path [ "?" query ]`, for an origin server.
+    origin,
+    /// An absolute URI, for a proxy.
+    absolute,
+    /// `uri-host ":" port`, for CONNECT.
+    authority,
+    /// `*`, for OPTIONS.
+    asterisk,
+};
+
+/// Classify the request-target by the form RFC 9112 §3.2 allows for `method`.
+/// Returns null when the bytes do not fit an allowed form. This is syntax only:
+/// it does not resolve the authority or normalize the path.
+pub fn targetForm(method: ?Method, target: []const u8) ?TargetForm {
+    if (target.len == 0) return null;
+
+    if (method == .CONNECT) {
+        return if (isAuthorityForm(target)) .authority else null;
+    }
+    if (target[0] == '/') return .origin;
+    if (target.len == 1 and target[0] == '*') {
+        return if (method == .OPTIONS) .asterisk else null;
+    }
+    if (mem.find(u8, target, "://") != null) return .absolute;
+    return null;
+}
+
+fn isAuthorityForm(target: []const u8) bool {
+    if (target.len == 0) return false;
+
+    const port_start: usize = if (target[0] == '[') blk: {
+        const close = mem.findScalar(u8, target, ']') orelse return false;
+        if (close + 1 >= target.len or target[close + 1] != ':') return false;
+        break :blk close + 2;
+    } else blk: {
+        const colon = mem.findScalarLast(u8, target, ':') orelse return false;
+        if (colon == 0 or colon + 1 >= target.len) return false;
+        // A bare IPv6 address has more than one colon and needs brackets.
+        if (mem.findScalar(u8, target[0..colon], ':') != null) return false;
+        break :blk colon + 1;
+    };
+
+    if (port_start >= target.len) return false;
+    for (target[port_start..]) |byte| {
+        if (byte < '0' or byte > '9') return false;
+    }
+    return true;
+}
+
+pub const HostError = error{DuplicateHost};
+
+/// The single `Host` value, or null when the field is absent. More than one
+/// field line is `error.DuplicateHost`. RFC 9112 §3.2 requires exactly one
+/// Host in an HTTP/1.1 request; the caller applies that rule.
+pub fn host(headers: Headers) HostError!?[]const u8 {
+    var values = headers.values("Host");
+    const first = values.next() orelse return null;
+    if (values.next() != null) return error.DuplicateHost;
+    return first;
+}
+
 /// Parse a request head from `buf`.
 ///
 /// `storage` receives the field lines; the returned `head.headers.items` is
@@ -191,6 +254,10 @@ fn parseRequestInner(buf: []const u8, storage: []Header) Error!ParsedRequest {
 }
 
 /// Parse a response head from `buf`.
+///
+/// A 1xx head is a complete message head. `parseResponse` returns it like any
+/// other; a client that wants the final response calls it again on the
+/// remaining bytes. `Status.class()` identifies the interim class.
 ///
 /// The head borrows `buf` and `storage`; see `ResponseHead`. `state` works as
 /// in `parseRequest`.
@@ -521,6 +588,65 @@ fn parseHeaders(cursor: *Cursor, storage: []Header) Error!Headers {
         storage[@intCast(count)] = .{ .name = name, .value = raw[0..@intCast(value_end)] };
         count += 1;
     }
+}
+
+test "target form: the four RFC 9112 §3.2 forms" {
+    try testing.expectEqual(TargetForm.origin, targetForm(.GET, "/where?q=now").?);
+    try testing.expectEqual(
+        TargetForm.absolute,
+        targetForm(.GET, "http://www.example.org/pub/WWW/TheProject.html").?,
+    );
+    try testing.expectEqual(TargetForm.authority, targetForm(.CONNECT, "www.example.com:80").?);
+    try testing.expectEqual(TargetForm.authority, targetForm(.CONNECT, "[::1]:443").?);
+    try testing.expectEqual(TargetForm.asterisk, targetForm(.OPTIONS, "*").?);
+    try testing.expectEqual(TargetForm.absolute, targetForm(null, "http://example.com/").?);
+
+    try testing.expect(targetForm(.GET, "*") == null);
+    try testing.expect(targetForm(.GET, "www.example.com:80") == null);
+    try testing.expect(targetForm(.CONNECT, "http://example.com/") == null);
+    try testing.expect(targetForm(.CONNECT, "example.com") == null);
+    try testing.expect(targetForm(.CONNECT, "::1:443") == null);
+    try testing.expect(targetForm(.CONNECT, "[::1]") == null);
+    try testing.expect(targetForm(.GET, "") == null);
+}
+
+test "fuzz target form" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var buf: [128]u8 = undefined;
+            const target = buf[0..smith.slice(&buf)];
+
+            _ = targetForm(null, target);
+            _ = targetForm(.CONNECT, target);
+            _ = targetForm(.OPTIONS, target);
+            _ = targetForm(.GET, target);
+        }
+    }.run, .{
+        .corpus = &.{
+            "",
+            "/",
+            "*",
+            "http://example.com/",
+            "example.com:443",
+            "[::1]:443",
+        },
+    });
+}
+
+test "host: absent, single, and duplicate (RFC 9112 §3.2)" {
+    const none: Headers = .{ .items = &.{} };
+    try testing.expect(try host(none) == null);
+
+    const one: Headers = .{ .items = &.{
+        .{ .name = "Host", .value = "example.com" },
+    } };
+    try testing.expectEqualStrings("example.com", (try host(one)).?);
+
+    const two: Headers = .{ .items = &.{
+        .{ .name = "Host", .value = "a.example" },
+        .{ .name = "host", .value = "b.example" },
+    } };
+    try testing.expectError(error.DuplicateHost, host(two));
 }
 
 const typical =

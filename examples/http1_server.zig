@@ -84,6 +84,15 @@ fn serveConnection(io: Io, stream: Io.net.Stream) !void {
         const keep_alive = http.h1.persistent(version, head.headers);
         const method = head.method;
 
+        const host_value = http.h1.host(head.headers) catch {
+            writeError(w, version, .bad_request, "duplicate Host\n") catch return;
+            return;
+        };
+        if (version == .@"HTTP/1.1" and host_value == null) {
+            writeError(w, version, .bad_request, "missing Host\n") catch return;
+            return;
+        }
+
         var target_buffer: [max_target]u8 = undefined;
         if (head.target.len > target_buffer.len) {
             writeError(w, version, .uri_too_long, "request target too long\n") catch return;
@@ -91,6 +100,10 @@ fn serveConnection(io: Io, stream: Io.net.Stream) !void {
         }
         @memcpy(target_buffer[0..head.target.len], head.target);
         const target = target_buffer[0..head.target.len];
+        if (http.h1.targetForm(method, target) != .origin) {
+            writeError(w, version, .bad_request, "unsupported request-target form\n") catch return;
+            return;
+        }
 
         const framing = http.h1.framing.request(version, head.headers) catch |err| {
             const status: http.Status = switch (err) {

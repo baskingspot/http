@@ -42,6 +42,10 @@ All notable changes to http are recorded here. The format follows
 - `h1.persistent`: the RFC 9112 §9.3 connection decision from the version and
   the `Connection` tokens. HTTP/1.1 persists by default; HTTP/1.0 persists
   only with `keep-alive`; `close` wins.
+- `h1.targetForm`: the four request-target forms from RFC 9112 §3.2, classified
+  by the method. The target stays syntax; routing is the caller's.
+- `h1.host`: the single `Host` value, or `error.DuplicateHost` when the field
+  repeats. A missing Host in an HTTP/1.1 request is the caller's 400.
 - `h1.parseFieldSection`: a standalone field section and the trailer parser.
   An empty section is a single CRLF; the returned headers borrow the input and
   the caller's storage.

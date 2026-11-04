@@ -121,10 +121,14 @@ fn serverServe(ctx: *ServerCtx) !void {
         const framing = try http.h1.framing.request(version, parsed.head.headers);
         const method = parsed.head.method;
 
+        const host_value = http.h1.host(parsed.head.headers) catch return error.DuplicateHost;
+        if (version == .@"HTTP/1.1" and host_value == null) return error.MissingHost;
+
         var target_buffer: [max_target]u8 = undefined;
         if (parsed.head.target.len > target_buffer.len) return error.TargetTooLong;
         @memcpy(target_buffer[0..parsed.head.target.len], parsed.head.target);
         const target = target_buffer[0..parsed.head.target.len];
+        if (http.h1.targetForm(method, target) != .origin) return error.UnsupportedTargetForm;
 
         const body_start: usize = parsed.consumed;
         var body_end: usize = body_start;

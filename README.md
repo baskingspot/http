@@ -65,6 +65,9 @@ ready to depend on.
   or `.chunked`; a response adds `.close` and `.tunnel` (RFC 9112 §6.3).
   `h1.persistent` applies the §9.3 connection rule. It rejects TE with CL, TE
   on an HTTP/1.0 message, and a request whose final coding is not `chunked`.
+  `h1.targetForm` classifies the request target as origin, absolute, authority,
+  or asterisk for the method; `h1.host` returns the single Host value or
+  `error.DuplicateHost`.
 - `prefix_int`: HPACK and QPACK prefix integers (RFC 7541 §5.1), shared by
   both. Up to 32 bits, with the representation's tag bits left to the caller.
 - `huffman`: the RFC 7541 Appendix B Huffman code, shared by HPACK and QPACK.
