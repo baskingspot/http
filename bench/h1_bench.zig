@@ -42,9 +42,10 @@ const response =
 pub fn benchmarkRequestTypical(b: *testingx.B) !void {
     const buf = b.blackBox(typical);
     var storage: [16]http.Header = undefined;
+    var state: h1.SearchState = .{};
     var sink: usize = 0;
     while (try b.loop()) {
-        const parsed = try h1.parseRequest(buf, 0, &storage);
+        const parsed = try h1.parseRequest(buf, &state, &storage);
         sink +%= parsed.head.target.len + parsed.head.headers.len();
     }
     b.keepAlive(sink);
@@ -54,9 +55,10 @@ pub fn benchmarkRequestTypical(b: *testingx.B) !void {
 pub fn benchmarkRequestWide(b: *testingx.B) !void {
     const buf = b.blackBox(wide);
     var storage: [32]http.Header = undefined;
+    var state: h1.SearchState = .{};
     var sink: usize = 0;
     while (try b.loop()) {
-        const parsed = try h1.parseRequest(buf, 0, &storage);
+        const parsed = try h1.parseRequest(buf, &state, &storage);
         sink +%= parsed.head.target.len + parsed.head.headers.len();
     }
     b.keepAlive(sink);
@@ -66,9 +68,10 @@ pub fn benchmarkRequestWide(b: *testingx.B) !void {
 pub fn benchmarkResponse(b: *testingx.B) !void {
     const buf = b.blackBox(response);
     var storage: [16]http.Header = undefined;
+    var state: h1.SearchState = .{};
     var sink: usize = 0;
     while (try b.loop()) {
-        const parsed = try h1.parseResponse(buf, 0, &storage);
+        const parsed = try h1.parseResponse(buf, &state, &storage);
         sink +%= parsed.head.reason.len + parsed.head.headers.len();
     }
     b.keepAlive(sink);
@@ -84,9 +87,10 @@ const incomplete_request = "GET / HTTP/1.1\r\n" ++ ("X-Filler: value\r\n" ** 400
 pub fn benchmarkRequestLongValue(b: *testingx.B) !void {
     const buf: []const u8 = long_request;
     var storage: [4]http.Header = undefined;
+    var state: h1.SearchState = .{};
     var sink: usize = 0;
     while (try b.loop()) {
-        const parsed = try h1.parseRequest(buf, 0, &storage);
+        const parsed = try h1.parseRequest(buf, &state, &storage);
         sink +%= parsed.head.headers.items[1].value.len;
     }
     b.keepAlive(sink);
@@ -96,9 +100,11 @@ pub fn benchmarkRequestLongValue(b: *testingx.B) !void {
 pub fn benchmarkIncompleteScan(b: *testingx.B) !void {
     const buf: []const u8 = incomplete_request;
     var storage: [4]http.Header = undefined;
+    var state: h1.SearchState = .{ .searched = 4096 };
     var sink: usize = 0;
     while (try b.loop()) {
-        const parsed = h1.parseRequest(buf, 4096, &storage);
+        state.searched = 4096;
+        const parsed = h1.parseRequest(buf, &state, &storage);
         if (parsed) |_| {
             unreachable;
         } else |err| {
