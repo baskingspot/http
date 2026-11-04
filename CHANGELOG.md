@@ -11,8 +11,10 @@ All notable changes to http are recorded here. The format follows
 - `h1.ServerConn`: a request head can arrive before an incomplete body.
   `acceptBody` selects application-owned destination memory; `bufferBody`
   preserves the old default. `switchProtocols` and `.switched` provide the 101
-  stream handoff with leftover bytes, `min_read_bytes` prevents undersized
-  transport reads, and the lifetime docs pin when header storage may be shared.
+  stream handoff with leftover bytes. The caller owns `Connection` for that
+  switch. `min_read_bytes` prevents undersized transport reads; a short external
+  body tail uses request-buffer scratch and preserves any pipelined bytes after
+  the body. The lifetime docs pin when header storage may be shared.
 
 - Align the h1/h2 engine foundations: `http.engine.Handler(Exchange)` is the
   shared vtable shape, `http.engine.ResponseOptions` is the common response
