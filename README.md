@@ -45,8 +45,8 @@ ready to depend on.
   RFC 9110 §6.2, and `wire_version` keeps the exact major and minor. Both heads
   carry `Headers`.
   `parseRequest` and `parseResponse` return `error.Incomplete` until a whole
-  head arrives, and take `last_len` so a client trickling bytes cannot force a
-  rescan. Strict where RFC 9112 allows leniency: bare LF, obs-fold, whitespace
+  head arrives, and take a `SearchState` so a client trickling bytes cannot
+  force a rescan. Strict where RFC 9112 allows leniency: bare LF, obs-fold, whitespace
   before the colon, and lenient start-line whitespace are rejected.
   `h1.parseFieldSection` parses a standalone field section, which is also the
   trailer parser. `h1.chunked.Decoder` is a resumable chunked body decoder:

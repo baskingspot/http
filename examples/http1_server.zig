@@ -206,20 +206,19 @@ const ReadError = error{
 /// Fill the reader's buffer until a whole head is present, then consume it.
 /// The returned head borrows both `storage` and the reader's buffer.
 fn readRequest(r: *Io.Reader, storage: []http.Header) ReadError!http.h1.RequestHead {
-    var last_len: u32 = 0;
+    var state: http.h1.SearchState = .{};
 
     while (true) {
         const buffered = r.buffered();
         if (buffered.len != 0) {
             const parsed = http.h1.parseRequest(
                 buffered,
-                last_len,
+                &state,
                 storage,
             ) catch |err| switch (err) {
                 error.Incomplete => {
                     // No room left to grow the head. This is the 431 case.
                     if (buffered.len == r.buffer.len) return error.HeadTooLarge;
-                    last_len = @intCast(buffered.len);
                     try fillMore(r);
                     continue;
                 },

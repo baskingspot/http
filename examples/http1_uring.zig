@@ -101,7 +101,7 @@ fn serverServe(ctx: *ServerCtx) !void {
 
     var buffer: [buffer_len]u8 = undefined;
     var used: usize = 0;
-    var last_len: u32 = 0;
+    var state: http.h1.SearchState = .{};
     var storage: [64]http.Header = undefined;
 
     while (true) {
@@ -109,12 +109,11 @@ fn serverServe(ctx: *ServerCtx) !void {
         while (true) {
             parsed = http.h1.parseRequest(
                 buffer[0..used],
-                last_len,
+                &state,
                 &storage,
             ) catch |err| switch (err) {
                 error.Incomplete => {
                     if (used == buffer.len) return error.HeadTooLarge;
-                    last_len = @intCast(used);
                     const n = try recvInto(&ring, fd, buffer[used..]);
                     if (n == 0) return; // peer closed
                     used += n;
@@ -237,7 +236,6 @@ fn serverServe(ctx: *ServerCtx) !void {
         const leftover = used - consumed;
         @memmove(buffer[0..leftover], buffer[consumed..used]);
         used = leftover;
-        last_len = 0;
 
         if (!keep_alive) return;
     }
@@ -257,7 +255,7 @@ fn clientRun(io: Io, port: u16) !void {
     var buffer: [16 * 1024]u8 = undefined;
     var used: usize = 0;
     var pos: usize = 0;
-    var last_len: u32 = 0;
+    var state: http.h1.SearchState = .{};
     var storage: [32]http.Header = undefined;
     const methods = [_]http.Method{ .POST, .GET };
     var response_index: usize = 0;
@@ -269,11 +267,10 @@ fn clientRun(io: Io, port: u16) !void {
         while (true) {
             parsed = http.h1.parseResponse(
                 buffer[pos..used],
-                last_len,
+                &state,
                 &storage,
             ) catch |err| switch (err) {
                 error.Incomplete => {
-                    last_len = @intCast(used - pos);
                     if (used == buffer.len) return error.ResponseTooLarge;
                     const n = try recvInto(&ring, fd, buffer[used..]);
                     if (n == 0) return error.PeerClosed;
@@ -285,7 +282,6 @@ fn clientRun(io: Io, port: u16) !void {
             break;
         }
         pos += parsed.consumed;
-        last_len = 0;
 
         if (response_index == 0 and parsed.head.status != .ok) return error.UnexpectedStatus;
         if (response_index == 1 and parsed.head.status != .not_found) return error.UnexpectedStatus;

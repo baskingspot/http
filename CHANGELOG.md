@@ -32,8 +32,8 @@ All notable changes to http are recorded here. The format follows
   bytes; `ResponseHead.status` is `Status`; `version` is the effective version
   after RFC 9110 §6.2 and `wire_version` keeps the wire pair. Both heads carry
   `Headers`. Both report `error.Incomplete` until a whole head arrives, take
-  `last_len` for a resumable completeness check, and reject bare LF, obs-fold,
-  and whitespace before the colon.
+  a `SearchState` for a resumable completeness check, and reject bare LF,
+  obs-fold, and whitespace before the colon.
 - `h1.framing.request` and `h1.framing.response`: body framing per RFC 9112
   §6.3. A request returns `RequestBody`: `.none`, `.length`, or `.chunked`. A
   response returns `ResponseBody`, which adds `.close` and `.tunnel`. TE with
@@ -64,6 +64,9 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
+- `h1.parseRequest`, `h1.parseResponse`, and `h1.parseFieldSection` take a
+  `SearchState` instead of a raw `last_len`. The parser records the searched
+  length on `error.Incomplete` and clears it after a complete parse.
 - The package owns its public types. `Header`, `Method`, `Status`, and
   `h1.Version` no longer alias `std.http`.
 - The package depends on `baskingspot/stdx` for `stdx.fmt.atoi`;

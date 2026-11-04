@@ -252,12 +252,13 @@ fn expectHead(case: HeadCase) !void {
         .one => 1,
     };
 
+    var state: http.h1.SearchState = .{ .searched = last_len };
     switch (case.kind) {
-        .request => try expectOutcome(case, http.h1.parseRequest(case.input, last_len, &storage)),
-        .response => try expectOutcome(case, http.h1.parseResponse(case.input, last_len, &storage)),
+        .request => try expectOutcome(case, http.h1.parseRequest(case.input, &state, &storage)),
+        .response => try expectOutcome(case, http.h1.parseResponse(case.input, &state, &storage)),
         .field_section => try expectOutcome(
             case,
-            http.h1.parseFieldSection(case.input, last_len, &storage),
+            http.h1.parseFieldSection(case.input, &state, &storage),
         ),
     }
 }

@@ -10,7 +10,7 @@ curl -v http://127.0.0.1:8080/
 The server is deliberately small and single-connection. It shows the shape the
 library expects:
 
-- `h1.parseRequest` over a `std.Io.net.Stream.Reader`, with `last_len` and
+- `h1.parseRequest` over a `std.Io.net.Stream.Reader`, with a `SearchState` and
   `error.Incomplete`.
 - `h1.framing.request` to decide the body, then `readSliceAll` for a known
   length.

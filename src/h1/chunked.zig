@@ -57,6 +57,7 @@ pub const Decoder = struct {
     state: State = .size,
     remaining: u64 = 0,
     trailer_storage: []Header,
+    trailer_state: h1.SearchState = .{},
 
     const State = enum { size, data, data_crlf, trailers, done };
 
@@ -133,7 +134,11 @@ pub const Decoder = struct {
     }
 
     fn parseTrailers(self: *Decoder, buf: []const u8) Error!Step {
-        const parsed = h1.parseFieldSection(buf, 0, self.trailer_storage) catch |err| switch (err) {
+        const parsed = h1.parseFieldSection(
+            buf,
+            &self.trailer_state,
+            self.trailer_storage,
+        ) catch |err| switch (err) {
             error.Incomplete => return .{ .consumed = 0, .event = .need_more },
             error.Invalid => return error.Invalid,
             error.TooManyHeaders => return error.TooManyHeaders,
