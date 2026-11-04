@@ -1,9 +1,10 @@
-//! HTTP/1.1 message head parsing (RFC 9112).
+//! HTTP/1.1 parsing, the connection machine, and the HTTP/1 server engines.
 //!
-//! Sans-I/O: the parser takes the bytes read so far and reports either a head,
-//! `error.Incomplete`, or `error.Invalid`. It allocates nothing and borrows
-//! every returned slice from the input. The caller owns the buffer and the
-//! storage for the field lines.
+//! The parser APIs are sans-I/O: the parser takes the bytes read so far and
+//! reports either a head, `error.Incomplete`, or `error.Invalid`. It allocates
+//! nothing and borrows every returned slice from the input. The caller owns the
+//! buffer and the storage for the field lines. `engine` is the optional server
+//! layer; the parser files do not import a socket.
 //!
 //! Lifetimes: the returned head borrows the input buffer and the caller's
 //! header storage. It is valid only while both are unchanged. A buffered
@@ -46,6 +47,7 @@ pub const Version = version_mod.Version;
 const effectiveVersion = version_mod.effective;
 pub const chunked = @import("chunked.zig");
 pub const ServerConn = @import("ServerConn.zig");
+pub const engine = @import("engine/root.zig");
 pub const framing = @import("framing.zig");
 pub const persistent = @import("persistence.zig").persistent;
 const syntax = @import("syntax.zig");
@@ -1137,4 +1139,5 @@ test {
     _ = chunked;
     _ = Writer;
     _ = ServerConn;
+    _ = engine;
 }

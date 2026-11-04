@@ -8,8 +8,8 @@
 const std = @import("std");
 const Io = std.Io;
 const testing = std.testing;
-const h1 = @import("../h1/root.zig");
-const Header = @import("../header.zig").Header;
+const h1 = @import("../root.zig");
+const Header = @import("../../header.zig").Header;
 
 /// Buffers for one connection. The request buffer holds the head and body.
 // ast-grep-ignore: public-struct-field-default -- options bag; one knob

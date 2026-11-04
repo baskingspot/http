@@ -9,7 +9,7 @@ const testing = std.testing;
 const Io = std.Io;
 
 const http = @import("http");
-const engine = http.engine.blocking;
+const engine = http.h1.engine.blocking;
 
 const TestConfig = struct {
     request_buffer: [1024]u8 = undefined,

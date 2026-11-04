@@ -2,7 +2,7 @@
 
 ## Scope
 
-`engine.blocking` is a blocking HTTP/1 server over `std.Io`. It uses
+`h1.engine.blocking` is a blocking HTTP/1 server over `std.Io`. It uses
 `Io.Threaded` and `Io.net`. It serves one connection at a time. Use it for
 tools, tests, and trusted peers. The poll engine is the engine for the admin
 plane.
@@ -61,11 +61,19 @@ The request body borrows the request buffer. Use it before the response
 completes. The response body scratch stays valid until the response completes.
 A handler formats the body there and calls `exchange.respond`.
 
+The body passed to `respond` may also point at handler-owned memory that
+outlives the response. The per-slot scratch is a convenience, not a limit;
+do not size it for the largest possible body.
+
 If `handle` returns an error before it responds, the engine queues a 500. If it
 returns an error after it responds, the engine sends that response. The engine
-reports the error through `onError` in both cases.
+reports the error through `onError` in both cases. A handler that returns
+without responding also gets a 500.
 
-The handler is synchronous. A deferred response is not supported.
+The handler is synchronous. It runs on the engine thread; a slow handler
+blocks the other connections on that thread. A deferred response hook is not
+part of the blocking or poll engine yet. Keep heavy work off the poll thread
+until such a hook exists.
 
 ## Connection behavior
 
@@ -82,7 +90,7 @@ omits Content-Length and the body. A 1xx status is not a final response.
 
 ## Poll engine
 
-`engine.poll` is Linux-only for now. It uses `poll(2)` over raw nonblocking
+`h1.engine.poll` is Linux-only for now. It uses `poll(2)` over raw nonblocking
 descriptors. `std.Io` supplies the listener, the clock, and the listener close.
 The connection machine is the same `h1.ServerConn`.
 
@@ -114,8 +122,13 @@ the slot to drain; the engine reads into scratch and discards until EOF or the
 drain deadline.
 
 Accept uses `accept4` in a loop. `EMFILE`, `ENFILE`, and resource exhaustion
-pause the listener for the accept backoff. A full slot table means the listener
-is not polled; the backlog holds the connection.
+pause the listener for the accept backoff, which defaults to 50 ms. A full slot
+table means the listener is not polled; the backlog holds the connection. The
+engine checks for a free slot before it accepts, so it never accepts and closes
+a connection just because slots are full.
+
+The listener is opened with `SO_REUSEADDR` only. It does not set
+`SO_REUSEPORT`, so two processes cannot silently bind the same port.
 
 Epoll and kqueue replace the wait and registration part of this loop. The slot
 state machine does not change. io_uring is a separate completion engine.

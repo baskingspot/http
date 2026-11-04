@@ -5,7 +5,7 @@ Pure HTTP field-value parsers: content negotiation, ranges, entity tags, dates, 
 The parser modules are sans-I/O. Parse a header value, negotiate a content
 coding, compare validators. The parsers take borrowed slices and fill
 caller-owned storage. `h1.ServerConn` is a sans-I/O connection state machine;
-`engine.blocking` owns the socket, the clock, and the handler loop over
+`h1.engine.blocking` owns the socket, the clock, and the handler loop over
 `std.Io`. Evented engines are separate.
 
 This project is incubating. It is unstable, its API will change, and it is not
@@ -74,13 +74,13 @@ ready to depend on.
   request body, keeps the leftover for a pipelined request, queues policy
   errors, and writes a response through a caller head buffer. It owns no
   memory and does no I/O.
-- `engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
+- `h1.engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
   connection at a time; `serve` drives one stream. The handler formats a
   response body into per-connection scratch, and the connection machine handles
   parsing, framing, keep-alive, pipelining, and policy responses. The blocking
   engine sets every timeout to zero because a blocking syscall cannot enforce
   them; the evented engines are separate.
-- `engine.poll`: a Linux `poll(2)` server with fixed slots, nonblocking
+- `h1.engine.poll`: a Linux `poll(2)` server with fixed slots, nonblocking
   sockets, accept backoff, connection deadlines, keep-alive and pipelining, and
   a stop eventfd. It uses the same comptime handler and `Exchange` as the
   blocking engine. Epoll and kqueue become backends for this readiness loop;
@@ -120,9 +120,9 @@ ready to depend on.
   and `Content-Length` cannot both frame a request; `h1.framing` applies it.
 
 Ranges, entity tags, dates, media types, and form decoding are next. The parser
-modules remain free of server types. `engine.blocking` is the one server in the
-package; the evented engines live separately, and the parser modules still have
-no I/O runtime.
+modules remain free of server types. `h1.engine.blocking` and
+`h1.engine.poll` are the servers in the package; the remaining evented engines
+live separately, and the parser modules still have no I/O runtime.
 
 ## Usage
 

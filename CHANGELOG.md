@@ -7,13 +7,13 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
-- `engine.poll`: a Linux `poll(2)` HTTP/1 server engine. It uses fixed slots,
+- `h1.engine.poll`: a Linux `poll(2)` HTTP/1 server engine. It uses fixed slots,
   nonblocking descriptors, accept backoff, connection deadlines, keep-alive and
   pipelining, and a stop eventfd. The handler type is comptime, the same as the
   blocking engine. Epoll and kqueue become backends for the same readiness
   loop; io_uring is separate.
 
-- `engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
+- `h1.engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
   connection at a time; `serve` drives one stream. The handler is a comptime
   type with `handle` and optional `onError`; there is no function pointer or
   context value. A handler formats a response body into per-connection scratch.

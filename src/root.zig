@@ -3,14 +3,12 @@
 //!
 //! Each parser module reads one field family or message head and returns
 //! borrowed slices or fills caller-owned storage. `h1.ServerConn` is the
-//! connection machine. `engine.blocking` owns the blocking transport and the
+//! connection machine. `h1.engine.blocking` owns the blocking transport and the
 //! handler loop over `std.Io`; evented engines are separate.
 
 pub const content_length = @import("content_length.zig");
-pub const engine = @import("engine/root.zig");
 pub const encoding = @import("encoding.zig");
 pub const h1 = @import("h1/root.zig");
-pub const h2 = @import("h2/root.zig");
 pub const hpack = @import("hpack/root.zig");
 pub const huffman = @import("huffman.zig");
 pub const Cursor = @import("Cursor.zig");
@@ -34,9 +32,7 @@ test {
     _ = @import("status.zig");
     _ = @import("version.zig");
     _ = content_length;
-    _ = engine;
     _ = h1;
-    _ = h2;
     _ = hpack;
     _ = huffman;
     _ = prefix_int;

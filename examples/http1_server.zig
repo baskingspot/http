@@ -13,7 +13,7 @@ const Io = std.Io;
 const print = std.debug.print;
 
 const http = @import("http");
-const engine = http.engine.blocking;
+const engine = http.h1.engine.blocking;
 
 const address_text = "127.0.0.1:8080";
 const max_target = 256;

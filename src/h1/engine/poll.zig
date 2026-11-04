@@ -9,20 +9,20 @@
 //! `std.Io` only for the listener, the clock, and closing the listener.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const linux = std.os.linux;
 const posix = std.posix;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
+const builtin = @import("builtin");
 
-const h1 = @import("../h1/root.zig");
-const Header = @import("../header.zig").Header;
+const h1 = @import("../root.zig");
+const Header = @import("../../header.zig").Header;
 pub const Exchange = @import("common.zig").Exchange;
 
 comptime {
-    if (builtin.os.tag != .linux) @compileError("engine.poll is Linux-only for now");
+    if (builtin.os.tag != .linux) @compileError("h1.engine.poll is Linux-only for now");
 }
 
 // ast-grep-ignore: public-struct-field-default -- options bag; the defaults are the buffer policy
@@ -84,12 +84,8 @@ pub fn Server(comptime Handler: type) type {
             assert(config.response_head_bytes >= 64);
             const allocator = config.allocator;
 
-            var listener = try address.listen(io, .{
-                .mode = .stream,
-                .reuse_address = true,
-            });
+            var listener = try openListener(address);
             errdefer listener.deinit(io);
-            try setNonBlocking(listener.socket.handle);
 
             const stop_rc = linux.eventfd(0, linux.EFD.CLOEXEC | linux.EFD.NONBLOCK);
             if (linux.errno(stop_rc) != .SUCCESS) return error.EventfdFailed;
@@ -249,6 +245,7 @@ pub fn Server(comptime Handler: type) type {
         fn acceptAll(self: *Self, now: Io.Timestamp) !void {
             var accepted: usize = 0;
             while (accepted < self.config.max_connections) : (accepted += 1) {
+                const slot = self.freeSlot() orelse return;
                 const rc = linux.accept4(
                     self.listener.socket.handle,
                     null,
@@ -267,10 +264,6 @@ pub fn Server(comptime Handler: type) type {
                 }
 
                 const fd: linux.fd_t = @intCast(rc);
-                const slot = self.freeSlot() orelse {
-                    _ = linux.close(fd);
-                    continue;
-                };
                 slot.fd = fd;
                 slot.state = .read;
                 initSlotConn(slot, self.config);
@@ -385,16 +378,12 @@ pub fn Server(comptime Handler: type) type {
             };
             self.handler.handle(&exchange) catch |err| {
                 self.report(err);
-                if (slot.conn.sendSlices().head.len == 0) {
-                    exchange.respond(.{ .status = .internal_server_error }, "") catch {
-                        self.closeSlot(slot);
-                        return false;
-                    };
-                }
             };
             if (slot.conn.sendSlices().head.len == 0) {
-                self.closeSlot(slot);
-                return false;
+                exchange.respond(.{ .status = .internal_server_error }, "") catch {
+                    self.closeSlot(slot);
+                    return false;
+                };
             }
             return true;
         }
@@ -406,8 +395,7 @@ pub fn Server(comptime Handler: type) type {
                     self.closeSlot(slot);
                     return;
                 }
-                const data = if (slices.head.len != 0) slices.head else slices.body;
-                const n = send(slot.fd, data) catch |err| switch (err) {
+                const n = send(slot.fd, slices.head, slices.body) catch |err| switch (err) {
                     error.WouldBlock => return,
                     else => {
                         self.closeSlot(slot);
@@ -531,28 +519,24 @@ fn freeSlotBuffers(allocator: Allocator, slot: *Slot) void {
     allocator.free(slot.drain);
 }
 
-fn setNonBlocking(fd: linux.fd_t) !void {
-    const flags_rc = linux.fcntl(fd, linux.F.GETFL, 0);
-    if (linux.errno(flags_rc) != .SUCCESS) return error.FcntlFailed;
-    var flags: linux.O = @bitCast(@as(u32, @intCast(flags_rc)));
-    flags.NONBLOCK = true;
-    const new_flags: u32 = @bitCast(flags);
-    const set_rc = linux.fcntl(fd, linux.F.SETFL, @as(usize, new_flags));
-    if (linux.errno(set_rc) != .SUCCESS) return error.FcntlFailed;
-}
-
 const SendError = error{ WouldBlock, BrokenPipe };
 
-fn send(fd: linux.fd_t, data: []const u8) SendError!usize {
-    var iov: [1]posix.iovec_const = .{.{
-        .base = data.ptr,
-        .len = data.len,
-    }};
+fn send(fd: linux.fd_t, head: []const u8, body: []const u8) SendError!usize {
+    var iov: [2]posix.iovec_const = undefined;
+    var iov_len: usize = 0;
+    if (head.len != 0) {
+        iov[iov_len] = .{ .base = head.ptr, .len = head.len };
+        iov_len += 1;
+    }
+    if (body.len != 0) {
+        iov[iov_len] = .{ .base = body.ptr, .len = body.len };
+        iov_len += 1;
+    }
     const msg: linux.msghdr_const = .{
         .name = null,
         .namelen = 0,
         .iov = &iov,
-        .iovlen = 1,
+        .iovlen = iov_len,
         .control = null,
         .controllen = 0,
         .flags = 0,
@@ -567,6 +551,83 @@ fn send(fd: linux.fd_t, data: []const u8) SendError!usize {
             else => return error.BrokenPipe,
         }
     }
+}
+
+fn openListener(address: Io.net.IpAddress) !Io.net.Server {
+    const family: u32 = switch (address) {
+        .ip4 => linux.AF.INET,
+        .ip6 => linux.AF.INET6,
+    };
+    const fd_rc = linux.socket(
+        family,
+        linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
+        0,
+    );
+    if (linux.errno(fd_rc) != .SUCCESS) return error.SocketFailed;
+    const fd: linux.fd_t = @intCast(fd_rc);
+    errdefer _ = linux.close(fd);
+
+    const one: u32 = 1;
+    const opt_rc = linux.setsockopt(
+        fd,
+        linux.SOL.SOCKET,
+        linux.SO.REUSEADDR,
+        mem.asBytes(&one),
+        @sizeOf(u32),
+    );
+    if (linux.errno(opt_rc) != .SUCCESS) return error.SocketOptionFailed;
+
+    switch (address) {
+        .ip4 => |a| {
+            var sa: linux.sockaddr.in = .{
+                .port = mem.nativeToBig(u16, a.port),
+                .addr = @bitCast(a.bytes),
+            };
+            const bind_rc = linux.bind(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in));
+            if (linux.errno(bind_rc) != .SUCCESS) return error.BindFailed;
+        },
+        .ip6 => |a| {
+            var sa: linux.sockaddr.in6 = .{
+                .port = mem.nativeToBig(u16, a.port),
+                .flowinfo = a.flow,
+                .addr = a.bytes,
+                .scope_id = a.interface.index,
+            };
+            const bind_rc = linux.bind(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in6));
+            if (linux.errno(bind_rc) != .SUCCESS) return error.BindFailed;
+        },
+    }
+
+    const listen_rc = linux.listen(fd, 128);
+    if (linux.errno(listen_rc) != .SUCCESS) return error.ListenFailed;
+
+    var storage: linux.sockaddr.storage = undefined;
+    var len: linux.socklen_t = @sizeOf(linux.sockaddr.storage);
+    const name_rc = linux.getsockname(fd, @ptrCast(&storage), &len);
+    if (linux.errno(name_rc) != .SUCCESS) return error.GetsocknameFailed;
+    const bound: Io.net.IpAddress = switch (address) {
+        .ip4 => blk: {
+            const sa: *const linux.sockaddr.in = @ptrCast(&storage);
+            break :blk .{ .ip4 = .{
+                .bytes = @bitCast(sa.addr),
+                .port = mem.bigToNative(u16, sa.port),
+            } };
+        },
+        .ip6 => blk: {
+            const sa: *const linux.sockaddr.in6 = @ptrCast(&storage);
+            break :blk .{ .ip6 = .{
+                .bytes = sa.addr,
+                .port = mem.bigToNative(u16, sa.port),
+                .flow = sa.flowinfo,
+                .interface = .{ .index = sa.scope_id },
+            } };
+        },
+    };
+
+    return .{
+        .socket = .{ .handle = fd, .address = bound },
+        .options = {},
+    };
 }
 
 fn earliest(a: ?Io.Timestamp, b: Io.Timestamp) Io.Timestamp {
