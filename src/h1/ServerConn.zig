@@ -306,7 +306,7 @@ pub fn received(self: *ServerConn, n: usize, now: Io.Timestamp) Event {
             }
             self.body_received += copied;
             self.used += n;
-            if (n > copied) self.leftover_start = scratch_start + copied;
+            self.leftover_start = scratch_start + copied;
             return self.parseBody();
         }
         assert(n <= remaining);
@@ -1461,6 +1461,14 @@ test "a minimum read window copies the external body tail" {
 
     try t.conn.respond(.{ .status = .ok }, "");
     try testing.expectEqual(.keep_alive, std.meta.activeTag(try t.drain()));
+    try testing.expectEqual(.need_more, std.meta.activeTag(t.advance()));
+    try testing.expectEqual(0, t.conn.used);
+
+    const next = try expectRequest(try t.feed(
+        "GET /next HTTP/1.1\r\nHost: x\r\n\r\n",
+    ));
+    try testing.expectEqualStrings("GET", next.head.method_token);
+    try testing.expectEqualStrings("/next", next.head.target);
 }
 
 test "external short-body scratch preserves a pipelined request" {
