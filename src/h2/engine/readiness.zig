@@ -8,6 +8,7 @@
 //! h2c socket transport or the TLS record transport.
 
 const std = @import("std");
+const testing = std.testing;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const fd_t = std.posix.fd_t;
@@ -21,6 +22,9 @@ const shared = @import("../../engine/common.zig");
 pub const Exchange = common.Exchange;
 pub const Handler = common.Handler;
 const wait = @import("../../transport/wait.zig");
+const wait_poll_test = @import("../../transport/wait_poll.zig");
+const wait_kqueue_test = @import("../../transport/wait_kqueue.zig");
+const PlainTransport = @import("transport/plain.zig").Transport;
 const transport_events = @import("transport.zig");
 const Event = transport_events.Event;
 
@@ -230,7 +234,7 @@ pub fn Server(comptime Wait: type, comptime Transport: type) type {
                 };
                 const maybe = P.accept(self.listener.fd) catch |err| switch (err) {
                     error.ConnectionAborted => continue,
-                    error.ListenerFailed => return error.AcceptFailed,
+                    error.ListenerFailed => return error.ListenerFailed,
                     error.SystemResources => {
                         self.accept_paused_until = now.addDuration(self.config.accept_backoff);
                         self.wait.remove(.listener);
@@ -579,4 +583,55 @@ fn earliest(a: ?Io.Timestamp, b: Io.Timestamp) Io.Timestamp {
 
 fn clock(io: Io) Io.Timestamp {
     return Io.Clock.awake.now(io);
+}
+
+const DeadListenerHandler = struct {
+    fn handle(_: *anyopaque, _: *Exchange) anyerror!void {}
+    fn complete(_: *anyopaque, _: *Exchange) void {}
+    fn report(_: *anyopaque, _: anyerror) void {}
+    fn policy(
+        _: *anyopaque,
+        context: common.PolicyContext,
+    ) anyerror!common.PolicyResponse {
+        return .{ .options = .{ .status = context.status }, .body = "" };
+    }
+
+    fn value() Handler {
+        return .{ .ptr = undefined, .vtable = &.{
+            .handle = handle,
+            .complete = complete,
+            .report_error = report,
+            .policy_response = policy,
+        } };
+    }
+};
+
+fn testDeadListener(comptime Wait: type) !void {
+    const ServerType = Server(Wait, PlainTransport);
+    var server = try ServerType.init(
+        testing.io,
+        try .parseLiteral("127.0.0.1:0"),
+        DeadListenerHandler.value(),
+        .{
+            .allocator = testing.allocator,
+            .max_connections = 1,
+        },
+    );
+    defer server.deinit();
+
+    const fd = server.listener.fd;
+    Wait.Platform.close(fd);
+    server.listener.fd = -1;
+    try testing.expectError(error.ListenerFailed, server.acceptAll(Io.Timestamp.zero));
+}
+
+test "a dead listener returns ListenerFailed" {
+    const builtin = @import("builtin");
+    if (builtin.os.tag == .linux) {
+        try testDeadListener(wait_poll_test.Wait);
+    } else if (builtin.os.tag == .macos) {
+        try testDeadListener(wait_kqueue_test.Wait);
+    } else {
+        return error.SkipZigTest;
+    }
 }
