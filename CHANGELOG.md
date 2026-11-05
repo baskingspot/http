@@ -5,13 +5,6 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
-### Changed
-
-- The h1 streaming client names the in-progress request error
-  `RequestInProgress`, matching the h2 adapter.
-- `client.Request.body` stays borrowed until `Body.close` when an h2 early
-  final response returns before the request body is sent.
-
 ### Added
 
 - `http`: HTTP/1.1 and HTTP/2 protocol kernels in one Zig module. Parsers
@@ -51,7 +44,8 @@ All notable changes to http are recorded here. The format follows
 - `h1.ClientConn` and `h1.client.streaming.Client`: an HTTP/1 response
   machine for Content-Length, chunked, and close-delimited bodies, plus the
   blocking client adapter that streams a borrowed response body and sends a
-  static request body.
+  static request body. A second request before the first finishes is
+  `error.RequestInProgress`.
 - `h2.head`, `h2.settings`, `h2.flow`, `h2.stream`, and `h2.header_block`:
   HTTP/2 field-section validation, SETTINGS application, flow-control
   windows, stream states and ids, and CONTINUATION assembly.
