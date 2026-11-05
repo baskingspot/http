@@ -1371,6 +1371,7 @@ fn flushServer(session: *Session, writer: *Io.Writer) !void {
 const InformationalServer = struct {
     io: Io,
     listener: *Io.net.Server,
+    received: *std.atomic.Value(usize),
     result: ?anyerror = null,
 
     fn run(self: *InformationalServer) void {
@@ -1440,6 +1441,11 @@ const InformationalServer = struct {
         // response can race the client's pending request-body writes.
         while (try nextServerEvent(&session, &reader.interface)) |event| {
             switch (event) {
+                .data => |data| {
+                    _ = self.received.fetchAdd(data.bytes.len, .monotonic);
+                    try session.release(testing.allocator, id, data.flow_len);
+                    try flushServer(&session, &writer.interface);
+                },
                 .reset, .connection_error, .goaway => return,
                 else => {},
             }
@@ -1460,7 +1466,12 @@ test "informational response does not become the final head" {
     defer listener.deinit(io);
     address.setPort(listener.socket.address.getPort());
 
-    var server: InformationalServer = .{ .io = io, .listener = &listener };
+    var received: std.atomic.Value(usize) = .init(0);
+    var server: InformationalServer = .{
+        .io = io,
+        .listener = &listener,
+        .received = &received,
+    };
     const thread = try std.Thread.spawn(.{}, InformationalServer.run, .{&server});
     defer {
         thread.join();
@@ -1491,5 +1502,5 @@ test "informational response does not become the final head" {
     defer response.body.close();
 
     try testing.expectEqual(@as(u16, 200), response.head.status.code());
-    try testing.expect(client.pending_body.len != 0);
+    try testing.expect(received.load(.monotonic) < payload.len);
 }

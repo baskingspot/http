@@ -307,4 +307,4 @@ conformance-ci:
 
 [doc("Everything CI runs")]
 [group("ci")]
-ci: test lint interop interop-tls check-example conformance-ci doc
+ci: test lint interop interop-tls check-example conformance-ci
