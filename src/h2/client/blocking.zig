@@ -142,8 +142,7 @@ pub const Client = struct {
         return self.stream_id;
     }
 
-    /// Send one request and wait for its response head. The request body is
-    /// not supported in this slice; pass an empty `body`.
+    /// Send one request, including its body, and wait for the response head.
     pub fn request(self: *Client, value: Request) !Response {
         if (self.active) return error.RequestInProgress;
         if (self.connection_poisoned) return error.ConnectionPoisoned;
@@ -208,6 +207,9 @@ pub const Client = struct {
         if (value.body.len != 0) {
             try self.sendRequestBody(value.body, id);
             if (self.early_head) |head| {
+                self.remote_end = self.early_end;
+                self.body_eof = self.early_end and
+                    self.early_body.items.len == self.early_start;
                 return .{ .head = head, .body = self.body };
             }
         }
@@ -275,7 +277,10 @@ pub const Client = struct {
             };
             offset += accepted;
             if (accepted != 0) {
-                try self.flushFrames();
+                self.flushFrames() catch |err| {
+                    self.connection_poisoned = true;
+                    return err;
+                };
             }
             if (offset == body.len) break;
 
@@ -283,7 +288,10 @@ pub const Client = struct {
             const event = try self.nextEvent();
             switch (event) {
                 .window_update => {},
-                .settings => try self.flushFrames(),
+                .settings => self.flushFrames() catch |err| {
+                    self.connection_poisoned = true;
+                    return err;
+                },
                 .response => |response| {
                     if (response.stream_id != id) return error.UnexpectedStream;
                     if (self.early_head != null) return error.UnexpectedResponse;
@@ -297,9 +305,18 @@ pub const Client = struct {
                 .data => |data| {
                     if (data.stream_id != id) return error.UnexpectedStream;
                     if (self.early_head == null) return error.UnexpectedData;
-                    try self.early_body.appendSlice(self.allocator, data.bytes);
-                    try self.session.release(self.allocator, id, data.flow_len);
-                    try self.flushFrames();
+                    self.early_body.appendSlice(self.allocator, data.bytes) catch |err| {
+                        self.connection_poisoned = true;
+                        return err;
+                    };
+                    self.session.release(self.allocator, id, data.flow_len) catch |err| {
+                        self.connection_poisoned = true;
+                        return err;
+                    };
+                    self.flushFrames() catch |err| {
+                        self.connection_poisoned = true;
+                        return err;
+                    };
                     if (data.end_stream) self.early_end = true;
                 },
                 .trailers => |trailers| {
@@ -372,6 +389,7 @@ pub const Client = struct {
             return .{ .data = bytes };
         }
         if (self.early_end) {
+            self.remote_end = true;
             self.body_eof = true;
             return .eof;
         }
