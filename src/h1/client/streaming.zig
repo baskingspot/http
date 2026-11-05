@@ -226,7 +226,8 @@ pub const Client = struct {
         return switch (err) {
             error.Canceled => .{ .local = .canceled },
             error.OutOfMemory => .{ .local = .out_of_memory },
-            error.BufferTooSmall, error.WouldBlock => .{ .local = .capacity },
+            error.BufferTooSmall => .{ .local = .capacity },
+            error.WouldBlock => .{ .local = .unusable },
             error.Incomplete,
             error.EndOfStream,
             error.ReadFailed,

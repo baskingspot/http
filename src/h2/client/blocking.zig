@@ -13,6 +13,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
 const ascii = std.ascii;
+const assert = std.debug.assert;
 
 const Header = @import("../../header.zig").Header;
 const Headers = @import("../../header.zig").Headers;
@@ -359,7 +360,11 @@ pub const Client = struct {
             error.BrokenPipe,
             => .truncated,
             error.Canceled => .{ .local = .canceled },
-            error.InputFull, error.BufferTooSmall, error.WouldBlock => .{ .local = .capacity },
+            error.InputFull, error.BufferTooSmall => .{ .local = .capacity },
+            error.WouldBlock => blk: {
+                assert(false);
+                break :blk .{ .local = .unusable };
+            },
             error.OutOfMemory => .{ .local = .out_of_memory },
             else => .protocol,
         };

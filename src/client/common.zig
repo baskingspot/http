@@ -63,6 +63,9 @@ pub const Local = enum {
     capacity,
     /// Allocation failed. The connection is not usable; close it.
     out_of_memory,
+    /// A local failure left a partial frame on the wire. The connection is not
+    /// usable; close it. A blocking adapter must not produce this.
+    unusable,
 };
 
 /// The terminal outcome of one blocking body read.

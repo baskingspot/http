@@ -13,9 +13,9 @@ All notable changes to http are recorded here. The format follows
   the next read or close. `reset` carries the RST_STREAM code, including
   REFUSED_STREAM; `truncated` covers an incomplete body; `protocol` covers a
   peer violation. Local failures are `local: {canceled, capacity,
-  out_of_memory}`: canceled keeps the connection, capacity keeps it after a
-  stream reset, and out_of_memory closes it. `protocol` means the connection
-  is unusable. GOAWAY stays on the connection
+  out_of_memory, unusable}`: canceled keeps the connection, capacity keeps
+  it after a stream reset, and out_of_memory/unusable close it. `protocol`
+  means the connection is unusable. GOAWAY stays on the connection
   (`h2.client.blocking.Client.goAway`); compare `streamId()` for the retry
   boundary. Blocking `Body` never returns `would_block`; evented clients use
   `BodyStep`.

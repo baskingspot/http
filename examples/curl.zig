@@ -152,7 +152,7 @@ fn printResponse(io: Io, response: client.Response) !void {
             .local => |local| return switch (local) {
                 .canceled => error.Canceled,
                 .capacity => error.LocalCapacity,
-                .out_of_memory => error.OutOfMemory,
+                .out_of_memory, .unusable => error.ConnectionUnusable,
             },
         }
     }
