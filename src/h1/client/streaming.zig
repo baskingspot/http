@@ -217,7 +217,11 @@ pub const Client = struct {
         const outcome = mapBodyError(err);
         switch (outcome) {
             .data, .eof, .reset => {},
-            .truncated, .protocol, .local => self.dirty = true,
+            .truncated, .protocol => self.dirty = true,
+            .local => |local| switch (local) {
+                .canceled, .capacity => {},
+                .out_of_memory, .unusable => self.dirty = true,
+            },
         }
         return outcome;
     }
