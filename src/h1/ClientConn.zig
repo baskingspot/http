@@ -130,11 +130,12 @@ pub fn recvBuffer(self: *ClientConn) []u8 {
     return self.recv_buffer[self.used..];
 }
 
-/// Account for bytes read into `recvBuffer`.
+/// Account for a non-empty read into `recvBuffer`. A zero-byte read is not
+/// data: call `eof` when the transport reports a clean close.
 pub fn received(self: *ClientConn, n: usize) Error!Event {
     assert(self.phase == .head or self.phase == .body);
+    assert(n > 0);
     assert(n <= self.recv_buffer.len - self.used);
-    if (n == 0) return self.eof();
     self.used += n;
     return self.step();
 }

@@ -324,12 +324,14 @@ pub fn recvBuffer(self: *ServerConn) []u8 {
     };
 }
 
-/// Account for `n` bytes read into `recvBuffer`.
+/// Account for a non-empty read into `recvBuffer`. A zero-byte read is not
+/// data: call `eof` when the transport reports a clean close. This keeps an
+/// empty transport completion from becoming an accidental 400.
 pub fn received(self: *ServerConn, n: usize, now: Io.Timestamp) Event {
     assert(self.phase == .head or self.phase == .body);
+    assert(n > 0);
 
     self.last_now = @intCast(now.nanoseconds);
-    if (n == 0) return self.eof(now);
     if (self.timedOut(now)) return self.reject(.request_timeout, false, .request_timeout);
 
     if (self.phase == .body and self.external_body) {
@@ -391,8 +393,9 @@ pub fn advance(self: *ServerConn, now: Io.Timestamp) Event {
     };
 }
 
-/// The peer closed. A clean close before any request bytes is `.closed`; a
-/// partial head or body is the policy 400.
+/// The peer closed. This is the only zero-byte input path. A clean close
+/// before any request bytes is `.closed`; a partial head or body is the
+/// policy 400.
 pub fn eof(self: *ServerConn, now: Io.Timestamp) Event {
     self.last_now = @intCast(now.nanoseconds);
     if (self.phase == .head and self.idle and onlyBlankLines(self.request_buffer[0..self.used])) {

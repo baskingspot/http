@@ -7,6 +7,10 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
+- `h1.ServerConn.received` and `h1.ClientConn.received` now require `n > 0`.
+  Call `eof()` for a clean close; an empty transport completion cannot become
+  an accidental policy 400.
+
 - `h1.ServerConn` stores clocks and copied duration limits as i64 nanoseconds,
   removing the i96/16-byte alignment from its public struct layout. Public
   calls continue to use `Io.Timestamp` and `Io.Duration`.

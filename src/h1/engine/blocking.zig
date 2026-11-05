@@ -154,7 +154,7 @@ pub fn serveIo(
                         },
                         else => return err,
                     };
-                    event = conn.received(n, now(io));
+                    event = if (n == 0) conn.eof(now(io)) else conn.received(n, now(io));
                 }
             },
             .reject => |rejection| {
