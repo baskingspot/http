@@ -1,0 +1,4 @@
+{
+  // Keep prose under 100 columns so a README and a guide read the same.
+  "printWidth": 100,
+}

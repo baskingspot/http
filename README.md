@@ -1,234 +1,112 @@
-# http
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/static/logo-dark.svg">
+    <img src="docs/static/logo.svg" alt="http" height="48">
+  </picture>
+</h1>
 
-Pure HTTP field-value parsers: content negotiation, ranges, entity tags, dates, and media types.
+HTTP/1.1 and HTTP/2 in Zig: field-value parsers, sans-I/O connection machines, and the engines you build a server or client on.
 
-The parser modules are sans-I/O. Parse a header value, negotiate a content
-coding, compare validators. The parsers take borrowed slices and fill
-caller-owned storage. `h1.ServerConn` is a sans-I/O connection state machine;
-`h1.engine.blocking` owns the socket, the clock, and the handler loop over
-`std.Io`. Evented engines are separate.
+Zig's `std.http` has an HTTP/1.1 client and server. It has no HTTP/2 and no
+HPACK, and its request and response types come with a connection attached, so a
+proxy, a test, or a server with its own event loop has nothing to call. This
+package is that layer. `h1` and `h2` each hold parsers, a sans-I/O connection
+machine, and engines; the parsers take bytes, return borrowed slices, fill
+storage you own, and never allocate.
 
-This project is incubating. It is unstable, its API will change, and it is not
-ready to depend on.
-
-## What is in it
-
-- `encoding`: `Accept-Encoding` negotiation. `negotiate(header, supported)`
-  returns a token borrowed from `supported` in server-preference order,
-  `"identity"`, or `null` when the client accepts nothing else.
-  `negotiateFields` takes every `Accept-Encoding` line, because the lines
-  combine as one ordered list. The caller maps the token to its codec: `gzip`,
-  `br`, `zstd`, or `deflate` for a zlib codec.
-- `token_list`: comma-separated token lists (`Connection`, `Upgrade`, `Vary`).
-  `contains(field, token)` tests membership without allocating; `iterator`
-  yields trimmed elements. Empty elements are ignored, and the comparison
-  folds ASCII case.
-- `transfer_encoding`: `Transfer-Encoding` parsing. `summarize` walks the
-  field lines in order and returns the final coding, whether `chunked`
-  appeared, and whether it was last. Repeated `chunked` and parameters on it
-  are errors. Parameters are parsed, including quoted values with commas.
-- `Method`: the conventional nine request methods as a local enum.
-  `Method.token(.GET)` is `"GET"`, and `Method.parse("GET")` is exact and
-  case-sensitive. An unlisted token stays a slice and `parse` returns null.
-  `safe`, `idempotent`, `cacheable`, `requestHasBody`, and `responseHasBody`
-  follow RFC 9110 §9.2.
-- `Status`: status codes as an open enum. `.ok`, `.not_found`, and the rest
-  are named; any other three-digit code is still a value, so `class` returns
-  null only outside 100..599. `Status.parse(200)` is `.ok`, `status.code()` is
-  the wire number, and `phrase()` returns null for an unnamed code.
-- `Cursor`: the shared read position over borrowed bytes. `next`, `peek`,
-  `take`, and `skip` return null or false at the end; `at` and `slice` assert
-  bounds a scanner already checked. The cursor never decides whether running
-  out is an error, so `h1` maps it to `Incomplete` and HPACK to `Truncated`.
-  `h1`, `prefix_int`, and the Huffman decoder all use it.
-- `Header` / `Headers`: `Header` is a borrowed name/value pair. `Headers` is an
-  ordered, case-insensitive view over a field section. `get` returns the first
-  value for singleton fields, `values` yields every line separately
-  (`Set-Cookie` needs that), and `containsToken` tests list membership across
-  all lines. Lookups trim OWS; the raw spans stay in `Headers.items`.
-- `h1`: sans-I/O HTTP/1.1 head parsing. `RequestHead.method` is the common
-  method as `?Method`, and `method_token` is always the exact wire bytes;
-  `ResponseHead.status` is `Status`. `version` is the effective version after
-  RFC 9110 §6.2, and `wire_version` keeps the exact major and minor. Both heads
-  carry `Headers`.
-  `parseRequest` and `parseResponse` return `error.Incomplete` until a whole
-  head arrives, and take a `SearchState` so a client trickling bytes cannot
-  force a rescan. Strict where RFC 9112 allows leniency: bare LF, obs-fold, whitespace
-  before the colon, and lenient start-line whitespace are rejected.
-  `h1.parseFieldSection` parses a standalone field section, which is also the
-  trailer parser. `h1.chunked.Decoder` is a resumable chunked body decoder:
-  chunk sizes and extensions, a trailer section, borrowed data slices, and
-  `need_more` across reads.
-  `h1.Writer` carries a caller-owned `std.Io.Writer` and formats a request or
-  status line, fields, a Content-Length or chunked body, and trailers into it;
-  it never flushes or closes the sink. Checked methods validate the grammar;
-  the `assume*` variants skip validation for trusted data.
-  `h1.framing` decides the body from a head: a request is `.none`, `.length`,
-  or `.chunked`; a response adds `.close` and `.tunnel` (RFC 9112 §6.3).
-  `h1.persistent` applies the §9.3 connection rule. It rejects TE with CL, TE
-  on an HTTP/1.0 message, and a request whose final coding is not `chunked`.
-  `h1.targetForm` classifies the request target as origin, absolute, authority,
-  or asterisk for the method; `h1.host` returns the single Host value or
-  `error.DuplicateHost`.
-  `h1.ServerConn` drives one connection over those pieces: it can choose the
-  per-request body storage from the request head, keeps the leftover for a
-  pipelined request, hands over a protocol upgrade, queues policy errors, and
-  writes a response through a caller head buffer, with optional chunk
-  coalescing. It owns no memory and does no I/O.
-- `h1.ClientConn`: the sans-I/O response machine for one request at a time.
-  The caller writes the request with `h1.Writer`, feeds response bytes, and
-  consumes borrowed body slices. It handles Content-Length, chunked, and
-  close-delimited bodies, interim 1xx responses, keep-alive leftovers, and a
-  caller-owned body limit. It allocates nothing and does not own a socket.
-
-- `h1.client.blocking`: a blocking one-request client over `std.Io.net`. It
-  writes a request with `h1.Writer`, drives `h1.ClientConn`, and copies the body
-  into caller-owned storage. It allocates nothing and does not reuse the
-  connection. `just interop` runs it against a Go `net/http` server.
-
-- `http.engine`: shared server API shapes. `ResponseOptions`, the
-  `Handler(Exchange)` vtable shape, and the body/arena config knobs are common
-  to HTTP/1 and HTTP/2. The protocol-specific exchanges stay distinct.
-
-- `h1.engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
-  connection at a time; `serve` drives one stream. The handler formats a
-  response body with the exchange arena, and the connection machine handles
-  parsing, framing, keep-alive, pipelining, and policy responses. The blocking
-  engine sets every timeout to zero because a blocking syscall cannot enforce
-  them; the evented engines are separate.
-- `h1.engine.poll`, `h1.engine.epoll`, and `h1.engine.kqueue`: readiness
-  servers with fixed slots, nonblocking sockets, accept backoff, connection
-  deadlines, keep-alive and pipelining. Poll and epoll are Linux; kqueue is
-  macOS. They share the slot state machine and differ in registration, wait,
-  and the platform edge. All use the same `Handler` vtable and `Exchange` as
-  the blocking engine. `Handler.VTable.complete` reports when a borrowed
-  response body can be released. Each exchange owns an arena that is reset
-  after completion. io_uring is separate.
-- `prefix_int`: HPACK and QPACK prefix integers (RFC 7541 §5.1), shared by
-  both. Up to 32 bits, with the representation's tag bits left to the caller.
-- `huffman`: the RFC 7541 Appendix B Huffman code, shared by HPACK and QPACK.
-  Decodes into caller storage and rejects EOS and bad padding; encodes with
-  the EOS prefix padding. An eight-bit root table covers every letter and
-  digit, so the canonical scan is the rare path.
-- `hpack`: HPACK for HTTP/2. `static_table` is the RFC's 61 fields,
-  `DynamicTable` is the per-connection table; `TableStorage` is its bytes,
-  slot records, and hash array, either allocated once from an allocator or
-  wrapped over a caller byte buffer. `hpack.Decoder` turns one complete header block
-  into `Header` values copied into the caller's buffer, and `hpack.Encoder`
-  writes one. `decodeFlags`
-  records the RFC 7541 §6.2.3 never-indexed flag, and `encodeModes` takes one
-  `Mode` per field. The encoder indexes by default, reuses an exact pair as an
-  indexed field, Huffman-codes only when that is strictly shorter, and sends
-  the table size update a SETTINGS change requires. The Appendix C request and
-  response sequences are the tests.
-- `h2.frame`: sans-I/O HTTP/2 framing (RFC 9113 §4, §6). `parse` takes the
-  bytes so far and returns the frame header and a typed payload; `Writer`
-  fills a caller buffer and patches the 24-bit length. Frame syntax only:
-  stream state, settings, and CONTINUATION assembly belong above it. h2c and
-  h2 over TLS share it.
-- `h2.head`: request and response heads over the field list HPACK produced
-  (RFC 9113 §8.2, §8.3). Pseudo-headers are extracted and validated, the
-  regular fields come back as `Headers`, and CONNECT and extended CONNECT are
-  handled. Malformed sections are a stream error PROTOCOL_ERROR. Cookie lines
-  are not combined; the caller owns that storage.
-- `h2.settings`, `h2.flow`, `h2.stream`, and `h2.header_block`: the state
-  pieces the h2 session composes. Settings carry the RFC 9113 defaults and
-  validate a peer's values; flow-control windows are signed for a shrunk
-  initial window; stream transitions follow §5.1 and allocate identifiers by
-  role parity; header-block assembly joins CONTINUATION fragments into a
-  caller-owned buffer.
-- `h2.Session`: the sans-I/O h2 connection machine. It owns the preface,
-  SETTINGS, streams, HPACK, flow control, CONTINUATION assembly, and the
-  outbound queue. `receive` and `send` move bytes; `nextEvent` returns decoded
-  requests, responses, DATA, trailers, resets, and GOAWAY; the `submit*`
-  methods queue frames, `submitResponse` takes a typed
-  `http.response.Response` (status and content length stay values until the
-  encoder writes them), and `submitSettings` sends a local SETTINGS change. The
-  allocator is per call and never stored. Stream
-  records and output chunks come from fixed-record pools, so a
-  `FixedBufferAllocator` gives the connection a fixed ceiling. The h2c example
-  is the conformance target: `just conformance` runs h2spec against it, and the
-  full suite passes in strict mode.
-- `h2.engine.blocking`: a blocking server engine over `std.Io`, the h2
-  counterpart to `h1.engine.blocking`. `serve` drives one connection and `run`
-  is the accept loop. The shared `h2.engine.Connection` core buffers one
-  request per stream and hands it to a type-erased `Handler` as an `Exchange`:
-  a typed head, the whole body up to `body_bytes`, and trailers, with a
-  per-stream arena. `respond` records the
-  response and the engine sends it under flow control; `complete` and
-  `report_error` close the lifecycle. The h2c example is this engine with a
-  thread per connection above `serve`; `h2.Session` remains the streaming
-  escape hatch.
-- `h2.engine.poll`, `h2.engine.epoll`, and `h2.engine.kqueue`: the readiness
-  engines. One thread, fixed connection slots, nonblocking sockets, and the same
-  `Connection` core and `Exchange` handler. poll and epoll are Linux; kqueue is
-  macOS. The wait backends and platform edge move to `src/transport`, shared
-  with the h1 engines. Optional idle, write, total, head, and body deadlines,
-  accept backoff, and a GOAWAY drain on stop are in `Config`.
-  `conformance-run-readiness` runs h2spec against the readiness example, and
-  `just ci` includes the strict run.
-- `http_tls.h2.engine.tls.poll`, `.epoll`, and `.kqueue`: the same readiness
-  engines over TLS 1.3. TLS comes from `tls_nonblocking` in
-  `baskingspot/tls`; the readiness slot owns the TLS handshake and record
-  buffers. This lives in the separate `http_tls` module, so an h2c-only build
-  imports no TLS code and links no crypto library. Set `Config.transport` with
-  a handshake template, certificate chain, and signer; the transport replaces
-  the ephemeral keypairs and random per accepted connection. The h2c transport
-  and the TLS transport are interchangeable below `h2.engine.Connection`.
-  `conformance-run-tls-readiness` runs h2spec over TLS, and `just ci` includes
-  the strict run.
-- `content_length`: `Content-Length` parsing and combination. Repeated values
-  must agree, a comma list of identical values is accepted, and non-digits,
-  conflicts, and overflow are errors. `null` means the field was absent.
-  `content_length.Parser` feeds one field line at a time for a caller that
-  already has a field view. The caller owns the rule that `Transfer-Encoding`
-  and `Content-Length` cannot both frame a request; `h1.framing` applies it.
-
-Ranges, entity tags, dates, media types, and form decoding are next. The parser
-modules remain free of server types. `h1.engine.blocking`,
-`h1.engine.poll`, `h1.engine.epoll`, and `h1.engine.kqueue` are the servers in
-the package; io_uring remains separate, and the parser modules still have no
-I/O runtime.
-
-## Usage
+It is mid-level on purpose. There is no router, no middleware, and no request
+type you cannot see through: `h1.ServerConn` and `h2.Session` hand you events,
+and an engine is a listener and a handler loop around them.
 
 ```zig
 const http = @import("http");
 
-const coding = http.encoding.negotiate("gzip;q=0.5, br;q=1", &.{ "br", "gzip" });
-// "br"
+fn hostOf(bytes: []const u8) !?[]const u8 {
+    var storage: [32]http.Header = undefined;
+    var search: http.h1.SearchState = .init;
+    const parsed = try http.h1.parseRequest(bytes, &search, &storage);
+    return http.h1.host(parsed.head.headers); // borrows `bytes`
+}
 ```
 
-The token is borrowed from `supported`; `"identity"` is a static string. The
-tests carry the q-value, wildcard, and identity rules.
+The library is pre-1.0 and the API is not frozen; a consumer pins a version.
+
+## What is in it
+
+- [Field values](https://baskingspot.dev/http/#field-values): `content_length.parse`, `encoding.negotiate`, `token_list.contains`, and `transfer_encoding.summarize` read one field family each, and `Cursor` is the byte position all of them walk.
+- [Headers](https://baskingspot.dev/http/#headers): `Headers.get`, `values`, and `containsToken` look up a field section in wire order and fold ASCII case, and duplicate lines stay separate.
+- [Method and status](https://baskingspot.dev/http/#method-and-status): `Method.parse` is case-sensitive, `Status` is an open enum so an unnamed three-digit code is still a value, and `WireVersion` keeps the exact digits.
+- [The h1 message](https://baskingspot.dev/http/#the-h1-message): `h1.parseRequest` returns borrowed slices or `error.Incomplete`, `h1.framing` picks the body rule, `h1.chunked.Decoder` resumes mid-body, and `h1.Writer` writes the message back out.
+- [The h1 connection machine](https://baskingspot.dev/http/#the-h1-connection-machine): `h1.ServerConn` and `h1.ClientConn` take the bytes you read and the time you have, and own no memory and no socket.
+- [The h1 engines](https://baskingspot.dev/http/#the-h1-engines): `h1.engine.blocking.serve` takes one connection at a time, and `h1.engine.poll`, `.epoll`, and `.kqueue` serve fixed slots with deadlines.
+- [The h2 session and frames](https://baskingspot.dev/http/#the-h2-session-and-frames): `h2.frame.parse` is the frame codec, and `h2.Session` owns SETTINGS, streams, flow control, HPACK, and CONTINUATION assembly.
+- [HPACK](https://baskingspot.dev/http/#hpack): `hpack.Decoder` and `hpack.Encoder` keep the static and dynamic tables in step, and `prefix_int` and `huffman` are the primitives QPACK reuses.
+- [The client contract](https://baskingspot.dev/http/#the-client-contract): `client.Request` and `client.Body` are protocol-neutral, and `client.blocking.Client` dispatches to an h1 or an h2 adapter.
+- [Running a server](https://baskingspot.dev/http/#running-a-server): `engine.Handler(Exchange)` is the one vtable every engine calls, and `http_tls` adds TLS without putting crypto in the core.
+- [Performance](https://baskingspot.dev/http/#performance): 81 ns against 79 ns on a typical request head, 255 ns against 334 ns on a wide one, and 3.8x on a 1 KiB header value.
+- [Limits](https://baskingspot.dev/http/#limits): no streaming request bodies, no connection reuse, and the rest of what is not here.
+
+Not implemented:
+
+- Streaming request bodies: `client.Request.body` is a `[]const u8`, and an engine's `Exchange.request.body` is the whole body up to `Config.body_bytes`.
+- Chunked request bodies on the server: `h1.ServerConn` answers 501 with `RejectReason.chunked_unsupported`.
+- Response trailers: `h1.ClientConn` parses them into `Config.trailers`, and `client.ResponseHead` has no trailer list, so the fields are dropped.
+- Connection reuse and pooling: `h1.client.blocking.fetch` does not reuse the connection, and nothing in `http.client` pools one.
+- Redirects: a 3xx comes back as a `client.Response` with its `Status`; nothing follows it.
+- Cookies: `Headers` never combines `Set-Cookie`, h2 `cookie` lines stay separate, and there is no jar.
+- Routing: `h1.targetForm` classifies the target and stops. There is no router and no method dispatch.
+- Middleware: `engine.Handler` is one vtable with four entries, and nothing chains around it.
+- Server push: a received `PUSH_PROMISE` is a connection error `PROTOCOL_ERROR`.
+- HTTP/3: there is no `h3` namespace, no QPACK, and no QUIC varint.
+
+## Install
+
+```sh
+zig fetch --save git+https://github.com/baskingspot/http
+```
+
+Add the module in `build.zig`:
 
 ```zig
-const persistent = !http.token_list.contains("keep-alive, Upgrade", "close");
-const length = try http.content_length.parse(&.{ "42", "42" }); // 42
+const http = b.dependency("http", .{ .target = target, .optimize = optimize });
+exe.root_module.addImport("http", http.module("http"));
 ```
+
+`std.http` keeps its name, so `http` sits beside it in the same file. The
+package also exports `http_tls`, a second module for the TLS readiness engines;
+import it only when the server terminates TLS. `http` builds with Zig 0.16 only.
+
+## Documentation
+
+- The [guide](https://baskingspot.dev/http/) says which piece to use for a task, with the symbols and the code.
+- The [API reference](https://baskingspot.dev/http/api/) documents every public symbol in `src/root.zig`.
+- [`examples/`](examples/) runs every engine, the two clients, and a small curl. `just check-example` builds all of them.
+- [`CHANGELOG.md`](CHANGELOG.md) records what moved in the API.
+- [`AGENTS.md`](AGENTS.md) has the working notes for the repository.
 
 ## Work on it
 
-`nix develop` provides the toolchain. `just ci` runs what CI runs, `just bench`
-runs the benchmarks, `just fuzz` drives the fuzz targets with the built-in
-runner, and `just example` runs the HTTP/1.1 server example.
+```sh
+just ci
+```
 
-`just example-h2` runs an h2c server on `127.0.0.1:8081`, driven by
-`h2.engine.blocking`. Poke it with `curl -v --http2-prior-knowledge
-http://127.0.0.1:8081/`, or with the devshell's `nghttp -v
-http://127.0.0.1:8081/` to see the frames. `just example-h2-tls` runs the
-blocking engine over TLS 1.3 on `https://127.0.0.1:8443/`, using the blocking
-`tls_std` integration from `baskingspot/tls` and ALPN `h2`.
-`just example-h2-tls-readiness` runs the same protocol through the readiness
-engine and `tls_nonblocking`. `just example-h1-tls` serves HTTP/1.1 over the
-same TLS layer, `just example-h1-tls-client` fetches from it, and
-`just interop-tls` runs both. `just curl <url>` is the tiny one-request
-HTTP/1.1 client example. `just conformance-run`,
-`just conformance-run-tls`, and `just conformance-run-tls-readiness` start
-their own example, run h2spec, and stop it (pass `-S` for strict);
-`just conformance` targets an example you already started, and `just load`
-runs h2load.
+`nix develop` provides the toolchain. `just` lists the recipes, and `just ci`
+runs what CI runs: the unit tests, lint, the Go interop server, the example
+builds, and h2spec in strict mode against the readiness and TLS examples.
+
+`just bench` runs the benchmarks at `ReleaseFast`, `just fuzz 50M` drives the
+fuzz targets, and `just example` starts the HTTP/1.1 server on 127.0.0.1:8080.
+`just conformance-run` starts the h2c example and runs h2spec against it.
+`just doc` builds the site into `zig-out/site/http/`, and `just guide` serves it
+with live reload.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [`LICENSE`](LICENSE). The logo files in `docs/static/` are baskingspot
+marks and are not covered by it. See [`docs/static/LICENSE`](docs/static/LICENSE).
+
+## How it's made
+
+Built with LLM assistance. [How, in detail](https://github.com/baskingspot/.github/blob/main/docs/AI.md).
+
+<a href="https://github.com/baskingspot"><img src="https://raw.githubusercontent.com/baskingspot/.github/main/brand/assets/badge.svg" alt="baskingspot" height="24"></a>

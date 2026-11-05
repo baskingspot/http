@@ -140,7 +140,7 @@ lint:
     baskingspot-lint src
     zig fmt --check src tests bench examples build.zig build.zig.zon
     nix fmt -- --ci
-    oxfmt --check README.md AGENTS.md docs/content docs/config.toml .github
+    oxfmt --check .oxfmtrc.jsonc README.md AGENTS.md docs/content docs/config.toml .github
     actionlint
     zizmor .
     test -z "$(gofmt -l tools)"
@@ -151,7 +151,7 @@ lint:
 fmt:
     zig fmt src tests bench examples build.zig build.zig.zon
     nix fmt
-    oxfmt README.md AGENTS.md docs/content docs/config.toml .github
+    oxfmt .oxfmtrc.jsonc README.md AGENTS.md docs/content docs/config.toml .github
     just --fmt
 
 [doc("Build the site into zig-out/site/http/: the guide (Zola, from docs/) and the API reference (docgen JSON, rendered by the theme's api.html) under api/. The router in baskingspot/site serves /http/... from it")]
@@ -307,4 +307,4 @@ conformance-ci:
 
 [doc("Everything CI runs")]
 [group("ci")]
-ci: test lint interop interop-tls check-example conformance-ci
+ci: test lint interop interop-tls check-example conformance-ci doc
