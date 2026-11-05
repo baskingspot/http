@@ -69,11 +69,8 @@ pub const Client = struct {
     goaway: ?shared.GoAway = null,
     /// Response head received while the request body was still being sent.
     early_head: ?ResponseHead = null,
-    /// Response DATA received before the request body finished. The bytes are
-    /// copied and their flow control is released immediately.
-    early_body: std.ArrayList(u8) = .empty,
-    early_start: usize = 0,
-    early_end: bool = false,
+    /// Request-body bytes still to send after an early response head.
+    pending_body: []const u8 = &.{},
 
     /// Initialize in its final location. The caller owns the reader, writer,
     /// header storage, and allocator.
@@ -117,7 +114,6 @@ pub const Client = struct {
         self.closeBody();
         self.session.deinit(self.allocator);
         self.arena.deinit();
-        self.early_body.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -150,9 +146,7 @@ pub const Client = struct {
         self.request_state = .idle;
         _ = self.arena.reset(.free_all);
         self.early_head = null;
-        self.early_body.clearRetainingCapacity();
-        self.early_start = 0;
-        self.early_end = false;
+        self.pending_body = &.{};
 
         var has_length = false;
         for (value.headers) |header| {
@@ -207,9 +201,6 @@ pub const Client = struct {
         if (value.body.len != 0) {
             try self.sendRequestBody(value.body, id);
             if (self.early_head) |head| {
-                self.remote_end = self.early_end;
-                self.body_eof = self.early_end and
-                    self.early_body.items.len == self.early_start;
                 return .{ .head = head, .body = self.body };
             }
         }
@@ -300,29 +291,18 @@ pub const Client = struct {
                         .status = response.head.status,
                         .headers = try self.snapshot(response.head.headers),
                     };
-                    if (response.end_stream) self.early_end = true;
+                    if (response.end_stream) {
+                        self.remote_end = true;
+                        self.body_eof = true;
+                    } else {
+                        // Keep the tail of the request body for Body.read to
+                        // send while it consumes the response.
+                        self.pending_body = body[offset..];
+                    }
+                    return;
                 },
-                .data => |data| {
-                    if (data.stream_id != id) return error.UnexpectedStream;
-                    if (self.early_head == null) return error.UnexpectedData;
-                    self.early_body.appendSlice(self.allocator, data.bytes) catch |err| {
-                        self.connection_poisoned = true;
-                        return err;
-                    };
-                    self.session.release(self.allocator, id, data.flow_len) catch |err| {
-                        self.connection_poisoned = true;
-                        return err;
-                    };
-                    self.flushFrames() catch |err| {
-                        self.connection_poisoned = true;
-                        return err;
-                    };
-                    if (data.end_stream) self.early_end = true;
-                },
-                .trailers => |trailers| {
-                    if (trailers.stream_id != id) return error.UnexpectedStream;
-                    if (trailers.end_stream) self.early_end = true;
-                },
+                .data => return error.UnexpectedData,
+                .trailers => return error.UnexpectedTrailers,
                 .goaway => |goaway| {
                     self.goaway = .{
                         .last_stream_id = goaway.last_stream_id,
@@ -383,17 +363,6 @@ pub const Client = struct {
     fn readBody(self: *Client) shared.BodyRead {
         if (!self.active) return .eof;
 
-        if (self.early_start < self.early_body.items.len) {
-            const bytes = self.early_body.items[self.early_start..];
-            self.early_start = self.early_body.items.len;
-            return .{ .data = bytes };
-        }
-        if (self.early_end) {
-            self.remote_end = true;
-            self.body_eof = true;
-            return .eof;
-        }
-
         while (true) {
             if (self.pending.len != 0) {
                 // The previous read returned this slice. Release its flow
@@ -408,6 +377,22 @@ pub const Client = struct {
 
             if (self.body_eof) return .eof;
 
+            if (self.pending_body.len != 0) {
+                const accepted = self.session.submitData(
+                    self.allocator,
+                    self.stream_id,
+                    self.pending_body,
+                    true,
+                ) catch |err| return self.bodyFailure(err);
+                if (accepted != 0) {
+                    self.pending_body = self.pending_body[accepted..];
+                    self.flushFrames() catch |err| return self.bodyFailure(err);
+                    if (self.pending_body.len == 0) continue;
+                }
+                // No flow-control room. Read one event; response DATA is
+                // handed to the caller, which is the backpressure point.
+            }
+
             const event = self.nextEvent() catch |err| return self.bodyFailure(err);
             switch (event) {
                 .data => |data| {
@@ -416,7 +401,10 @@ pub const Client = struct {
                         return .protocol;
                     }
                     self.pending_flow = data.flow_len;
-                    if (data.end_stream) self.remote_end = true;
+                    if (data.end_stream) {
+                        self.remote_end = true;
+                        self.pending_body = &.{};
+                    }
                     if (data.bytes.len == 0) {
                         self.releasePending() catch |err| return self.bodyFailure(err);
                         if (self.remote_end) {
@@ -436,6 +424,7 @@ pub const Client = struct {
                     if (trailers.end_stream) {
                         self.remote_end = true;
                         self.body_eof = true;
+                        self.pending_body = &.{};
                         return .eof;
                     }
                 },
@@ -447,6 +436,7 @@ pub const Client = struct {
                     if (response.end_stream) {
                         self.remote_end = true;
                         self.body_eof = true;
+                        self.pending_body = &.{};
                         return .eof;
                     }
                 },
@@ -466,7 +456,14 @@ pub const Client = struct {
                     self.connection_poisoned = true;
                     return .protocol;
                 },
-                .reset => |reset| return .{ .reset = @intFromEnum(reset.code) },
+                .reset => |reset| {
+                    if (reset.code == .no_error and self.remote_end) {
+                        self.pending_body = &.{};
+                        self.body_eof = true;
+                        return .eof;
+                    }
+                    return .{ .reset = @intFromEnum(reset.code) };
+                },
                 .request => {
                     self.connection_poisoned = true;
                     return .protocol;
@@ -552,9 +549,7 @@ pub const Client = struct {
         self.net_start = 0;
         self.net_end = 0;
         self.early_head = null;
-        self.early_body.clearRetainingCapacity();
-        self.early_start = 0;
-        self.early_end = false;
+        self.pending_body = &.{};
         _ = self.arena.reset(.free_all);
     }
 
