@@ -1,10 +1,12 @@
-//! http: HTTP parsers, an HTTP/1.1 connection machine, and a blocking server
-//! engine. The parser modules are sans-I/O and allocation-free.
+//! HTTP/1.1 and HTTP/2 in Zig: field-value parsers, sans-I/O connection
+//! machines, and the engines you build a server or client on.
 //!
 //! Each parser module reads one field family or message head and returns
-//! borrowed slices or fills caller-owned storage. `h1.ServerConn` is the
-//! connection machine. `h1.engine.blocking` owns the blocking transport and the
-//! handler loop over `std.Io`; evented engines are separate.
+//! borrowed slices or fills caller-owned storage. `h1.ServerConn` and
+//! `h2.Session` are the connection machines; `client` is the protocol-neutral
+//! client contract they both implement. The engines own the transport and the
+//! handler loop over `std.Io`, and the parsers import no socket and no
+//! allocator.
 
 pub const content_length = @import("content_length.zig");
 pub const encoding = @import("encoding.zig");
