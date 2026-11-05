@@ -149,6 +149,11 @@ fn printResponse(io: Io, response: client.Response) !void {
             .reset => return error.StreamReset,
             .truncated => return error.TruncatedBody,
             .protocol => return error.ProtocolError,
+            .local => |local| return switch (local) {
+                .canceled => error.Canceled,
+                .capacity => error.LocalCapacity,
+                .out_of_memory => error.OutOfMemory,
+            },
         }
     }
     try writer.flush();

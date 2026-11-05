@@ -20,6 +20,7 @@ pub const Request = common.Request;
 pub const ResponseHead = common.ResponseHead;
 pub const Body = common.Body;
 pub const BodyRead = common.BodyRead;
+pub const Local = common.Local;
 pub const Response = common.Response;
 pub const Config = common.Config;
 
@@ -183,11 +184,14 @@ pub const Client = struct {
             if (self.pending.len != 0) self.pending = &.{};
             if (self.body_eof) return .eof;
 
-            var event = self.conn.next() catch |err| return mapBodyError(err);
+            var event = self.conn.next() catch |err| return self.bodyFailure(err);
             while (true) {
                 switch (event) {
                     .body => |bytes| {
-                        if (bytes.len == 0) return .protocol;
+                        if (bytes.len == 0) {
+                            self.dirty = true;
+                            return .protocol;
+                        }
                         self.pending = bytes;
                         return .{ .data = bytes };
                     },
@@ -195,21 +199,37 @@ pub const Client = struct {
                         self.body_eof = true;
                         return .eof;
                     },
-                    .need_more => event = self.readEvent() catch |err| return mapBodyError(err),
-                    .response => return .protocol,
-                    .closed => return .truncated,
+                    .need_more => event = self.readEvent() catch |err| return self.bodyFailure(err),
+                    .response => {
+                        self.dirty = true;
+                        return .protocol;
+                    },
+                    .closed => {
+                        self.dirty = true;
+                        return .truncated;
+                    },
                 }
             }
         }
     }
 
+    fn bodyFailure(self: *Client, err: anyerror) BodyRead {
+        const outcome = mapBodyError(err);
+        switch (outcome) {
+            .data, .eof, .reset => {},
+            .truncated, .protocol, .local => self.dirty = true,
+        }
+        return outcome;
+    }
+
     fn mapBodyError(err: anyerror) BodyRead {
         return switch (err) {
+            error.Canceled => .{ .local = .canceled },
+            error.OutOfMemory => .{ .local = .out_of_memory },
+            error.BufferTooSmall, error.WouldBlock => .{ .local = .capacity },
             error.Incomplete,
             error.EndOfStream,
             error.ReadFailed,
-            error.Canceled,
-            error.WouldBlock,
             => .truncated,
             else => .protocol,
         };
@@ -232,7 +252,7 @@ pub const Client = struct {
                 switch (self.readBody()) {
                     .data => |bytes| drained += bytes.len,
                     .eof => break,
-                    .reset, .truncated, .protocol => {
+                    .reset, .truncated, .protocol, .local => {
                         self.dirty = true;
                         break;
                     },

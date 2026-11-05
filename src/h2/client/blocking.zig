@@ -120,8 +120,9 @@ pub const Client = struct {
         return self.connection_poisoned;
     }
 
-    /// The connection-level GOAWAY boundary, if one arrived. A body result of
-    /// `truncated` above this boundary was not processed by the peer.
+    /// The connection-level GOAWAY boundary, if one arrived. Compare with
+    /// `streamId()`: a body result of `truncated` above this boundary was not
+    /// processed by the peer.
     pub fn goAway(self: *const Client) ?shared.GoAway {
         return self.goaway;
     }
@@ -174,12 +175,21 @@ pub const Client = struct {
         self.net_end = 0;
 
         errdefer self.closeBody();
-        try self.flushFrames();
+        self.flushFrames() catch |err| {
+            self.connection_poisoned = true;
+            return err;
+        };
 
         while (true) {
-            const event = try self.nextEvent();
+            const event = self.nextEvent() catch |err| {
+                self.connection_poisoned = true;
+                return err;
+            };
             switch (event) {
-                .settings => try self.flushFrames(),
+                .settings => self.flushFrames() catch |err| {
+                    self.connection_poisoned = true;
+                    return err;
+                },
                 .window_update => {},
                 .response => |response| {
                     if (response.stream_id != id) return error.UnexpectedStream;
@@ -264,10 +274,7 @@ pub const Client = struct {
                 // The previous read returned this slice. Release its flow
                 // before advancing; the caller is done with it by contract.
                 self.pending = &.{};
-                self.releasePending() catch |err| {
-                    self.connection_poisoned = true;
-                    return mapBodyError(err);
-                };
+                self.releasePending() catch |err| return self.bodyFailure(err);
                 if (self.remote_end) {
                     self.body_eof = true;
                     return .eof;
@@ -276,17 +283,17 @@ pub const Client = struct {
 
             if (self.body_eof) return .eof;
 
-            const event = self.nextEvent() catch |err| return mapBodyError(err);
+            const event = self.nextEvent() catch |err| return self.bodyFailure(err);
             switch (event) {
                 .data => |data| {
-                    if (data.stream_id != self.stream_id) return .protocol;
+                    if (data.stream_id != self.stream_id) {
+                        self.connection_poisoned = true;
+                        return .protocol;
+                    }
                     self.pending_flow = data.flow_len;
                     if (data.end_stream) self.remote_end = true;
                     if (data.bytes.len == 0) {
-                        self.releasePending() catch |err| {
-                            self.connection_poisoned = true;
-                            return mapBodyError(err);
-                        };
+                        self.releasePending() catch |err| return self.bodyFailure(err);
                         if (self.remote_end) {
                             self.body_eof = true;
                             return .eof;
@@ -297,7 +304,10 @@ pub const Client = struct {
                     return .{ .data = data.bytes };
                 },
                 .trailers => |trailers| {
-                    if (trailers.stream_id != self.stream_id) return .protocol;
+                    if (trailers.stream_id != self.stream_id) {
+                        self.connection_poisoned = true;
+                        return .protocol;
+                    }
                     if (trailers.end_stream) {
                         self.remote_end = true;
                         self.body_eof = true;
@@ -305,14 +315,17 @@ pub const Client = struct {
                     }
                 },
                 .response => |response| {
-                    if (response.stream_id != self.stream_id) return .protocol;
+                    if (response.stream_id != self.stream_id) {
+                        self.connection_poisoned = true;
+                        return .protocol;
+                    }
                     if (response.end_stream) {
                         self.remote_end = true;
                         self.body_eof = true;
                         return .eof;
                     }
                 },
-                .settings => self.flushFrames() catch |err| return mapBodyError(err),
+                .settings => self.flushFrames() catch |err| return self.bodyFailure(err),
                 .window_update => {},
                 .goaway => |goaway| {
                     self.goaway = .{
@@ -329,24 +342,36 @@ pub const Client = struct {
                     return .protocol;
                 },
                 .reset => |reset| return .{ .reset = @intFromEnum(reset.code) },
-                .request => return .protocol,
+                .request => {
+                    self.connection_poisoned = true;
+                    return .protocol;
+                },
             }
         }
     }
 
-    fn mapBodyError(err: anyerror) shared.BodyRead {
-        return switch (err) {
+    fn bodyFailure(self: *Client, err: anyerror) shared.BodyRead {
+        const outcome: shared.BodyRead = switch (err) {
             error.EndOfStream,
             error.ConnectionClosed,
             error.ReadFailed,
             error.WriteFailed,
             error.BrokenPipe,
-            error.InputFull,
-            error.WouldBlock,
-            error.Canceled,
             => .truncated,
+            error.Canceled => .{ .local = .canceled },
+            error.InputFull, error.WouldBlock => .{ .local = .capacity },
+            error.OutOfMemory => .{ .local = .out_of_memory },
             else => .protocol,
         };
+        switch (outcome) {
+            .truncated, .protocol => self.connection_poisoned = true,
+            .local => |local| switch (local) {
+                .out_of_memory => self.connection_poisoned = true,
+                .canceled, .capacity => {},
+            },
+            .data, .eof, .reset => {},
+        }
+        return outcome;
     }
 
     fn releasePending(self: *Client) !void {
@@ -402,10 +427,7 @@ pub const Client = struct {
 
     fn nextEvent(self: *Client) !Event {
         while (true) {
-            const event = self.session.nextEvent(self.allocator) catch |err| {
-                self.connection_poisoned = true;
-                return err;
-            };
+            const event = try self.session.nextEvent(self.allocator);
             if (event) |value| return value;
             try self.flushFrames();
 
@@ -421,10 +443,7 @@ pub const Client = struct {
                     }
                     continue;
                 }
-                const next = self.session.nextEvent(self.allocator) catch |err| {
-                    self.connection_poisoned = true;
-                    return err;
-                };
+                const next = try self.session.nextEvent(self.allocator);
                 if (next) |value| return value;
                 if (self.session.isClosed()) {
                     self.connection_poisoned = true;
@@ -484,10 +503,7 @@ pub const Client = struct {
     fn flushFrames(self: *Client) !void {
         var out: [9 + 16 * 1024]u8 = undefined;
         while (true) {
-            const n = self.session.sendFrame(&out) catch |err| {
-                self.connection_poisoned = true;
-                return err;
-            };
+            const n = try self.session.sendFrame(&out);
             if (n == 0) break;
 
             const end_headers = isEndHeaders(out[0..n], self.stream_id);
@@ -495,7 +511,6 @@ pub const Client = struct {
                 self.request_state = .in_flight;
             }
             self.writer.writeAll(out[0..n]) catch |err| {
-                self.connection_poisoned = true;
                 // writeAll may have accepted a prefix containing the complete
                 // END_HEADERS frame. A non-idempotent request must not be
                 // retried once that frame could be visible.
@@ -505,7 +520,6 @@ pub const Client = struct {
                 return err;
             };
             self.writer.flush() catch |err| {
-                self.connection_poisoned = true;
                 if (end_headers and self.request_state != .committed) {
                     self.request_state = .committed;
                 }

@@ -2,7 +2,8 @@
 //!
 //! Protocol adapters provide a negotiated transport and implement the same
 //! request, response-head, and streaming-body shapes. Response heads are
-//! snapshots; body bytes are always copied to the caller.
+//! snapshots; body bytes are borrowed from the connection until the next
+//! advancing operation.
 
 const std = @import("std");
 const testing = std.testing;
@@ -51,6 +52,19 @@ pub const ResponseHead = struct {
     headers: Headers,
 };
 
+/// A local failure, not a peer outcome. The enum is closed: a new local
+/// failure adds a variant rather than reusing `protocol`.
+pub const Local = enum {
+    /// Our cancellation. The stream is unfinished; close or reset the stream
+    /// and keep the connection.
+    canceled,
+    /// A local buffer or policy limit ended this response. Reset the stream;
+    /// the connection survives and this request is done.
+    capacity,
+    /// Allocation failed. The connection is not usable; close it.
+    out_of_memory,
+};
+
 /// The terminal outcome of one blocking body read.
 pub const BodyRead = union(enum) {
     /// A borrowed body slice. Never empty. Its lifetime is per connection, not
@@ -66,8 +80,11 @@ pub const BodyRead = union(enum) {
     /// The transport or stream ended before the body was complete. A GOAWAY
     /// boundary can make this retry-safe; see the connection's `goAway()`.
     truncated,
-    /// The peer sent a malformed frame or an invalid response.
+    /// The peer sent a malformed frame or an invalid response. The connection
+    /// is unusable and must be closed.
     protocol,
+    /// A local failure. See `Local` for whether the connection survives.
+    local: Local,
 };
 
 /// A non-blocking body outcome. Blocking `Body` adapters never return
@@ -78,6 +95,7 @@ pub const BodyStep = union(enum) {
     reset: u32,
     truncated,
     protocol,
+    local: Local,
     would_block,
 };
 
@@ -85,7 +103,8 @@ pub const BodyStep = union(enum) {
 ///
 /// `read` may block, never returns `would_block`, never returns empty data, and
 /// reports completion with `eof`. A step client gets `BodyStep`; the evented
-/// engines deliver exchanges through their own pump.
+/// engines deliver exchanges through their own pump. Holding four 16 KiB
+/// slices exhausts the default 65,535-byte h2 connection window.
 pub const Body = struct {
     ptr: *anyopaque,
     vtable: *const VTable,

@@ -12,8 +12,13 @@ All notable changes to http are recorded here. The format follows
   operation, never empty, and pins the h2 connection flow-control window until
   the next read or close. `reset` carries the RST_STREAM code, including
   REFUSED_STREAM; `truncated` covers an incomplete body; `protocol` covers a
-  peer violation. GOAWAY stays on the connection (`h2.client.blocking.Client.goAway`).
-  Blocking `Body` never returns `would_block`; evented clients use `BodyStep`.
+  peer violation. Local failures are `local: {canceled, capacity,
+  out_of_memory}`: canceled keeps the connection, capacity keeps it after a
+  stream reset, and out_of_memory closes it. `protocol` means the connection
+  is unusable. GOAWAY stays on the connection
+  (`h2.client.blocking.Client.goAway`); compare `streamId()` for the retry
+  boundary. Blocking `Body` never returns `would_block`; evented clients use
+  `BodyStep`.
 
 - An idle h1 connection with no request bytes closes silently when its idle
   deadline expires. A 408 is queued only after a request head or body has
