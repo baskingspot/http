@@ -5,8 +5,9 @@
 //!     just curl https://127.0.0.1:8444/
 //!
 //! Hosts are IP literals. `--http2` is h2c prior knowledge on cleartext.
-//! HTTPS currently uses h1 with `tls_std` and no chain verification, because
-//! this example is for local experiments, not a replacement for curl.
+//! HTTPS offers h2 and http/1.1 through ALPN and uses the selection. It uses
+//! `tls_std` with no chain verification, because this example is for local
+//! experiments, not a replacement for curl.
 
 const std = @import("std");
 const Io = std.Io;
@@ -28,10 +29,7 @@ pub fn main(init: std.process.Init) !void {
         print("usage: curl [--http2] <http://ip[:port]/path | https://ip[:port]/path>\n", .{});
         return error.InvalidArguments;
     }
-    const protocol: client.Protocol = if (args.len == 3) .h2 else .h1;
     const url_text = args[args.len - 1];
-    if (urlIsHttps(url_text) and protocol == .h2) return error.Http2TlsUnsupported;
-
     const url = try parseUrl(arena, url_text);
     const request: client.Request = .{
         .method_token = "GET",
@@ -46,15 +44,22 @@ pub fn main(init: std.process.Init) !void {
         try conn.connect(io, stream, .{
             .host = null,
             .verify = .insecure,
-            .alpn = &.{"http/1.1"},
+            .alpn = &.{ "h2", "http/1.1" },
         });
         defer {
             conn.deinit();
             conn.close();
         }
+        const alpn = conn.selectedAlpn() orelse "http/1.1";
+        const negotiated: client.Protocol = if (mem.eql(u8, alpn, "h2"))
+            .h2
+        else if (mem.eql(u8, alpn, "http/1.1"))
+            .h1
+        else
+            return error.UnsupportedAlpn;
         var http_client: client.Client = undefined;
         try http_client.init(conn.reader(), conn.writer(), .{
-            .protocol = protocol,
+            .protocol = negotiated,
             .common = .{ .allocator = arena },
         });
         defer http_client.deinit();
@@ -66,6 +71,7 @@ pub fn main(init: std.process.Init) !void {
         var write_buffer: [4 * 1024]u8 = undefined;
         var stream_writer = stream.writer(io, &write_buffer);
         var stream_reader = stream.reader(io, &.{});
+        const protocol: client.Protocol = if (args.len == 3) .h2 else .h1;
         var http_client: client.Client = undefined;
         try http_client.init(&stream_reader.interface, &stream_writer.interface, .{
             .protocol = protocol,
