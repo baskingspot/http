@@ -30,6 +30,8 @@ pub const Config = struct {
     headers: []Header,
     response_head_buffer: []u8,
     common: common.Config = .{},
+    /// Coalesce and cap response chunks. Zero preserves separate head/body.
+    write_chunk_bytes: usize = 0,
 };
 
 /// Accept connections until an unrecoverable accept error.
@@ -95,6 +97,7 @@ pub fn serveIo(
         .request_buffer = config.request_buffer,
         .headers = config.headers,
         .response_buffer = config.response_head_buffer,
+        .write_chunk_bytes = config.write_chunk_bytes,
         .limits = .{
             .body_bytes = config.common.body_bytes,
             .idle_timeout = .zero,

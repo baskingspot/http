@@ -73,8 +73,8 @@ ready to depend on.
   `h1.ServerConn` drives one connection over those pieces: it can choose the
   per-request body storage from the request head, keeps the leftover for a
   pipelined request, hands over a protocol upgrade, queues policy errors, and
-  writes a response through a caller head buffer. It owns no memory and does no
-  I/O.
+  writes a response through a caller head buffer, with optional chunk
+  coalescing. It owns no memory and does no I/O.
 - `h1.ClientConn`: the sans-I/O response machine for one request at a time.
   The caller writes the request with `h1.Writer`, feeds response bytes, and
   consumes borrowed body slices. It handles Content-Length, chunked, and

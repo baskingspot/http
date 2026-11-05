@@ -87,6 +87,10 @@ pub const Config = struct {
     headers: []Header,
     response_buffer: []u8,
     limits: Limits = .{},
+    /// Coalesce the head and body prefix when they fit. The buffer supplies
+    /// the copy room and every send slice respects this cap. Zero preserves
+    /// the separate head/body slices.
+    write_chunk_bytes: usize = 0,
 };
 
 // ast-grep-ignore: public-struct-field-default -- options bag; the caller overrides one knob
@@ -178,10 +182,40 @@ pub const RespondError = h1.Writer.Error || error{
 const Phase = enum { head, body, app, response, drain, switched, closed };
 const ResponseKind = enum { none, interim, final };
 
+/// Values in storage, not the public options shape.
+const StoredLimits = struct {
+    body_bytes: usize,
+    min_read_bytes: usize,
+    idle_timeout: i64,
+    head_timeout: i64,
+    body_timeout: i64,
+    write_timeout: i64,
+    total_timeout: i64,
+    drain_timeout: i64,
+};
+
+fn storedDuration(duration: Io.Duration) i64 {
+    return @intCast(@min(duration.nanoseconds, std.math.maxInt(i64)));
+}
+
+fn storedLimits(limits: Limits) StoredLimits {
+    return .{
+        .body_bytes = limits.body_bytes,
+        .min_read_bytes = limits.min_read_bytes,
+        .idle_timeout = storedDuration(limits.idle_timeout),
+        .head_timeout = storedDuration(limits.head_timeout),
+        .body_timeout = storedDuration(limits.body_timeout),
+        .write_timeout = storedDuration(limits.write_timeout),
+        .total_timeout = storedDuration(limits.total_timeout),
+        .drain_timeout = storedDuration(limits.drain_timeout),
+    };
+}
+
 request_buffer: []u8,
 headers: []Header,
 response_buffer: []u8,
-limits: Limits,
+limits: StoredLimits,
+write_chunk_bytes: usize,
 
 phase: Phase,
 used: usize,
@@ -215,10 +249,11 @@ response_head_sent: usize,
 response_body_sent: usize,
 response_kind: ResponseKind,
 
-last_now: Io.Timestamp,
-phase_start: ?Io.Timestamp,
-phase_deadline: ?Io.Timestamp,
-total_deadline: ?Io.Timestamp,
+// Keep the storage at i64 nanoseconds. The public calls still take
+// Io.Timestamp; an embedding pool must not inherit 16-byte alignment.
+last_now: i64,
+phase_deadline: ?i64,
+total_deadline: ?i64,
 
 pub fn init(config: Config) ServerConn {
     assert(config.response_buffer.len >= 64);
@@ -226,7 +261,8 @@ pub fn init(config: Config) ServerConn {
         .request_buffer = config.request_buffer,
         .headers = config.headers,
         .response_buffer = config.response_buffer,
-        .limits = config.limits,
+        .limits = storedLimits(config.limits),
+        .write_chunk_bytes = config.write_chunk_bytes,
 
         .phase = .head,
         .used = 0,
@@ -256,8 +292,7 @@ pub fn init(config: Config) ServerConn {
         .response_body_sent = 0,
         .response_kind = .none,
 
-        .last_now = .zero,
-        .phase_start = null,
+        .last_now = 0,
         .phase_deadline = null,
         .total_deadline = null,
     };
@@ -269,7 +304,7 @@ pub fn init(config: Config) ServerConn {
 pub fn start(self: *ServerConn, now: Io.Timestamp) void {
     assert(self.phase == .head);
     self.idle = true;
-    self.last_now = now;
+    self.last_now = @intCast(now.nanoseconds);
     self.startIdleDeadline(now);
 }
 
@@ -293,7 +328,7 @@ pub fn recvBuffer(self: *ServerConn) []u8 {
 pub fn received(self: *ServerConn, n: usize, now: Io.Timestamp) Event {
     assert(self.phase == .head or self.phase == .body);
 
-    self.last_now = now;
+    self.last_now = @intCast(now.nanoseconds);
     if (n == 0) return self.eof(now);
     if (self.timedOut(now)) return self.reject(.request_timeout, false, .request_timeout);
 
@@ -338,7 +373,7 @@ pub fn received(self: *ServerConn, n: usize, now: Io.Timestamp) Event {
 /// the next read, so a pipelined request is handled without a syscall.
 pub fn advance(self: *ServerConn, now: Io.Timestamp) Event {
     assert(self.phase == .head or self.phase == .body);
-    self.last_now = now;
+    self.last_now = @intCast(now.nanoseconds);
 
     if (self.used == 0) {
         assert(self.phase == .head);
@@ -359,7 +394,7 @@ pub fn advance(self: *ServerConn, now: Io.Timestamp) Event {
 /// The peer closed. A clean close before any request bytes is `.closed`; a
 /// partial head or body is the policy 400.
 pub fn eof(self: *ServerConn, now: Io.Timestamp) Event {
-    self.last_now = now;
+    self.last_now = @intCast(now.nanoseconds);
     if (self.phase == .head and self.idle and onlyBlankLines(self.request_buffer[0..self.used])) {
         self.phase = .closed;
         self.clearDeadlines();
@@ -371,7 +406,7 @@ pub fn eof(self: *ServerConn, now: Io.Timestamp) Event {
 /// The poll deadline fired. Covers every phase. A head, body, or application
 /// timeout queues a 408. A response or drain timeout closes.
 pub fn tick(self: *ServerConn, now: Io.Timestamp) Tick {
-    self.last_now = now;
+    self.last_now = @intCast(now.nanoseconds);
     if (!self.timedOut(now)) return .none;
 
     return switch (self.phase) {
@@ -459,16 +494,23 @@ pub fn reviewRejection(self: *ServerConn, replacement: PolicyResponse) RespondEr
 /// The next response bytes, in order. Zero-length head means the head is done.
 pub fn sendSlices(self: *const ServerConn) Slices {
     if (self.phase != .response) return .{ .head = "", .body = "" };
-    return .{
-        .head = self.response_buffer[self.response_head_sent..self.response_head_len],
-        .body = if (self.sendBody()) self.response[self.response_body_sent..] else "",
-    };
+    var head = self.response_buffer[self.response_head_sent..self.response_head_len];
+    var body = if (self.sendBody()) self.response[self.response_body_sent..] else "";
+    if (self.write_chunk_bytes != 0) {
+        head = head[0..@min(head.len, self.write_chunk_bytes)];
+    }
+    if (self.write_chunk_bytes != 0 and head.len < self.write_chunk_bytes) {
+        body = body[0..@min(body.len, self.write_chunk_bytes - head.len)];
+    } else if (self.write_chunk_bytes != 0) {
+        body = "";
+    }
+    return .{ .head = head, .body = body };
 }
 
 /// Account for `n` response bytes written from `sendSlices`.
 pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
     assert(self.phase == .response);
-    self.last_now = now;
+    self.last_now = @intCast(now.nanoseconds);
 
     const head_remaining = self.response_head_len - self.response_head_sent;
     const body_remaining = if (self.sendBody()) self.response.len - self.response_body_sent else 0;
@@ -509,9 +551,8 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
     if (!self.keep_alive) {
         const drain = self.drain_close;
         self.drain_close = false;
-        if (drain and self.limits.drain_timeout.nanoseconds != 0) {
+        if (drain and self.limits.drain_timeout != 0) {
             self.phase = .drain;
-            self.phase_start = now;
             self.phase_deadline = addDeadline(now, self.limits.drain_timeout);
             self.total_deadline = null;
             return .close_after_drain;
@@ -528,7 +569,6 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
     self.used = leftover;
     self.search = .init;
     self.phase = .head;
-    self.phase_start = null;
     self.phase_deadline = null;
     self.total_deadline = null;
     self.body_start = 0;
@@ -600,7 +640,7 @@ fn setBodyStorage(self: *ServerConn, storage: []u8, external: bool) Event {
     self.body_target = storage;
     self.external_body = external;
     self.phase = .body;
-    self.startPhase(self.last_now, self.limits.body_timeout);
+    self.startPhase(.fromNanoseconds(self.last_now), self.limits.body_timeout);
     if (self.body_received == self.body_len) return self.completeRequest();
     if (self.expect_continue and self.version != .@"HTTP/1.0") {
         self.queueContinue() catch
@@ -615,7 +655,8 @@ fn setBodyStorage(self: *ServerConn, storage: []u8, external: bool) Event {
 /// connection is closed. Call `start` after accept so a silent connection has
 /// a deadline.
 pub fn deadline(self: *const ServerConn) ?Io.Timestamp {
-    return earliest(self.phase_deadline, self.total_deadline);
+    const at = earliest(self.phase_deadline, self.total_deadline) orelse return null;
+    return .fromNanoseconds(at);
 }
 
 fn parseHead(self: *ServerConn, _: Io.Timestamp) Event {
@@ -696,7 +737,6 @@ fn parseHead(self: *ServerConn, _: Io.Timestamp) Event {
 
     self.body_received = arrived;
     self.phase = .app;
-    self.phase_start = null;
     return .{ .request_head = .{
         .head = self.head,
         .body_bytes = self.body_len,
@@ -757,7 +797,6 @@ fn scratchBodyRead(self: *const ServerConn, remaining: usize) bool {
 fn completeRequest(self: *ServerConn) Event {
     self.phase = .app;
     self.idle = false;
-    self.phase_start = null;
     self.phase_deadline = null;
     return .{ .request = .{
         .head = self.head,
@@ -828,10 +867,25 @@ fn queueResponse(
 
     self.response_head_len = io.buffered().len;
     self.response = body;
+    if (self.sendBody() and self.write_chunk_bytes != 0 and
+        self.response_head_len < self.write_chunk_bytes)
+    {
+        const room = @min(
+            self.write_chunk_bytes - self.response_head_len,
+            self.response_buffer.len - self.response_head_len,
+        );
+        const copied = @min(room, body.len);
+        @memcpy(
+            self.response_buffer[self.response_head_len..][0..copied],
+            body[0..copied],
+        );
+        self.response_head_len += copied;
+        self.response = body[copied..];
+    }
     self.response_head_sent = 0;
     self.response_body_sent = 0;
     self.response_kind = kind;
-    self.phase_deadline = addDeadline(self.last_now, self.limits.write_timeout);
+    self.phase_deadline = addDeadline(.fromNanoseconds(self.last_now), self.limits.write_timeout);
 }
 
 fn queueContinue(self: *ServerConn) h1.Writer.Error!void {
@@ -847,7 +901,7 @@ fn queueContinue(self: *ServerConn) h1.Writer.Error!void {
     self.response_body_sent = 0;
     self.response_kind = .interim;
     self.phase = .response;
-    self.phase_deadline = addDeadline(self.last_now, self.limits.write_timeout);
+    self.phase_deadline = addDeadline(.fromNanoseconds(self.last_now), self.limits.write_timeout);
 }
 
 fn sendBody(self: *const ServerConn) bool {
@@ -865,7 +919,6 @@ fn statusAllowsBody(status: Status) bool {
 }
 
 fn clearDeadlines(self: *ServerConn) void {
-    self.phase_start = null;
     self.phase_deadline = null;
     self.total_deadline = null;
 }
@@ -880,7 +933,7 @@ fn startInputDeadlines(self: *ServerConn, now: Io.Timestamp) void {
         assert(self.phase == .head);
         self.idle = false;
         self.startPhase(now, self.limits.head_timeout);
-    } else if (self.phase_start == null) {
+    } else {
         self.startPhase(now, switch (self.phase) {
             .head => self.limits.head_timeout,
             .body => self.limits.body_timeout,
@@ -892,13 +945,10 @@ fn startInputDeadlines(self: *ServerConn, now: Io.Timestamp) void {
 fn startIdleDeadline(self: *ServerConn, now: Io.Timestamp) void {
     assert(self.phase == .head);
     assert(self.idle);
-    if (self.phase_start == null) {
-        self.startPhase(now, self.limits.idle_timeout);
-    }
+    self.startPhase(now, self.limits.idle_timeout);
 }
 
-fn startPhase(self: *ServerConn, now: Io.Timestamp, timeout: Io.Duration) void {
-    self.phase_start = now;
+fn startPhase(self: *ServerConn, now: Io.Timestamp, timeout: i64) void {
     self.phase_deadline = addDeadline(now, timeout);
 }
 
@@ -907,15 +957,16 @@ fn timedOut(self: *const ServerConn, now: Io.Timestamp) bool {
     return now.durationTo(at).nanoseconds < 0;
 }
 
-fn addDeadline(now: Io.Timestamp, duration: Io.Duration) ?Io.Timestamp {
-    if (duration.nanoseconds == 0) return null;
-    return now.addDuration(duration);
+fn addDeadline(now: Io.Timestamp, duration: i64) ?i64 {
+    if (duration == 0) return null;
+    const ns = now.addDuration(.{ .nanoseconds = duration }).nanoseconds;
+    return @intCast(@min(ns, std.math.maxInt(i64)));
 }
 
-fn earliest(a: ?Io.Timestamp, b: ?Io.Timestamp) ?Io.Timestamp {
+fn earliest(a: ?i64, b: ?i64) ?i64 {
     if (a == null) return b;
     if (b == null) return a;
-    return if (a.?.nanoseconds <= b.?.nanoseconds) a else b;
+    return if (a.? <= b.?) a else b;
 }
 
 fn expectsContinue(headers: Headers) error{UnsupportedExpect}!bool {
@@ -949,12 +1000,17 @@ const TestConn = struct {
     out_len: usize = 0,
 
     fn init(self: *TestConn, limits: Limits) void {
+        self.initChunk(limits, 0);
+    }
+
+    fn initChunk(self: *TestConn, limits: Limits, write_chunk_bytes: usize) void {
         self.* = .{ .conn = undefined };
         self.conn = .init(.{
             .request_buffer = &self.request_buffer,
             .headers = &self.headers,
             .response_buffer = &self.response_buffer,
             .limits = limits,
+            .write_chunk_bytes = write_chunk_bytes,
         });
     }
 
@@ -1755,4 +1811,51 @@ test "rejection reasons distinguish parser and framing failures" {
         .request_header_fields_too_large,
         .too_many_fields,
     );
+}
+
+test "ServerConn has ordinary pointer alignment" {
+    try testing.expect(@alignOf(ServerConn) <= @alignOf(usize));
+}
+
+test "a small response coalesces into one slice" {
+    var t: TestConn = undefined;
+    t.initChunk(.{}, 4096);
+
+    _ = try expectRequest(try t.feed("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
+    try t.conn.respond(.{ .status = .ok }, "hello");
+    const slices = t.conn.sendSlices();
+    try testing.expectEqual(0, slices.body.len);
+    try testing.expect(mem.endsWith(u8, slices.head, "\r\n\r\nhello"));
+    try testing.expectEqual(.keep_alive, std.meta.activeTag(try t.drain()));
+}
+
+test "a large body respects the write chunk cap" {
+    var t: TestConn = undefined;
+    t.initChunk(.{}, 512);
+
+    _ = try expectRequest(try t.feed("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
+    var body: [4096]u8 = undefined;
+    @memset(&body, 'z');
+    try t.conn.respond(.{ .status = .ok }, &body);
+
+    var written: usize = 0;
+    while (true) {
+        const slices = t.conn.sendSlices();
+        try testing.expect(slices.head.len + slices.body.len <= 512);
+        const done = t.conn.sent(slices.head.len + slices.body.len, t.clock.now);
+        written += slices.head.len + slices.body.len;
+        if (std.meta.activeTag(done) == .keep_alive) break;
+    }
+    try testing.expect(written > body.len);
+}
+
+test "an interim response never coalesces with its next response" {
+    var t: TestConn = undefined;
+    t.initChunk(.{}, 4096);
+    t.conn.queueContinue() catch |err| {
+        _ = @errorName(err);
+        return err;
+    };
+    try testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", t.conn.sendSlices().head);
+    try testing.expectEqual(.read, std.meta.activeTag(try t.drain()));
 }

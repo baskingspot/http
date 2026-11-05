@@ -31,6 +31,8 @@ pub const Config = struct {
     request_buffer_bytes: usize = 16 * 1024,
     headers: usize = 64,
     response_head_bytes: usize = 1024,
+    /// Coalesce and cap response chunks. Zero preserves separate head/body.
+    write_chunk_bytes: usize = 0,
     drain_bytes: usize = 4 * 1024,
     limits: h1.ServerConn.Limits = .{},
     accept_backoff: Io.Duration = .fromMilliseconds(50),
@@ -68,6 +70,7 @@ const Slot = struct {
             .headers = self.headers,
             .response_buffer = self.response_head,
             .limits = limits(config),
+            .write_chunk_bytes = config.write_chunk_bytes,
         });
     }
 };
@@ -536,6 +539,7 @@ fn makeSlot(allocator: Allocator, config: Config) !Slot {
             .headers = headers,
             .response_buffer = response_head,
             .limits = limits(config),
+            .write_chunk_bytes = config.write_chunk_bytes,
         }),
         .request = request,
         .headers = headers,

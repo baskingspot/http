@@ -7,6 +7,15 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
+- `h1.ServerConn` stores clocks and copied duration limits as i64 nanoseconds,
+  removing the i96/16-byte alignment from its public struct layout. Public
+  calls continue to use `Io.Timestamp` and `Io.Duration`.
+
+- `write_chunk_bytes` on `ServerConn.Config`, `h1.engine.blocking.Config`,
+  and h1 readiness Config coalesces a head and a fitting body prefix into one
+  slice, then caps each send at that size. Zero preserves separate head/body
+  slices; interim 100 responses remain separate.
+
 - `ResponseOptions.close` closes an h1 connection after the response and emits
   one `Connection: close`; the handler no longer needs to inspect `keep_alive`.
   h2's `Exchange.respond` rejects this field because it has no stream meaning.

@@ -182,7 +182,9 @@ one-second timeout. It is off by default; enable it when the server wants the
 listener to wake only after the peer sends data. Other platforms ignore it.
 
 A read feeds `recvBuffer` and `received`. A request calls the handler vtable.
-A write sends `sendSlices` and calls `sent`. After 100 Continue the slot
+A write sends `sendSlices` and calls `sent`. Set `write_chunk_bytes` to
+coalesce a head and its fitting body prefix and cap subsequent sends. Zero
+keeps the default separate head/body slices. After 100 Continue the slot
 returns to read. After keep-alive the engine calls `advance` before the next
 read, so a pipelined request needs no syscall. `.close_after_drain` switches
 the slot to drain; the engine reads into scratch and discards until EOF or the
