@@ -102,14 +102,15 @@ The example certificate and scalar are the public test fixture from
 ## One port, both protocols
 
 ```sh
-just example-unified       # TLS server on 127.0.0.1:8445
+just example-unified       # TLS on 8445, cleartext on 8082
 just curl https://127.0.0.1:8445/
-curl -k --http1.1 https://127.0.0.1:8445/
+just curl --http2 http://127.0.0.1:8082/
+curl http://127.0.0.1:8082/
 ```
 
-The server offers `h2` and `http/1.1` through ALPN and dispatches the blocking
-engine after the handshake. The client selects its adapter from the ALPN
-result.
+The TLS listener offers `h2` and `http/1.1` through ALPN and dispatches the
+blocking engine after the handshake. The cleartext listener reads the HTTP/2
+connection preface; anything else is HTTP/1.1.
 
 ## Tiny curl
 
