@@ -1,10 +1,12 @@
-//! A deliberately small curl: one HTTP/1.1 GET with a streaming body.
+//! A deliberately small curl: one GET with a streaming body.
 //!
 //!     just curl http://127.0.0.1:8080/
+//!     just curl --http2 http://127.0.0.1:8081/
 //!     just curl https://127.0.0.1:8444/
 //!
-//! Hosts are IP literals. HTTPS uses `tls_std` with no chain verification,
-//! because this example is for local experiments, not a replacement for curl.
+//! Hosts are IP literals. `--http2` is h2c prior knowledge on cleartext.
+//! HTTPS currently uses h1 with `tls_std` and no chain verification, because
+//! this example is for local experiments, not a replacement for curl.
 
 const std = @import("std");
 const Io = std.Io;
@@ -13,19 +15,24 @@ const Allocator = mem.Allocator;
 const print = std.debug.print;
 
 const http = @import("http");
-const client = http.h1.client.streaming;
+const client = http.client.blocking;
 const tls = @import("tls_std");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len != 2) {
-        print("usage: curl <http://ip[:port]/path | https://ip[:port]/path>\n", .{});
+    if (args.len < 2 or args.len > 3 or
+        (args.len == 3 and !mem.eql(u8, args[1], "--http2")))
+    {
+        print("usage: curl [--http2] <http://ip[:port]/path | https://ip[:port]/path>\n", .{});
         return error.InvalidArguments;
     }
+    const protocol: client.Protocol = if (args.len == 3) .h2 else .h1;
+    const url_text = args[args.len - 1];
+    if (urlIsHttps(url_text) and protocol == .h2) return error.Http2TlsUnsupported;
 
-    const url = try parseUrl(arena, args[1]);
+    const url = try parseUrl(arena, url_text);
     const request: client.Request = .{
         .method_token = "GET",
         .scheme = if (url.https) .https else .http,
@@ -47,7 +54,8 @@ pub fn main(init: std.process.Init) !void {
         }
         var http_client: client.Client = undefined;
         try http_client.init(conn.reader(), conn.writer(), .{
-            .allocator = arena,
+            .protocol = protocol,
+            .common = .{ .allocator = arena },
         });
         defer http_client.deinit();
         const response = try http_client.request(request);
@@ -60,12 +68,17 @@ pub fn main(init: std.process.Init) !void {
         var stream_reader = stream.reader(io, &.{});
         var http_client: client.Client = undefined;
         try http_client.init(&stream_reader.interface, &stream_writer.interface, .{
-            .allocator = arena,
+            .protocol = protocol,
+            .common = .{ .allocator = arena },
         });
         defer http_client.deinit();
         const response = try http_client.request(request);
         try printResponse(io, response);
     }
+}
+
+fn urlIsHttps(text: []const u8) bool {
+    return mem.startsWith(u8, text, "https://");
 }
 
 const Url = struct {
