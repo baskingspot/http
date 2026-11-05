@@ -67,6 +67,13 @@ pub const Client = struct {
     net_end: usize = 0,
     body: Body = undefined,
     goaway: ?shared.GoAway = null,
+    /// Response head received while the request body was still being sent.
+    early_head: ?ResponseHead = null,
+    /// Response DATA received before the request body finished. The bytes are
+    /// copied and their flow control is released immediately.
+    early_body: std.ArrayList(u8) = .empty,
+    early_start: usize = 0,
+    early_end: bool = false,
 
     /// Initialize in its final location. The caller owns the reader, writer,
     /// header storage, and allocator.
@@ -110,6 +117,7 @@ pub const Client = struct {
         self.closeBody();
         self.session.deinit(self.allocator);
         self.arena.deinit();
+        self.early_body.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -140,11 +148,19 @@ pub const Client = struct {
         if (self.active) return error.RequestInProgress;
         if (self.connection_poisoned) return error.ConnectionPoisoned;
         if (self.goaway != null) return error.GoAway;
-        if (value.body.len != 0) return error.RequestBodyUnsupported;
         self.request_state = .idle;
         _ = self.arena.reset(.free_all);
+        self.early_head = null;
+        self.early_body.clearRetainingCapacity();
+        self.early_start = 0;
+        self.early_end = false;
 
-        const field_count = 4 + value.headers.len;
+        var has_length = false;
+        for (value.headers) |header| {
+            if (ascii.eqlIgnoreCase(header.name, "content-length")) has_length = true;
+        }
+        const add_length = value.body.len != 0 and !has_length;
+        const field_count = 4 + value.headers.len + @as(usize, if (add_length) 1 else 0);
         const fields = try self.allocator.alloc(Header, field_count);
         defer self.allocator.free(fields);
 
@@ -158,8 +174,17 @@ pub const Client = struct {
             if (!validLowerHeaderName(header.name)) return error.InvalidHeader;
             fields[4 + index] = header;
         }
+        if (add_length) {
+            var length_text: [20]u8 = undefined;
+            const text = try std.fmt.bufPrint(&length_text, "{d}", .{value.body.len});
+            fields[field_count - 1] = .{ .name = "content-length", .value = text };
+        }
 
-        const id = self.session.submitRequest(self.allocator, fields, true) catch |err| {
+        const id = self.session.submitRequest(
+            self.allocator,
+            fields,
+            value.body.len == 0,
+        ) catch |err| {
             return err;
         };
         const run = self.session.lastHeaderRun() orelse return error.MissingHeaderRun;
@@ -180,6 +205,12 @@ pub const Client = struct {
             self.connection_poisoned = true;
             return err;
         };
+        if (value.body.len != 0) {
+            try self.sendRequestBody(value.body, id);
+            if (self.early_head) |head| {
+                return .{ .head = head, .body = self.body };
+            }
+        }
 
         while (true) {
             const event = self.nextEvent() catch |err| {
@@ -230,6 +261,71 @@ pub const Client = struct {
         }
     }
 
+    fn sendRequestBody(self: *Client, body: []const u8, id: u31) !void {
+        var offset: usize = 0;
+        while (offset < body.len) {
+            const accepted = self.session.submitData(
+                self.allocator,
+                id,
+                body[offset..],
+                true,
+            ) catch |err| {
+                self.connection_poisoned = true;
+                return err;
+            };
+            offset += accepted;
+            if (accepted != 0) {
+                try self.flushFrames();
+            }
+            if (offset == body.len) break;
+
+            // Flow control is empty, or output is full. Drain an event.
+            const event = try self.nextEvent();
+            switch (event) {
+                .window_update => {},
+                .settings => try self.flushFrames(),
+                .response => |response| {
+                    if (response.stream_id != id) return error.UnexpectedStream;
+                    if (self.early_head != null) return error.UnexpectedResponse;
+                    self.early_head = .{
+                        .protocol = .h2,
+                        .status = response.head.status,
+                        .headers = try self.snapshot(response.head.headers),
+                    };
+                    if (response.end_stream) self.early_end = true;
+                },
+                .data => |data| {
+                    if (data.stream_id != id) return error.UnexpectedStream;
+                    if (self.early_head == null) return error.UnexpectedData;
+                    try self.early_body.appendSlice(self.allocator, data.bytes);
+                    try self.session.release(self.allocator, id, data.flow_len);
+                    try self.flushFrames();
+                    if (data.end_stream) self.early_end = true;
+                },
+                .trailers => |trailers| {
+                    if (trailers.stream_id != id) return error.UnexpectedStream;
+                    if (trailers.end_stream) self.early_end = true;
+                },
+                .goaway => |goaway| {
+                    self.goaway = .{
+                        .last_stream_id = goaway.last_stream_id,
+                        .code = @intFromEnum(goaway.code),
+                    };
+                    if (id > goaway.last_stream_id) {
+                        self.connection_poisoned = true;
+                        return error.GoAway;
+                    }
+                },
+                .connection_error => {
+                    self.connection_poisoned = true;
+                    return error.ConnectionError;
+                },
+                .reset => return error.StreamReset,
+                .request => return error.UnexpectedRequest,
+            }
+        }
+    }
+
     fn validLowerHeaderName(name: []const u8) bool {
         if (name.len == 0 or name[0] == ':') return false;
         for (name) |byte| {
@@ -269,6 +365,16 @@ pub const Client = struct {
 
     fn readBody(self: *Client) shared.BodyRead {
         if (!self.active) return .eof;
+
+        if (self.early_start < self.early_body.items.len) {
+            const bytes = self.early_body.items[self.early_start..];
+            self.early_start = self.early_body.items.len;
+            return .{ .data = bytes };
+        }
+        if (self.early_end) {
+            self.body_eof = true;
+            return .eof;
+        }
 
         while (true) {
             if (self.pending.len != 0) {
@@ -427,6 +533,10 @@ pub const Client = struct {
         self.body_eof = false;
         self.net_start = 0;
         self.net_end = 0;
+        self.early_head = null;
+        self.early_body.clearRetainingCapacity();
+        self.early_start = 0;
+        self.early_end = false;
         _ = self.arena.reset(.free_all);
     }
 
@@ -569,6 +679,7 @@ const engine = @import("../engine/blocking.zig");
 
 const TestApp = struct {
     body: []const u8,
+    echo_request: bool = false,
     seen: usize = 0,
 
     fn handler(self: *TestApp) engine.Handler {
@@ -586,7 +697,7 @@ const TestApp = struct {
         try exchange.respond(.{
             .status = .ok,
             .content_type = "text/plain",
-        }, self.body);
+        }, if (self.echo_request) exchange.request.body else self.body);
     }
 
     fn reportError(_: *anyopaque, _: anyerror) void {}
@@ -611,7 +722,7 @@ const Server = struct {
             .read_buffer = &read_buffer,
             .write_buffer = &write_buffer,
             .max_streams = 4,
-            .common = .{ .body_bytes = 1024 },
+            .common = .{ .body_bytes = 256 * 1024 },
         }) catch |err| {
             self.result = err;
         };
@@ -628,8 +739,12 @@ const Harness = struct {
     allow_server_read_failed: bool = false,
 
     fn init(self: *Harness, body: []const u8) !void {
+        return self.initEcho(body, false);
+    }
+
+    fn initEcho(self: *Harness, body: []const u8, echo: bool) !void {
         self.io = testing.io;
-        self.app = .{ .body = body };
+        self.app = .{ .body = body, .echo_request = echo };
         const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
         self.listener = try address.listen(self.io, .{
             .mode = .stream,
@@ -765,6 +880,96 @@ test "the blocking client releases flow control while streaming" {
     try testing.expectEqual(big.len, offset);
 }
 
+test "the blocking client sends a request body" {
+    var harness: Harness = undefined;
+    try harness.initEcho("", true);
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+
+    var client: Client = undefined;
+    try client.init(
+        &reader.interface,
+        &writer.interface,
+        .{ .allocator = testing.allocator },
+    );
+    defer client.deinit();
+
+    const payload = "request body";
+    const response = try client.request(.{
+        .method_token = "POST",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+        .body = payload,
+    });
+    defer response.body.close();
+
+    var received: [payload.len]u8 = undefined;
+    var used: usize = 0;
+    while (true) {
+        switch (response.body.read()) {
+            .data => |bytes| {
+                @memcpy(received[used..][0..bytes.len], bytes);
+                used += bytes.len;
+            },
+            .eof => break,
+            else => return error.UnexpectedBodyResult,
+        }
+    }
+    try testing.expectEqualStrings(payload, received[0..used]);
+}
+
+test "the blocking client sends a request body through flow control" {
+    var harness: Harness = undefined;
+    try harness.initEcho("", true);
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+
+    var client: Client = undefined;
+    try client.init(
+        &reader.interface,
+        &writer.interface,
+        .{ .allocator = testing.allocator },
+    );
+    defer client.deinit();
+
+    var payload: [100 * 1024]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = @intCast(index % 251);
+    const response = try client.request(.{
+        .method_token = "POST",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+        .body = &payload,
+    });
+    defer response.body.close();
+
+    var offset: usize = 0;
+    while (true) {
+        switch (response.body.read()) {
+            .data => |bytes| {
+                try testing.expectEqualSlices(u8, payload[offset..][0..bytes.len], bytes);
+                offset += bytes.len;
+            },
+            .eof => break,
+            else => return error.UnexpectedBodyResult,
+        }
+    }
+    try testing.expectEqual(payload.len, offset);
+}
+
 test "closing an incomplete response resets the stream and is idempotent" {
     var big: [32 * 1024]u8 = undefined;
     @memset(&big, 'x');
@@ -884,13 +1089,6 @@ test "request validation happens before serialization" {
     );
     defer client.deinit();
 
-    try testing.expectError(error.RequestBodyUnsupported, client.request(.{
-        .method_token = "POST",
-        .scheme = .http,
-        .authority = "example.com",
-        .target = "/",
-        .body = "x",
-    }));
     try testing.expectError(error.DuplicateAuthority, client.request(.{
         .method_token = "GET",
         .scheme = .http,
@@ -951,6 +1149,50 @@ test "closing after remote END_STREAM releases without resetting" {
     response.body.close();
     try testing.expect(!client.reset_sent);
     try testing.expectEqual(.eof, response.body.read());
+}
+
+test "the blocking client sends a static request body" {
+    var harness: Harness = undefined;
+    try harness.init("body response");
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+
+    var client: Client = undefined;
+    try client.init(
+        &reader.interface,
+        &writer.interface,
+        .{ .allocator = testing.allocator },
+    );
+    defer client.deinit();
+
+    const response = try client.request(.{
+        .method_token = "POST",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+        .body = "hello",
+    });
+    try testing.expectEqual(Protocol.h2, response.head.protocol);
+    var got: [13]u8 = undefined;
+    var used: usize = 0;
+    while (true) {
+        switch (response.body.read()) {
+            .data => |bytes| {
+                @memcpy(got[used..][0..bytes.len], bytes);
+                used += bytes.len;
+            },
+            .eof => break,
+            else => return error.UnexpectedBodyResult,
+        }
+    }
+    try testing.expectEqualStrings("body response", got[0..used]);
+    response.body.close();
 }
 
 test "header snapshot enforces byte and field limits" {

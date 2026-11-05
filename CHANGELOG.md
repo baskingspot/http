@@ -31,8 +31,8 @@ All notable changes to http are recorded here. The format follows
   remain in the accept backlog until a slot frees.
 
 - `h1.client.streaming` sends a non-empty `Request.body` with
-  `Content-Length` when the caller did not supply a framing field. h2 request
-  bodies remain unsupported.
+  `Content-Length` when the caller did not supply a framing field.
+  `h2.client.blocking` sends a static body as DATA frames.
 
 - `h1.ClientConn.start` accepts an optional `Method`. An unknown method token
   parses the response with body-capable framing instead of forcing the caller
