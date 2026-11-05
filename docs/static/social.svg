@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640">
+<!--! GitHub social preview, 1280 by 640. Lockup, 10 svg units per grid unit. The tile is 160 square. The baseline runs along its bottom edge, the ascender (160) along its top edge, and the x-height (100) along the top of the disc. The name starts 60 after the tile. Lettering: Hanken Grotesk 600, re-cut: ascenders at 1.6 x-heights, a flat-topped t, square tittles, hand spacing.-->
+  <path fill="#f4f1ec" d="M0 0h1280v640H0z"/>
+  <g transform="matrix(1.5 0 0 1.5 215.01 167)">
+    <path fill="#16191d" d="M0 0h160v160H0z"/>
+    <circle cx="50" cy="110" r="50" fill="#d4412b"/>
+    <path fill="#16191d" d="M220 160h23v-49c0-23 8-33 23-33 13 0 20 8 20 26v56h22V95c0-24-13-37-36-37-11 0-23 5-29 16V0h-23Zm147 2c5 0 11-1 17-3v-17c-5 1-8 1-11 1-9 0-12-6-12-17V78h23V60h-23V19h-23v41h-19v18h19v54c0 7 2 13 4 17 5 9 15 13 25 13m70 0c6 0 11-1 17-3v-17c-4 1-8 1-11 1-9 0-12-6-12-17V78h23V60h-23V19h-22v41h-19v18h19v54c0 7 1 13 4 17 5 9 14 13 24 13m34 39h22v-55c7 10 18 16 30 16 16 0 30-9 38-24 4-8 6-17 6-28 0-20-8-36-21-45-6-5-14-7-23-7-12 0-23 4-30 15V60h-22Zm47-60c-16 0-27-12-27-31s11-31 27-31 26 12 26 31-10 31-26 31"/>
+  </g>
+</svg>
