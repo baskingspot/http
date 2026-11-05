@@ -145,6 +145,7 @@ pub const Client = struct {
         if (self.active) return error.RequestInProgress;
         if (self.connection_poisoned) return error.ConnectionPoisoned;
         if (self.goaway != null) return error.GoAway;
+        if (value.authority.len == 0) return error.InvalidAuthority;
         self.request_state = .idle;
         _ = self.arena.reset(.free_all);
         self.early_head = null;
@@ -525,6 +526,10 @@ pub const Client = struct {
     fn closeBody(self: *Client) void {
         if (!self.active) return;
 
+        const reset_code: frame.ErrorCode = if (self.pending_body.len != 0)
+            .no_error
+        else
+            .cancel;
         if (self.pending.len != 0) {
             if (self.remote_end) {
                 self.session.release(
@@ -536,7 +541,7 @@ pub const Client = struct {
                 self.session.submitReset(
                     self.allocator,
                     self.stream_id,
-                    .cancel,
+                    reset_code,
                 ) catch |err| ignoreError(err);
                 self.reset_sent = true;
                 self.session.release(
@@ -549,7 +554,7 @@ pub const Client = struct {
             self.session.submitReset(
                 self.allocator,
                 self.stream_id,
-                .cancel,
+                reset_code,
             ) catch |err| ignoreError(err);
             self.reset_sent = true;
         }
