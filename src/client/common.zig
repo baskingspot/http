@@ -6,11 +6,21 @@
 //! advancing operation.
 //!
 //! The next shape, after v0.1, is a writable request body rather than a reader
-//! the adapter drains. DATA may follow a committed header block; an append is
-//! refused while a frame is partial, and nothing may interleave a header block
-//! between HEADERS and its final CONTINUATION. Trailers share the connection
-//! buffer with a borrowed body slice, so a `trailers()` accessor must snapshot
-//! into the response arena when eof is reported, not lazily on access.
+//! the adapter drains. DATA may follow a committed header block. The producer
+//! appends only after the previous frame is fully accepted; the queue reports
+//! capacity, not frame state, and `AppendWhilePartial` is a bug signal rather
+//! than a control path. Retry belongs to the transport write. Nothing may
+//! interleave a header block between HEADERS and its final CONTINUATION.
+//! Trailers share the connection buffer with a borrowed body slice, so a
+//! `trailers()` accessor must snapshot into the response arena when eof is
+//! reported, not lazily on access.
+//!
+//! Connection failure and reuse are deliberately protocol-specific. h1's
+//! `Body.close` drains an unfinished response into scratch and may leave the
+//! connection `ConnectionDirty`; that state is recoverable only by reconnecting.
+//! h2 resets the stream and keeps the connection unless it is
+//! `ConnectionPoisoned`, which is terminal. A dual-protocol caller must branch
+//! on those names and must not alias them.
 
 const std = @import("std");
 const testing = std.testing;
@@ -45,8 +55,10 @@ pub const Request = struct {
     authority: []const u8,
     /// The origin-form path and query. h2 sends it as `:path`.
     target: []const u8,
-    /// Regular fields only, in wire order. Names are lowercase for h2.
-    /// Never include Host or an h2 pseudo-field.
+    /// Regular fields only, in wire order. Never include Host or an h2
+    /// pseudo-field. A caller targeting both protocols must send lowercase
+    /// names: h1 forwards them as-is, while h2 rejects uppercase as
+    /// `InvalidHeader`.
     headers: []const Header = &.{},
     /// Request body bytes. h1 sends them with Content-Length; h2 sends DATA
     /// inside the request stream. Empty is the common case. When h2 returns an

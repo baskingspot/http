@@ -5,6 +5,13 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The h1 streaming client names the in-progress request error
+  `RequestInProgress`, matching the h2 adapter.
+- `client.Request.body` stays borrowed until `Body.close` when an h2 early
+  final response returns before the request body is sent.
+
 ### Added
 
 - `http`: HTTP/1.1 and HTTP/2 protocol kernels in one Zig module. Parsers

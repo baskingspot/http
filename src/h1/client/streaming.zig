@@ -84,7 +84,7 @@ pub const Client = struct {
     }
 
     pub fn request(self: *Client, value: Request) !Response {
-        if (self.active) return error.ResponseInProgress;
+        if (self.active) return error.RequestInProgress;
         if (self.dirty) return error.ConnectionDirty;
         if (value.authority.len == 0) return error.InvalidAuthority;
 
