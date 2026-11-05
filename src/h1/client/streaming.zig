@@ -86,7 +86,6 @@ pub const Client = struct {
     pub fn request(self: *Client, value: Request) !Response {
         if (self.active) return error.ResponseInProgress;
         if (self.dirty) return error.ConnectionDirty;
-        if (value.body.len != 0) return error.RequestBodyUnsupported;
         if (value.authority.len == 0) return error.InvalidAuthority;
 
         _ = self.arena.reset(.free_all);
@@ -96,13 +95,21 @@ pub const Client = struct {
         const method = Method.parse(value.method_token);
         var w: h1.Writer = .init(self.writer);
         try w.requestLineToken(value.method_token, value.target, .@"HTTP/1.1");
+        var has_length = false;
+        var has_transfer = false;
         for (value.headers) |header| {
             if (header.name.len == 0 or header.name[0] == ':') return error.InvalidHeader;
             if (ascii.eqlIgnoreCase(header.name, "host")) return error.DuplicateAuthority;
+            if (ascii.eqlIgnoreCase(header.name, "content-length")) has_length = true;
+            if (ascii.eqlIgnoreCase(header.name, "transfer-encoding")) has_transfer = true;
             try w.field(header.name, header.value);
         }
         try w.field("Host", value.authority);
+        if (value.body.len != 0 and !has_length and !has_transfer) {
+            try w.contentLength(value.body.len);
+        }
         try w.endFields();
+        if (value.body.len != 0) try w.body(value.body);
         try self.writer.flush();
 
         self.conn.start(method);
@@ -384,7 +391,7 @@ test "streaming client copies a body that arrives after the head" {
     response.body.close();
 }
 
-test "request with non-empty body is refused before writing" {
+test "request with a body reaches the response read" {
     var reader = Io.Reader.failing;
     var out: [1024]u8 = undefined;
     var writer = Io.Writer.fixed(&out);
@@ -392,7 +399,7 @@ test "request with non-empty body is refused before writing" {
     try client.init(&reader, &writer, .{ .allocator = testing.allocator });
     defer client.deinit();
 
-    try testing.expectError(error.RequestBodyUnsupported, client.request(.{
+    try testing.expectError(error.ReadFailed, client.request(.{
         .method_token = "POST",
         .scheme = .http,
         .authority = "example.com",

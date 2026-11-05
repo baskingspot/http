@@ -30,6 +30,10 @@ All notable changes to http are recorded here. The format follows
   `Limits.drain_timeout` is zero. When every slot is busy, new connections
   remain in the accept backlog until a slot frees.
 
+- `h1.client.streaming` sends a non-empty `Request.body` with
+  `Content-Length` when the caller did not supply a framing field. h2 request
+  bodies remain unsupported.
+
 - `h1.ClientConn.start` accepts an optional `Method`. An unknown method token
   parses the response with body-capable framing instead of forcing the caller
   to map the token to a known method.

@@ -41,7 +41,8 @@ pub const Request = struct {
     /// Regular fields only, in wire order. Names are lowercase for h2.
     /// Never include Host or an h2 pseudo-field.
     headers: []const Header = &.{},
-    /// Empty in the first streaming slice. Request-body streaming is later.
+    /// Request body bytes. h1 sends them with Content-Length; h2 request
+    /// bodies are not supported yet. Empty is the common case.
     body: []const u8 = "",
 };
 

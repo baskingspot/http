@@ -80,7 +80,7 @@ test "cleartext h1 dispatch reaches the h1 adapter" {
     defer client.deinit();
 
     try testing.expectEqual(Protocol.h1, client.protocol());
-    try testing.expectError(error.RequestBodyUnsupported, client.request(.{
+    try testing.expectError(error.ReadFailed, client.request(.{
         .method_token = "POST",
         .scheme = .http,
         .authority = "example.com",
