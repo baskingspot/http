@@ -391,6 +391,47 @@ test "streaming client copies a body that arrives after the head" {
     response.body.close();
 }
 
+test "streaming client sends a static request body" {
+    var fixture: Fixture = undefined;
+    try fixture.init("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+    defer fixture.deinit();
+
+    const stream = try fixture.address.connect(fixture.io, .{ .mode = .stream });
+    defer stream.close(fixture.io);
+
+    var write_buffer: [256]u8 = undefined;
+    var stream_writer = stream.writer(fixture.io, &write_buffer);
+    var stream_reader = stream.reader(fixture.io, &.{});
+    var client: Client = undefined;
+    try client.init(&stream_reader.interface, &stream_writer.interface, .{
+        .allocator = testing.allocator,
+    });
+    defer client.deinit();
+
+    const response = try client.request(.{
+        .method_token = "POST",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+        .body = "hello",
+    });
+    try testing.expectEqual(.ok, response.head.status);
+    var got: [2]u8 = undefined;
+    var used: usize = 0;
+    while (true) {
+        switch (response.body.read()) {
+            .data => |bytes| {
+                @memcpy(got[used..][0..bytes.len], bytes);
+                used += bytes.len;
+            },
+            .eof => break,
+            else => return error.UnexpectedBodyResult,
+        }
+    }
+    try testing.expectEqualStrings("ok", got[0..used]);
+    response.body.close();
+}
+
 test "request with a body reaches the response read" {
     var reader = Io.Reader.failing;
     var out: [1024]u8 = undefined;
