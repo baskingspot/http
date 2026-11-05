@@ -5,8 +5,6 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-11-05
-
 ### Added
 
 - `http`: HTTP/1.1 and HTTP/2 protocol kernels in one Zig module. Parsers
