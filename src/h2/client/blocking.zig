@@ -393,8 +393,19 @@ pub const Client = struct {
                 },
             };
             if (n == 0) {
-                self.connection_poisoned = true;
-                return error.EndOfStream;
+                // A buffered reader can satisfy readVec by filling its own
+                // buffer and returning 0. That is not EOF; move those bytes.
+                const buffered = self.reader.buffered();
+                if (buffered.len == 0) {
+                    self.connection_poisoned = true;
+                    return error.EndOfStream;
+                }
+                const take = @min(buffered.len, self.net_buffer.len);
+                @memcpy(self.net_buffer[0..take], buffered[0..take]);
+                self.reader.toss(take);
+                self.net_start = 0;
+                self.net_end = take;
+                continue;
             }
             self.net_start = 0;
             self.net_end = n;
