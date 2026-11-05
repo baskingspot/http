@@ -51,16 +51,15 @@
             .hash = "stdx-0.3.0-CcWego4nDwC5PxPd4F-nlcOWXxAVCZ6MDI5f3YNVNSO7",
         },
         .tls = .{
-            .url = "git+https://github.com/baskingspot/tls#567257ac02eae9dad1510cc04bb13cd3a19ca6ca",
-            .hash = "tls-0.1.1-nf2MKPHUJQAkW3nfJDqM_C-Py2T67LSZnuuSngLYzEyr",
+            .url = "https://baskingspot.dev/tls/v0.2.0.tar.gz",
+            .hash = "tls-0.2.0-nf2MKPHUJQBNc9cOmoKh5H8UQ5rgJCfl60wigXALZsaj",
         },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
-        // For example...
-        //"LICENSE",
-        //"README.md",
+        "LICENSE",
+        "README.md",
     },
 }
