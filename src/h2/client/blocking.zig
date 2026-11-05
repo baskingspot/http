@@ -1,0 +1,982 @@
+//! A blocking HTTP/2 client with a streaming response body.
+//!
+//! The adapter owns a `h2.Session`, serializes one request at a time, and
+//! snapshots response header names and values into the per-response arena.
+//! Body reads drive both directions of the session so SETTINGS acknowledgments
+//! and WINDOW_UPDATE frames are flushed while the response body is consumed.
+//!
+//! The request, response, body, and config types come from the shared client
+//! contract; `h1.client.streaming` implements the same contract.
+
+const std = @import("std");
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
+const mem = std.mem;
+const ascii = std.ascii;
+
+const Header = @import("../../header.zig").Header;
+const Headers = @import("../../header.zig").Headers;
+const Status = @import("../../status.zig").Status;
+const session_mod = @import("../session.zig");
+const Session = session_mod.Session;
+const Event = session_mod.Event;
+
+const shared = @import("../../client/root.zig");
+
+pub const Protocol = shared.Protocol;
+pub const Scheme = shared.Scheme;
+pub const Request = shared.Request;
+pub const ResponseHead = shared.ResponseHead;
+pub const Body = shared.Body;
+pub const Response = shared.Response;
+pub const Config = shared.Config;
+
+pub const RequestState = enum { idle, staged, in_flight, committed };
+
+// ast-grep-ignore: public-struct-field-default -- client state; init sets every field
+pub const Client = struct {
+    allocator: Allocator,
+    reader: *Io.Reader,
+    writer: *Io.Writer,
+    arena: std.heap.ArenaAllocator,
+    max_header_bytes: usize,
+    max_headers: usize,
+    session: Session,
+    stream_id: u31 = 0,
+    active: bool = false,
+    /// The peer sent END_STREAM for the current response.
+    remote_end: bool = false,
+    /// All response bytes have been delivered to the caller.
+    body_eof: bool = false,
+    /// A reset was queued for the current stream by `close`.
+    reset_sent: bool = false,
+    /// Staged until the request's END_HEADERS reaches the writer.
+    request_state: RequestState = .idle,
+    /// A write or connection failure poisoned this client.
+    connection_poisoned: bool = false,
+    /// Bytes successfully handed to the writer.
+    output_written: u64 = 0,
+    /// Borrowed from the current session event until it is consumed.
+    pending: []const u8 = &.{},
+    /// Flow-control charge for `pending`, including padding.
+    pending_flow: u32 = 0,
+    /// Unfed transport bytes, kept when the session input buffer is full.
+    net_buffer: [4096]u8 = undefined,
+    net_start: usize = 0,
+    net_end: usize = 0,
+    body: Body = undefined,
+
+    /// Initialize in its final location. The caller owns the reader, writer,
+    /// header storage, and allocator.
+    pub fn init(
+        self: *Client,
+        reader: *Io.Reader,
+        writer: *Io.Writer,
+        config: Config,
+    ) !void {
+        return self.initOptions(reader, writer, config, .{ .role = .client });
+    }
+
+    fn initOptions(
+        self: *Client,
+        reader: *Io.Reader,
+        writer: *Io.Writer,
+        config: Config,
+        options: session_mod.Options,
+    ) !void {
+        var session_options = options;
+        session_options.role = .client;
+        self.* = .{
+            .allocator = config.allocator,
+            .reader = reader,
+            .writer = writer,
+            .arena = .init(config.allocator),
+            .max_header_bytes = config.max_header_bytes,
+            .max_headers = config.max_headers,
+            .session = try Session.init(config.allocator, session_options),
+        };
+        errdefer self.session.deinit(self.allocator);
+        errdefer self.arena.deinit();
+        self.body = .{ .ptr = self, .vtable = &body_vtable };
+
+        // Flush the client preface and initial SETTINGS. sendFrame starts at a
+        // frame boundary, so the preface is drained here with the byte API.
+        try self.flushBytes();
+    }
+
+    pub fn deinit(self: *Client) void {
+        self.closeBody();
+        self.session.deinit(self.allocator);
+        self.arena.deinit();
+        self.* = undefined;
+    }
+
+    pub fn commitState(self: *const Client) RequestState {
+        return self.request_state;
+    }
+
+    pub fn isConnectionPoisoned(self: *const Client) bool {
+        return self.connection_poisoned;
+    }
+
+    /// Send one request and wait for its response head. The request body is
+    /// not supported in this slice; pass an empty `body`.
+    pub fn request(self: *Client, value: Request) !Response {
+        if (self.active) return error.RequestInProgress;
+        if (self.connection_poisoned) return error.ConnectionPoisoned;
+        if (value.body.len != 0) return error.RequestBodyUnsupported;
+        self.request_state = .idle;
+        _ = self.arena.reset(.free_all);
+
+        const field_count = 4 + value.headers.len;
+        const fields = try self.allocator.alloc(Header, field_count);
+        defer self.allocator.free(fields);
+
+        fields[0] = .{ .name = ":method", .value = value.method_token };
+        fields[1] = .{ .name = ":scheme", .value = value.scheme.token() };
+        fields[2] = .{ .name = ":authority", .value = value.authority };
+        fields[3] = .{ .name = ":path", .value = value.target };
+
+        for (value.headers, 0..) |header, index| {
+            if (ascii.eqlIgnoreCase(header.name, "host")) return error.DuplicateAuthority;
+            if (!validLowerHeaderName(header.name)) return error.InvalidHeader;
+            fields[4 + index] = header;
+        }
+
+        const id = self.session.submitRequest(self.allocator, fields, true) catch |err| {
+            return err;
+        };
+        const run = self.session.lastHeaderRun() orelse return error.MissingHeaderRun;
+        if (run.stream_id != id) return error.MissingHeaderRun;
+        self.request_state = .staged;
+        self.stream_id = id;
+        self.active = true;
+        self.remote_end = false;
+        self.body_eof = false;
+        self.reset_sent = false;
+        self.pending = &.{};
+        self.pending_flow = 0;
+        self.net_start = 0;
+        self.net_end = 0;
+
+        errdefer self.closeBody();
+        try self.flushFrames();
+
+        while (true) {
+            const event = try self.nextEvent();
+            switch (event) {
+                .settings => try self.flushFrames(),
+                .window_update => {},
+                .response => |response| {
+                    if (response.stream_id != id) return error.UnexpectedStream;
+                    const head = try self.snapshot(response.head.headers);
+                    if (response.end_stream) {
+                        self.remote_end = true;
+                        self.body_eof = true;
+                    }
+                    return .{
+                        .head = .{
+                            .protocol = .h2,
+                            .status = response.head.status,
+                            .headers = head,
+                        },
+                        .body = self.body,
+                    };
+                },
+                .goaway => {
+                    self.connection_poisoned = true;
+                    return error.GoAway;
+                },
+                .connection_error => {
+                    self.connection_poisoned = true;
+                    return error.ConnectionError;
+                },
+                .reset => return error.StreamReset,
+                .trailers => return error.UnexpectedTrailers,
+                .data => return error.UnexpectedData,
+                .request => return error.UnexpectedRequest,
+            }
+        }
+    }
+
+    fn validLowerHeaderName(name: []const u8) bool {
+        if (name.len == 0 or name[0] == ':') return false;
+        for (name) |byte| {
+            if (byte >= 'A' and byte <= 'Z') return false;
+        }
+        return true;
+    }
+
+    fn snapshot(self: *Client, headers: Headers) !Headers {
+        if (headers.items.len > self.max_headers) return error.HeadersTooLarge;
+
+        var total: usize = 0;
+        for (headers.items) |header| {
+            total = std.math.add(usize, total, header.name.len) catch
+                return error.HeadersTooLarge;
+            total = std.math.add(usize, total, header.value.len) catch
+                return error.HeadersTooLarge;
+        }
+        if (total > self.max_header_bytes) return error.HeadersTooLarge;
+
+        const arena = self.arena.allocator();
+        const items = try arena.alloc(Header, headers.items.len);
+        const bytes = try arena.alloc(u8, total);
+
+        var used: usize = 0;
+        for (headers.items, 0..) |header, index| {
+            @memcpy(bytes[used..][0..header.name.len], header.name);
+            const name = bytes[used..][0..header.name.len];
+            used += header.name.len;
+            @memcpy(bytes[used..][0..header.value.len], header.value);
+            const value = bytes[used..][0..header.value.len];
+            used += header.value.len;
+            items[index] = .{ .name = name, .value = value };
+        }
+        return .{ .items = items };
+    }
+
+    fn readBody(self: *Client, out: []u8) !usize {
+        if (!self.active or out.len == 0) return 0;
+
+        while (true) {
+            if (self.pending.len != 0) {
+                const n = @min(out.len, self.pending.len);
+                @memcpy(out[0..n], self.pending[0..n]);
+                self.pending = self.pending[n..];
+                if (self.pending.len == 0) {
+                    try self.releasePending();
+                    if (self.remote_end) self.body_eof = true;
+                }
+                return n;
+            }
+
+            if (self.body_eof) return 0;
+
+            const event = try self.nextEvent();
+            switch (event) {
+                .data => |data| {
+                    if (data.stream_id != self.stream_id) return error.UnexpectedStream;
+                    self.pending = data.bytes;
+                    self.pending_flow = data.flow_len;
+                    if (data.end_stream) self.remote_end = true;
+                    if (data.bytes.len == 0) {
+                        try self.releasePending();
+                        if (self.remote_end) self.body_eof = true;
+                        continue;
+                    }
+                },
+                .trailers => |trailers| {
+                    if (trailers.stream_id != self.stream_id) return error.UnexpectedStream;
+                    if (trailers.end_stream) {
+                        self.remote_end = true;
+                        self.body_eof = true;
+                    }
+                },
+                .response => |response| {
+                    if (response.stream_id != self.stream_id) return error.UnexpectedStream;
+                    if (response.end_stream) {
+                        self.remote_end = true;
+                        self.body_eof = true;
+                    }
+                },
+                .settings => try self.flushFrames(),
+                .window_update => {},
+                .goaway => {
+                    self.connection_poisoned = true;
+                    return error.GoAway;
+                },
+                .connection_error => {
+                    self.connection_poisoned = true;
+                    return error.ConnectionError;
+                },
+                .reset => return error.StreamReset,
+                .request => return error.UnexpectedRequest,
+            }
+        }
+    }
+
+    fn releasePending(self: *Client) !void {
+        if (self.pending_flow == 0) return;
+        const count = self.pending_flow;
+        self.pending_flow = 0;
+        try self.session.release(self.allocator, self.stream_id, count);
+        try self.flushFrames();
+    }
+
+    fn closeBody(self: *Client) void {
+        if (!self.active) return;
+
+        if (self.pending.len != 0) {
+            if (self.remote_end) {
+                self.session.release(
+                    self.allocator,
+                    self.stream_id,
+                    self.pending_flow,
+                ) catch |err| ignoreError(err);
+            } else {
+                self.session.submitReset(
+                    self.allocator,
+                    self.stream_id,
+                    .cancel,
+                ) catch |err| ignoreError(err);
+                self.reset_sent = true;
+                self.session.release(
+                    self.allocator,
+                    self.stream_id,
+                    self.pending_flow,
+                ) catch |err| ignoreError(err);
+            }
+        } else if (!self.remote_end) {
+            self.session.submitReset(
+                self.allocator,
+                self.stream_id,
+                .cancel,
+            ) catch |err| ignoreError(err);
+            self.reset_sent = true;
+        }
+        self.pending = &.{};
+        self.pending_flow = 0;
+        self.flushFrames() catch |err| ignoreError(err);
+
+        self.stream_id = 0;
+        self.active = false;
+        self.remote_end = false;
+        self.body_eof = false;
+        self.net_start = 0;
+        self.net_end = 0;
+        _ = self.arena.reset(.free_all);
+    }
+
+    fn nextEvent(self: *Client) !Event {
+        while (true) {
+            const event = self.session.nextEvent(self.allocator) catch |err| {
+                self.connection_poisoned = true;
+                return err;
+            };
+            if (event) |value| return value;
+            try self.flushFrames();
+
+            if (self.net_start < self.net_end) {
+                const consumed = self.session.receive(
+                    self.net_buffer[self.net_start..self.net_end],
+                );
+                if (consumed != 0) {
+                    self.net_start += consumed;
+                    if (self.net_start == self.net_end) {
+                        self.net_start = 0;
+                        self.net_end = 0;
+                    }
+                    continue;
+                }
+                const next = self.session.nextEvent(self.allocator) catch |err| {
+                    self.connection_poisoned = true;
+                    return err;
+                };
+                if (next) |value| return value;
+                if (self.session.isClosed()) {
+                    self.connection_poisoned = true;
+                    return error.ConnectionClosed;
+                }
+                return error.InputFull;
+            }
+
+            var vecs: [1][]u8 = .{&self.net_buffer};
+            const n = self.reader.readVec(&vecs) catch |err| switch (err) {
+                error.EndOfStream => {
+                    self.connection_poisoned = true;
+                    return error.EndOfStream;
+                },
+                error.ReadFailed => {
+                    self.connection_poisoned = true;
+                    return error.ReadFailed;
+                },
+            };
+            if (n == 0) {
+                self.connection_poisoned = true;
+                return error.EndOfStream;
+            }
+            self.net_start = 0;
+            self.net_end = n;
+        }
+    }
+
+    fn flushBytes(self: *Client) !void {
+        var out: [4096]u8 = undefined;
+        while (true) {
+            const n = self.session.send(&out);
+            if (n == 0) break;
+            self.writer.writeAll(out[0..n]) catch |err| {
+                self.connection_poisoned = true;
+                return err;
+            };
+            self.output_written += n;
+        }
+        self.writer.flush() catch |err| {
+            self.connection_poisoned = true;
+            return err;
+        };
+    }
+
+    fn flushFrames(self: *Client) !void {
+        var out: [9 + 16 * 1024]u8 = undefined;
+        while (true) {
+            const n = self.session.sendFrame(&out) catch |err| {
+                self.connection_poisoned = true;
+                return err;
+            };
+            if (n == 0) break;
+
+            const end_headers = isEndHeaders(out[0..n], self.stream_id);
+            if (self.request_state == .staged and !end_headers) {
+                self.request_state = .in_flight;
+            }
+            self.writer.writeAll(out[0..n]) catch |err| {
+                self.connection_poisoned = true;
+                // writeAll may have accepted a prefix containing the complete
+                // END_HEADERS frame. A non-idempotent request must not be
+                // retried once that frame could be visible.
+                if (end_headers and self.request_state != .committed) {
+                    self.request_state = .committed;
+                }
+                return err;
+            };
+            self.writer.flush() catch |err| {
+                self.connection_poisoned = true;
+                if (end_headers and self.request_state != .committed) {
+                    self.request_state = .committed;
+                }
+                return err;
+            };
+            self.output_written += n;
+            if (end_headers and self.request_state != .committed) {
+                self.request_state = .committed;
+            }
+        }
+    }
+
+    fn isEndHeaders(bytes: []const u8, stream_id: u31) bool {
+        if (bytes.len < 9) return false;
+        const frame_type = bytes[3];
+        if (frame_type != 0x1 and frame_type != 0x9) return false;
+        if (bytes[4] & 0x4 == 0) return false;
+        const id = mem.readInt(u32, bytes[5..9], .big) & 0x7fff_ffff;
+        return id == stream_id;
+    }
+};
+
+fn ignoreError(_: anyerror) void {}
+
+const body_vtable: Body.VTable = .{
+    .read = bodyRead,
+    .close = bodyClose,
+};
+
+fn bodyRead(ptr: *anyopaque, out: []u8) anyerror!usize {
+    const self: *Client = @ptrCast(@alignCast(ptr));
+    return self.readBody(out);
+}
+
+fn bodyClose(ptr: *anyopaque) void {
+    const self: *Client = @ptrCast(@alignCast(ptr));
+    self.closeBody();
+}
+
+const testing = std.testing;
+const engine = @import("../engine/blocking.zig");
+
+const TestApp = struct {
+    body: []const u8,
+    seen: usize = 0,
+
+    fn handler(self: *TestApp) engine.Handler {
+        return .{ .ptr = self, .vtable = &.{
+            .handle = handle,
+            .complete = engine.Handler.noopComplete,
+            .report_error = reportError,
+            .policy_response = engine.Handler.defaultPolicyResponse,
+        } };
+    }
+
+    fn handle(ptr: *anyopaque, exchange: *engine.Exchange) anyerror!void {
+        const self: *TestApp = @ptrCast(@alignCast(ptr));
+        self.seen += 1;
+        try exchange.respond(.{
+            .status = .ok,
+            .content_type = "text/plain",
+        }, self.body);
+    }
+
+    fn reportError(_: *anyopaque, _: anyerror) void {}
+};
+
+const Server = struct {
+    io: Io,
+    listener: *Io.net.Server,
+    handler: engine.Handler,
+    result: ?anyerror = null,
+
+    fn run(self: *Server) void {
+        const stream = self.listener.accept(self.io) catch |err| {
+            self.result = err;
+            return;
+        };
+        defer stream.close(self.io);
+        var read_buffer: [4096]u8 = undefined;
+        var write_buffer: [4096]u8 = undefined;
+        engine.serve(self.io, stream, self.handler, .{
+            .allocator = testing.allocator,
+            .read_buffer = &read_buffer,
+            .write_buffer = &write_buffer,
+            .max_streams = 4,
+            .common = .{ .body_bytes = 1024 },
+        }) catch |err| {
+            self.result = err;
+        };
+    }
+};
+
+const Harness = struct {
+    io: Io,
+    listener: Io.net.Server,
+    address: Io.net.IpAddress,
+    app: TestApp,
+    server: Server,
+    thread: std.Thread,
+    allow_server_read_failed: bool = false,
+
+    fn init(self: *Harness, body: []const u8) !void {
+        self.io = testing.io;
+        self.app = .{ .body = body };
+        const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
+        self.listener = try address.listen(self.io, .{
+            .mode = .stream,
+            .reuse_address = true,
+        });
+        self.address = address;
+        self.address.setPort(self.listener.socket.address.getPort());
+        self.server = .{
+            .io = self.io,
+            .listener = &self.listener,
+            .handler = self.app.handler(),
+        };
+        self.thread = try .spawn(.{}, Server.run, .{&self.server});
+    }
+
+    fn deinit(self: *Harness) void {
+        self.thread.join();
+        self.listener.deinit(self.io);
+        if (self.server.result) |err| {
+            if (!(self.allow_server_read_failed and err == error.ReadFailed)) {
+                std.debug.panic("server failed: {s}", .{@errorName(err)});
+            }
+        }
+        self.* = undefined;
+    }
+
+    fn connect(self: *Harness) !Io.net.Stream {
+        return self.address.connect(self.io, .{ .mode = .stream });
+    }
+};
+
+test "the blocking client streams a response body" {
+    const expected = "hello, streaming world";
+    var harness: Harness = undefined;
+    try harness.init(expected);
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+
+    var client: Client = undefined;
+    try client.init(
+        &reader.interface,
+        &writer.interface,
+        .{ .allocator = testing.allocator },
+    );
+    defer client.deinit();
+
+    const response = try client.request(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+    });
+    defer response.body.close();
+    try testing.expectEqual(RequestState.committed, client.commitState());
+
+    try testing.expectEqual(Protocol.h2, response.head.protocol);
+    try testing.expectEqual(@as(u16, 200), response.head.status.code());
+    try testing.expectEqualStrings(
+        "text/plain",
+        response.head.headers.get("content-type").?,
+    );
+
+    var body: [7]u8 = undefined;
+    var received: [expected.len]u8 = undefined;
+    var used: usize = 0;
+    while (true) {
+        const n = try response.body.read(&body);
+        if (n == 0) break;
+        @memcpy(received[used..][0..n], body[0..n]);
+        used += n;
+    }
+    try testing.expectEqual(@as(usize, expected.len), used);
+    try testing.expectEqualStrings(expected, &received);
+    try testing.expectEqualStrings(
+        "text/plain",
+        response.head.headers.get("content-type").?,
+    );
+    try testing.expectEqual(@as(usize, 1), harness.app.seen);
+}
+
+test "the blocking client releases flow control while streaming" {
+    var big: [100 * 1024]u8 = undefined;
+    for (&big, 0..) |*byte, index| byte.* = @intCast(index % 251);
+
+    var harness: Harness = undefined;
+    try harness.init(&big);
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+
+    var client: Client = undefined;
+    try client.init(
+        &reader.interface,
+        &writer.interface,
+        .{ .allocator = testing.allocator },
+    );
+    defer client.deinit();
+
+    const response = try client.request(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+    });
+    defer response.body.close();
+
+    var body: [1024]u8 = undefined;
+    var offset: usize = 0;
+    while (true) {
+        const n = try response.body.read(&body);
+        if (n == 0) break;
+        try testing.expect(offset + n <= big.len);
+        try testing.expectEqualSlices(u8, big[offset..][0..n], body[0..n]);
+        offset += n;
+    }
+    try testing.expectEqual(big.len, offset);
+}
+
+test "closing an incomplete response resets the stream and is idempotent" {
+    var big: [32 * 1024]u8 = undefined;
+    @memset(&big, 'x');
+
+    var harness: Harness = undefined;
+    try harness.init(&big);
+    harness.allow_server_read_failed = true;
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+
+    var client: Client = undefined;
+    try client.init(
+        &reader.interface,
+        &writer.interface,
+        .{ .allocator = testing.allocator },
+    );
+    defer client.deinit();
+
+    const response = try client.request(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+    });
+
+    var one: [1]u8 = undefined;
+    try testing.expectEqual(@as(usize, 1), try response.body.read(&one));
+    response.body.close();
+    try testing.expect(client.reset_sent);
+    response.body.close();
+    try testing.expectEqual(@as(usize, 0), try response.body.read(&one));
+}
+
+test "connection poison is separate from request commit" {
+    var reader = Io.Reader.failing;
+    var out_buffer: [4096]u8 = undefined;
+    var writer = Io.Writer.fixed(&out_buffer);
+
+    var client: Client = undefined;
+    try client.init(
+        &reader,
+        &writer,
+        .{ .allocator = testing.allocator },
+    );
+    defer client.deinit();
+
+    try testing.expectError(error.ReadFailed, client.request(.{
+        .method_token = "POST",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+    }));
+    try testing.expectEqual(RequestState.committed, client.commitState());
+    try testing.expect(client.isConnectionPoisoned());
+    try testing.expectError(error.ConnectionPoisoned, client.request(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+    }));
+}
+
+test "a no-body response can be followed by another request" {
+    var harness: Harness = undefined;
+    try harness.init("");
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+
+    var client: Client = undefined;
+    try client.init(
+        &reader.interface,
+        &writer.interface,
+        .{ .allocator = testing.allocator },
+    );
+    defer client.deinit();
+
+    for (0..2) |_| {
+        const response = try client.request(.{
+            .method_token = "GET",
+            .scheme = .http,
+            .authority = "example.com",
+            .target = "/",
+        });
+        var body: [1]u8 = undefined;
+        try testing.expectEqual(@as(usize, 0), try response.body.read(&body));
+        response.body.close();
+    }
+    try testing.expectEqual(@as(usize, 2), harness.app.seen);
+}
+
+test "request validation happens before serialization" {
+    var reader = Io.Reader.failing;
+    var out_buffer: [4096]u8 = undefined;
+    var writer = Io.Writer.fixed(&out_buffer);
+
+    var client: Client = undefined;
+    try client.init(
+        &reader,
+        &writer,
+        .{ .allocator = testing.allocator },
+    );
+    defer client.deinit();
+
+    try testing.expectError(error.RequestBodyUnsupported, client.request(.{
+        .method_token = "POST",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+        .body = "x",
+    }));
+    try testing.expectError(error.DuplicateAuthority, client.request(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+        .headers = &.{.{ .name = "Host", .value = "example.com" }},
+    }));
+    try testing.expectError(error.InvalidHeader, client.request(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+        .headers = &.{.{ .name = "X-Test", .value = "one" }},
+    }));
+    try testing.expectError(error.InvalidHeader, client.request(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+        .headers = &.{.{ .name = ":path", .value = "/" }},
+    }));
+}
+
+test "closing after remote END_STREAM releases without resetting" {
+    var body: [1024]u8 = undefined;
+    @memset(&body, 'y');
+
+    var harness: Harness = undefined;
+    try harness.init(&body);
+    harness.allow_server_read_failed = true;
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+
+    var client: Client = undefined;
+    try client.init(
+        &reader.interface,
+        &writer.interface,
+        .{ .allocator = testing.allocator },
+    );
+    defer client.deinit();
+
+    const response = try client.request(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+    });
+    var one: [1]u8 = undefined;
+    try testing.expectEqual(@as(usize, 1), try response.body.read(&one));
+    response.body.close();
+    try testing.expect(!client.reset_sent);
+    try testing.expectEqual(@as(usize, 0), try response.body.read(&one));
+}
+
+test "header snapshot enforces byte and field limits" {
+    var reader = Io.Reader.failing;
+    var out_buffer: [4096]u8 = undefined;
+    var writer = Io.Writer.fixed(&out_buffer);
+
+    var client: Client = undefined;
+    try client.init(
+        &reader,
+        &writer,
+        .{ .allocator = testing.allocator },
+    );
+    defer client.deinit();
+
+    var fields = [_]Header{
+        .{ .name = "content-type", .value = "text/plain" },
+        .{ .name = "x-test", .value = "v" },
+    };
+    const fields_view: Headers = .{ .items = &fields };
+    const total = "content-type".len + "text/plain".len +
+        "x-test".len + "v".len;
+
+    client.max_header_bytes = total;
+    const head = try client.snapshot(fields_view);
+    try testing.expectEqualStrings("text/plain", head.get("content-type").?);
+
+    _ = client.arena.reset(.free_all);
+    client.max_header_bytes = total - 1;
+    try testing.expectError(error.HeadersTooLarge, client.snapshot(fields_view));
+
+    client.max_header_bytes = total;
+    client.max_headers = 1;
+    try testing.expectError(error.HeadersTooLarge, client.snapshot(fields_view));
+}
+
+test "a failed END_HEADERS write is treated as committed" {
+    var reader = Io.Reader.failing;
+    var out_buffer: [4096]u8 = undefined;
+    var writer = Io.Writer.fixed(&out_buffer);
+
+    var client: Client = undefined;
+    try client.init(
+        &reader,
+        &writer,
+        .{ .allocator = testing.allocator },
+    );
+    defer client.deinit();
+
+    var failing = Io.Writer.failing;
+    client.writer = &failing;
+
+    try testing.expectError(error.WriteFailed, client.request(.{
+        .method_token = "POST",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+    }));
+    try testing.expectEqual(RequestState.committed, client.commitState());
+    try testing.expect(client.isConnectionPoisoned());
+}
+
+const LimitedWriter = struct {
+    writer: Io.Writer,
+    limit: usize,
+    written: usize = 0,
+    storage: [64 * 1024]u8 = undefined,
+
+    const vtable: Io.Writer.VTable = .{ .drain = drain };
+
+    fn init() LimitedWriter {
+        return .{
+            .writer = .{ .vtable = &vtable, .buffer = &.{} },
+            .limit = 0,
+        };
+    }
+
+    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        _ = splat;
+        const self: *LimitedWriter = @fieldParentPtr("writer", w);
+        if (data.len == 0) return 0;
+        const bytes = data[0];
+        const room = if (self.written < self.limit) self.limit - self.written else 0;
+        const take = @min(room, bytes.len);
+        @memcpy(self.storage[self.written..][0..take], bytes[0..take]);
+        self.written += take;
+        if (take != bytes.len) return error.WriteFailed;
+        return take;
+    }
+};
+
+test "a split header run commits when END_HEADERS fails" {
+    var reader = Io.Reader.failing;
+    var limited = LimitedWriter.init();
+    limited.limit = 1024 * 1024;
+
+    var client: Client = undefined;
+    try client.initOptions(
+        &reader,
+        &limited.writer,
+        .{ .allocator = testing.allocator },
+        .{ .role = .client, .max_send_header_block = 64 * 1024 },
+    );
+    defer client.deinit();
+
+    limited.limit = limited.written + 9 + 16 * 1024 + 32;
+
+    var value: [40 * 1024]u8 = undefined;
+    for (&value, 0..) |*byte, index| byte.* = 'a' + @as(u8, @intCast(index % 26));
+    const headers = [_]Header{
+        .{ .name = "x-big", .value = &value },
+    };
+
+    try testing.expectError(error.WriteFailed, client.request(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+        .headers = &headers,
+    }));
+    try testing.expectEqual(RequestState.committed, client.commitState());
+    try testing.expect(client.isConnectionPoisoned());
+}

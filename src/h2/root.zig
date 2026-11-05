@@ -3,6 +3,7 @@
 //! The frame codec is the first layer: frame headers, typed payloads, and an
 //! outbound writer over a caller buffer. `Session` composes it with settings,
 //! stream state, flow control, HPACK, and CONTINUATION assembly.
+pub const client = @import("client/root.zig");
 pub const engine = @import("engine/root.zig");
 pub const flow = @import("flow.zig");
 pub const frame = @import("frame.zig");
@@ -15,6 +16,7 @@ pub const settings = @import("settings.zig");
 pub const stream = @import("stream.zig");
 
 test {
+    _ = client;
     _ = engine;
     _ = flow;
     _ = frame;

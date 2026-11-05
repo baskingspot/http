@@ -86,6 +86,13 @@ pub const ConnectionErrorEvent = struct {
     code: frame.ErrorCode,
 };
 
+/// Absolute wire offsets of one request's complete HEADERS+CONTINUATION run.
+pub const HeaderRun = struct {
+    stream_id: u31,
+    start: u64,
+    end: u64,
+};
+
 pub const Event = union(enum) {
     request: RequestEvent,
     response: ResponseEvent,
@@ -254,21 +261,42 @@ const OutQueue = struct {
         self.total += bytes.len;
     }
 
-    fn send(self: *OutQueue, out: []u8) usize {
+    fn peek(self: *const OutQueue, out: []u8) usize {
         var written: usize = 0;
+        var node = self.head;
         while (written < out.len) {
+            const chunk = node orelse break;
+            if (chunk.start == chunk.len) {
+                node = chunk.next;
+                continue;
+            }
+            const take = @min(chunk.len - chunk.start, out.len - written);
+            @memcpy(out[written..][0..take], chunk.bytes[chunk.start..][0..take]);
+            written += take;
+            node = chunk.next;
+        }
+        return written;
+    }
+
+    fn consume(self: *OutQueue, n: usize) void {
+        var left = n;
+        while (left > 0) {
             const node = self.head orelse break;
             if (node.start == node.len) {
                 self.dropHead();
                 continue;
             }
-            const take = @min(node.len - node.start, out.len - written);
-            @memcpy(out[written..][0..take], node.bytes[node.start..][0..take]);
+            const take = @min(node.len - node.start, left);
             node.start += take;
-            written += take;
+            left -= take;
             self.total -= take;
             if (node.start == node.len) self.dropHead();
         }
+    }
+
+    fn send(self: *OutQueue, out: []u8) usize {
+        const written = self.peek(out);
+        self.consume(written);
         return written;
     }
 
@@ -322,6 +350,9 @@ pub const Session = struct {
     frame_buf: []u8,
 
     out: OutQueue,
+    /// Bytes drained from `out` by send/sendFrame.
+    out_sent: u64,
+    last_header_run: ?HeaderRun,
     event: ?Event,
 
     pub fn init(allocator: Allocator, options: Options) Error!Session {
@@ -390,6 +421,8 @@ pub const Session = struct {
             .send_block = send_block,
             .frame_buf = frame_buf,
             .out = .{},
+            .out_sent = 0,
+            .last_header_run = null,
             .event = null,
         };
 
@@ -426,6 +459,12 @@ pub const Session = struct {
         return self.out.total > 0;
     }
 
+    /// Bytes currently queued for `send`. The readiness and client engines
+    /// use this to mark a request's header block at its wire position.
+    pub fn queuedOutput(self: *const Session) usize {
+        return self.out.total;
+    }
+
     /// Append transport bytes. Returns how many were consumed; zero means the
     /// input buffer is full and the caller must drain events first.
     pub fn receive(self: *Session, bytes: []const u8) usize {
@@ -439,7 +478,34 @@ pub const Session = struct {
 
     /// Copy queued output into `out`. Never allocates.
     pub fn send(self: *Session, out: []u8) usize {
-        return self.out.send(out);
+        const n = self.out.send(out);
+        self.out_sent += n;
+        return n;
+    }
+
+    /// Copy exactly one complete frame into `out`. The caller must drain the
+    /// client preface before using this method. Returns 0 when the queue is
+    /// empty, and `BufferTooSmall` when `out` cannot hold the next frame.
+    pub fn sendFrame(self: *Session, out: []u8) Error!usize {
+        if (self.out.total == 0) return 0;
+        if (self.out.total < 9) return error.BufferTooSmall;
+
+        var header: [9]u8 = undefined;
+        if (self.out.peek(&header) != header.len) return error.BufferTooSmall;
+        const payload_len = (@as(usize, header[0]) << 16) |
+            (@as(usize, header[1]) << 8) |
+            @as(usize, header[2]);
+        const frame_len = 9 + payload_len;
+        if (out.len < frame_len) return error.BufferTooSmall;
+        const n = self.out.peek(out[0..frame_len]);
+        if (n != frame_len) return error.BufferTooSmall;
+        self.out.consume(frame_len);
+        self.out_sent += frame_len;
+        return frame_len;
+    }
+
+    pub fn lastHeaderRun(self: *const Session) ?HeaderRun {
+        return self.last_header_run;
     }
 
     pub fn nextEvent(self: *Session, allocator: Allocator) Error!?Event {
@@ -955,6 +1021,7 @@ pub const Session = struct {
         const block = self.encoder.encode(fields, self.send_block) catch {
             return error.HeaderBlockTooLarge;
         };
+        const run_start = self.out_sent + self.out.total;
         const id = self.ids.nextLocal().?;
         self.streams.putAssumeCapacityNoClobber(id, .{
             .state = .idle,
@@ -972,6 +1039,11 @@ pub const Session = struct {
             state.state = stream.transition(state.state, .local, .end_stream) catch unreachable;
         }
         try self.writeHeaderBlock(allocator, id, block, end_stream);
+        self.last_header_run = .{
+            .stream_id = id,
+            .start = run_start,
+            .end = self.out_sent + self.out.total,
+        };
         return id;
     }
 
@@ -2225,4 +2297,54 @@ test "HEADERS on a half-closed remote stream is STREAM_CLOSED" {
         .reset => |reset| try testing.expectEqual(frame.ErrorCode.stream_closed, reset.code),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "sendFrame drains one contiguous request header run" {
+    var session = try Session.init(testing.allocator, .{
+        .role = .client,
+        .max_streams = 4,
+        .max_send_header_block = 64 * 1024,
+    });
+    defer session.deinit(testing.allocator);
+
+    var sink: [4096]u8 = undefined;
+    while (session.send(&sink) != 0) {}
+
+    var value: [20_000]u8 = undefined;
+    for (&value, 0..) |*byte, index| byte.* = 'a' + @as(u8, @intCast(index % 26));
+    const fields = [_]Header{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = "x-big", .value = &value },
+    };
+
+    _ = try session.submitRequest(testing.allocator, &fields, true);
+    const run = session.lastHeaderRun().?;
+
+    var frame_buf: [9 + out_frame_payload]u8 = undefined;
+    var sent: u64 = 0;
+    var saw_end_headers = false;
+    while (true) {
+        const n = try session.sendFrame(&frame_buf);
+        if (n == 0) break;
+        const frame_type = frame_buf[3];
+        const flags = frame_buf[4];
+        try testing.expect(
+            frame_type == @intFromEnum(frame.FrameType.headers) or
+                frame_type == @intFromEnum(frame.FrameType.continuation),
+        );
+        try testing.expectEqual(
+            run.stream_id,
+            @as(u31, @intCast(mem.readInt(u32, frame_buf[5..9], .big))),
+        );
+        if (flags & frame.flags.end_headers != 0) {
+            try testing.expect(!saw_end_headers);
+            saw_end_headers = true;
+        }
+        sent += n;
+    }
+    try testing.expect(saw_end_headers);
+    try testing.expectEqual(run.end - run.start, sent);
 }
