@@ -60,6 +60,9 @@ pub const PushError = error{
     InterleavedFrame,
     /// A frame with no bytes.
     EmptyFrame,
+    /// The previous request committed and the queue is empty. Call `reset`
+    /// before starting another request; control frames are still allowed.
+    NeedsReset,
 };
 
 pub const Queue = struct {
@@ -123,6 +126,9 @@ pub const Queue = struct {
     pub fn push(self: *Queue, frame: Frame) PushError!void {
         if (self.offset != 0) return error.AppendWhilePartial;
         if (frame.bytes.len == 0) return error.EmptyFrame;
+        if (self.isEmpty() and self.state == .committed and frame.class != .control) {
+            return error.NeedsReset;
+        }
         if (self.count() == self.meta.len) return error.QueueFull;
         if (self.used + frame.bytes.len > self.storage.len) return error.QueueFull;
 
@@ -352,6 +358,39 @@ test "storage and metadata exhaustion are reported before any state change" {
         .class = .data,
         .end_headers = false,
     }));
+}
+
+test "a committed request needs reset before another request" {
+    var storage: [64]u8 = undefined;
+    var meta: [8]Queue.Meta = undefined;
+    var q: Queue = .init(&storage, &meta);
+
+    var buf: [4]u8 = undefined;
+    try q.push(.{
+        .bytes = encode(&buf, 'H'),
+        .stream_id = 1,
+        .class = .headers,
+        .end_headers = true,
+    });
+    q.accepted(1);
+    try testing.expectEqual(State.committed, q.currentState());
+    try testing.expect(q.isEmpty());
+
+    try testing.expectError(error.NeedsReset, q.push(.{
+        .bytes = encode(&buf, 'D'),
+        .stream_id = 1,
+        .class = .data,
+        .end_headers = false,
+    }));
+    try q.push(.{
+        .bytes = encode(&buf, 'W'),
+        .stream_id = 0,
+        .class = .control,
+        .end_headers = false,
+    });
+    try testing.expectEqual(@as(usize, 1), q.count());
+    q.accepted(1);
+    try testing.expectEqual(State.committed, q.currentState());
 }
 
 test "reset clears state and reclaims storage" {
