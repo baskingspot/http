@@ -4,6 +4,13 @@
 //! request, response-head, and streaming-body shapes. Response heads are
 //! snapshots; body bytes are borrowed from the connection until the next
 //! advancing operation.
+//!
+//! The next shape, after v0.1, is a writable request body rather than a reader
+//! the adapter drains. DATA may follow a committed header block; an append is
+//! refused while a frame is partial, and nothing may interleave a header block
+//! between HEADERS and its final CONTINUATION. Trailers share the connection
+//! buffer with a borrowed body slice, so a `trailers()` accessor must snapshot
+//! into the response arena when eof is reported, not lazily on access.
 
 const std = @import("std");
 const testing = std.testing;
@@ -42,7 +49,9 @@ pub const Request = struct {
     /// Never include Host or an h2 pseudo-field.
     headers: []const Header = &.{},
     /// Request body bytes. h1 sends them with Content-Length; h2 sends DATA
-    /// inside the request stream. Empty is the common case.
+    /// inside the request stream. Empty is the common case. When h2 returns an
+    /// early final response before the body is sent, this slice stays valid
+    /// until `Body.close`.
     body: []const u8 = "",
 };
 

@@ -5,6 +5,11 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `client.Request.body` remains borrowed until `Body.close` when an h2 early
+  final response returns before the request body is sent.
+
 ## [0.1.0] - 2026-11-05
 
 ### Added
