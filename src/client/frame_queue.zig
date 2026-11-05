@@ -199,7 +199,12 @@ test "a partially written frame blocks appends until it completes" {
     var q: Queue = .init(&storage, &meta);
 
     var buf: [4]u8 = undefined;
-    try q.push(.{ .bytes = encode(&buf, 'a'), .stream_id = 1, .class = .headers, .end_headers = true });
+    try q.push(.{
+        .bytes = encode(&buf, 'a'),
+        .stream_id = 1,
+        .class = .headers,
+        .end_headers = true,
+    });
     try testing.expectEqual(@as(usize, 1), q.count());
 
     q.accepted(0);
@@ -234,7 +239,12 @@ test "a header block admits only its own CONTINUATION frames" {
     var q: Queue = .init(&storage, &meta);
 
     var buf: [8]u8 = undefined;
-    try q.push(.{ .bytes = encode(&buf, 'H'), .stream_id = 3, .class = .headers, .end_headers = false });
+    try q.push(.{
+        .bytes = encode(&buf, 'H'),
+        .stream_id = 3,
+        .class = .headers,
+        .end_headers = false,
+    });
 
     // RFC 9113 §4.3 — DATA on the same stream is an interleave.
     try testing.expectError(error.InterleavedFrame, q.push(.{
@@ -258,8 +268,18 @@ test "a header block admits only its own CONTINUATION frames" {
         .end_headers = false,
     }));
 
-    try q.push(.{ .bytes = encode(&buf, 'C'), .stream_id = 3, .class = .continuation, .end_headers = true });
-    try q.push(.{ .bytes = encode(&buf, 'D'), .stream_id = 3, .class = .data, .end_headers = false });
+    try q.push(.{
+        .bytes = encode(&buf, 'C'),
+        .stream_id = 3,
+        .class = .continuation,
+        .end_headers = true,
+    });
+    try q.push(.{
+        .bytes = encode(&buf, 'D'),
+        .stream_id = 3,
+        .class = .data,
+        .end_headers = false,
+    });
     try testing.expectEqual(@as(usize, 3), q.count());
 }
 
@@ -269,8 +289,18 @@ test "only the frame carrying END_HEADERS commits" {
     var q: Queue = .init(&storage, &meta);
 
     var buf: [8]u8 = undefined;
-    try q.push(.{ .bytes = encode(&buf, 'H'), .stream_id = 1, .class = .headers, .end_headers = false });
-    try q.push(.{ .bytes = encode(&buf, 'C'), .stream_id = 1, .class = .continuation, .end_headers = true });
+    try q.push(.{
+        .bytes = encode(&buf, 'H'),
+        .stream_id = 1,
+        .class = .headers,
+        .end_headers = false,
+    });
+    try q.push(.{
+        .bytes = encode(&buf, 'C'),
+        .stream_id = 1,
+        .class = .continuation,
+        .end_headers = true,
+    });
 
     q.accepted(q.unsent().?.len);
     try testing.expectEqual(State.in_flight, q.currentState());
@@ -285,7 +315,12 @@ test "a DATA frame alone never commits" {
     var q: Queue = .init(&storage, &meta);
 
     var buf: [8]u8 = undefined;
-    try q.push(.{ .bytes = encode(&buf, 'D'), .stream_id = 1, .class = .data, .end_headers = false });
+    try q.push(.{
+        .bytes = encode(&buf, 'D'),
+        .stream_id = 1,
+        .class = .data,
+        .end_headers = false,
+    });
 
     q.accepted(1);
     try testing.expectEqual(State.in_flight, q.currentState());
@@ -298,7 +333,12 @@ test "storage and metadata exhaustion are reported before any state change" {
     var q: Queue = .init(&storage, &meta);
 
     try q.push(.{ .bytes = "ab"[0..], .stream_id = 1, .class = .data, .end_headers = false });
-    try testing.expectError(error.QueueFull, q.push(.{ .bytes = "c"[0..], .stream_id = 1, .class = .data, .end_headers = false }));
+    try testing.expectError(error.QueueFull, q.push(.{
+        .bytes = "c"[0..],
+        .stream_id = 1,
+        .class = .data,
+        .end_headers = false,
+    }));
     try testing.expectEqual(@as(usize, 1), q.count());
 
     q.accepted(2);
@@ -306,7 +346,12 @@ test "storage and metadata exhaustion are reported before any state change" {
     try testing.expectEqual(@as(usize, 0), q.used);
 
     try q.push(.{ .bytes = "cd"[0..], .stream_id = 1, .class = .data, .end_headers = false });
-    try testing.expectError(error.QueueFull, q.push(.{ .bytes = "e"[0..], .stream_id = 1, .class = .data, .end_headers = false }));
+    try testing.expectError(error.QueueFull, q.push(.{
+        .bytes = "e"[0..],
+        .stream_id = 1,
+        .class = .data,
+        .end_headers = false,
+    }));
 }
 
 test "reset clears state and reclaims storage" {
@@ -328,7 +373,12 @@ test "an empty frame is refused" {
     var storage: [8]u8 = undefined;
     var meta: [4]Queue.Meta = undefined;
     var q: Queue = .init(&storage, &meta);
-    try testing.expectError(error.EmptyFrame, q.push(.{ .bytes = "", .stream_id = 1, .class = .data, .end_headers = false }));
+    try testing.expectError(error.EmptyFrame, q.push(.{
+        .bytes = "",
+        .stream_id = 1,
+        .class = .data,
+        .end_headers = false,
+    }));
 }
 
 test "a CONTINUATION without an open block is refused" {
