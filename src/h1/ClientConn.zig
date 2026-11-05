@@ -103,7 +103,7 @@ pub fn init(config: Config) ClientConn {
 /// Begin the next response. Call before writing a request and after `done`.
 /// Leftover bytes from the previous response stay at the front of the receive
 /// buffer.
-pub fn start(self: *ClientConn, method: Method) void {
+pub fn start(self: *ClientConn, method: ?Method) void {
     assert(self.phase == .head or self.phase == .done);
     // The finished head is dead; the next one is parsed from offset 0.
     self.head_end = 0;

@@ -7,6 +7,10 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
+- `h1.ClientConn.start` accepts an optional `Method`. An unknown method token
+  parses the response with body-capable framing instead of forcing the caller
+  to map the token to a known method.
+
 - `h1.ServerConn.received` and `h1.ClientConn.received` now require `n > 0`.
   Call `eof()` for a clean close; an empty transport completion cannot become
   an accidental policy 400.
@@ -50,6 +54,13 @@ All notable changes to http are recorded here. The format follows
   exchanges and machine configs remain separate.
 
 ### Added
+
+- `http.client`: the shared client contract. `Request`, `ResponseHead`,
+  `Body`, `Response`, and `Config` are protocol-neutral; `Config` carries the
+  allocator, a 16 KiB response-header snapshot limit, and a 128-field limit.
+  `h1.client.streaming.Client` implements it with a streaming response body.
+  A clean body close keeps the h1 connection reusable; an early close drains a
+  bounded amount and marks the connection dirty when it cannot finish.
 
 - `h1.ClientConn`: a sans-I/O HTTP/1 response machine for one request at a
   time. It parses response heads, Content-Length, chunked, and close-delimited

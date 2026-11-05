@@ -9,6 +9,7 @@
 pub const content_length = @import("content_length.zig");
 pub const encoding = @import("encoding.zig");
 pub const engine = @import("engine/common.zig");
+pub const client = @import("client/root.zig");
 pub const h1 = @import("h1/root.zig");
 pub const h2 = @import("h2/root.zig");
 pub const hpack = @import("hpack/root.zig");
@@ -35,6 +36,7 @@ test {
     _ = @import("status.zig");
     _ = @import("version.zig");
     _ = content_length;
+    _ = client;
     _ = h1;
     _ = h2;
     _ = hpack;
