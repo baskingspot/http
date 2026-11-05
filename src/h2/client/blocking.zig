@@ -1349,151 +1349,53 @@ test "a split header run commits when END_HEADERS fails" {
     try testing.expect(client.isConnectionPoisoned());
 }
 
-fn nextServerEvent(session: *Session, reader: *Io.Reader) !?Event {
-    while (true) {
-        if (try session.nextEvent(testing.allocator)) |event| return event;
-        var buffer: [4096]u8 = undefined;
-        var vecs: [1][]u8 = .{&buffer};
-        const n = reader.readVec(&vecs) catch |err| switch (err) {
-            error.EndOfStream => return null,
-            else => return err,
-        };
-        if (n == 0) return null;
-        _ = session.receive(buffer[0..n]);
-    }
-}
-
-fn flushServer(session: *Session, writer: *Io.Writer) !void {
-    var buffer: [4096]u8 = undefined;
-    while (true) {
-        const n = session.send(&buffer);
-        if (n == 0) break;
-        try writer.writeAll(buffer[0..n]);
-    }
-    try writer.flush();
-}
-
-const InformationalServer = struct {
-    io: Io,
-    listener: *Io.net.Server,
-    received: *std.atomic.Value(usize),
-    result: ?anyerror = null,
-
-    fn run(self: *InformationalServer) void {
-        self.serve() catch |err| {
-            self.result = err;
-        };
-    }
-
-    fn serve(self: *InformationalServer) !void {
-        const stream = try self.listener.accept(self.io);
-        defer stream.close(self.io);
-
-        var reader = stream.reader(self.io, &.{});
-        var write_buffer: [4096]u8 = undefined;
-        var writer = stream.writer(self.io, &write_buffer);
-
-        var session = try Session.init(testing.allocator, .{
-            .role = .server,
-            .max_streams = 4,
-        });
-        defer session.deinit(testing.allocator);
-        try flushServer(&session, &writer.interface);
-
-        var id: u31 = 0;
-        while (true) {
-            const event = try nextServerEvent(&session, &reader.interface) orelse
-                return error.EndOfStream;
-            switch (event) {
-                .settings => try flushServer(&session, &writer.interface),
-                .request => |request| {
-                    id = request.stream_id;
-                    break;
-                },
-                else => {},
-            }
-        }
-
-        var storage = try hpack.TableStorage.init(testing.allocator, 4096);
-        defer storage.deinit(testing.allocator);
-        var encoder = hpack.Encoder.init(storage);
-        var block_buffer: [1024]u8 = undefined;
-        var send_buffer: [2048]u8 = undefined;
-
-        const info = try encoder.encodeResponse(
-            .{ .status = .@"continue" },
-            &block_buffer,
-        );
-        var info_writer = frame.Writer.init(&send_buffer);
-        try info_writer.begin(.headers, frame.flags.end_headers, id);
-        try info_writer.bytes(info);
-        info_writer.end();
-        try writer.interface.writeAll(info_writer.written());
-        try writer.interface.flush();
-
-        const final = try encoder.encodeResponse(
-            .{ .status = .ok },
-            &block_buffer,
-        );
-        var final_writer = frame.Writer.init(&send_buffer);
-        try final_writer.begin(.headers, frame.flags.end_headers, id);
-        try final_writer.bytes(final);
-        final_writer.end();
-        try writer.interface.writeAll(final_writer.written());
-        try writer.interface.flush();
-
-        // Keep the connection open until the client closes; otherwise the
-        // response can race the client's pending request-body writes.
-        while (try nextServerEvent(&session, &reader.interface)) |event| {
-            switch (event) {
-                .data => |data| {
-                    // Deliberately do not release the receive window. The
-                    // 100 KiB body cannot finish, so the assertion below
-                    // proves request() returned while flow control was held.
-                    _ = self.received.fetchAdd(data.bytes.len, .monotonic);
-                },
-                .reset, .connection_error, .goaway => return,
-                else => {},
-            }
-        }
-    }
-};
-
 test "informational response does not become the final head" {
     var payload: [100 * 1024]u8 = undefined;
     @memset(&payload, 'q');
 
-    const io = testing.io;
-    var address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
-    var listener = try address.listen(io, .{
-        .mode = .stream,
-        .reuse_address = true,
-    });
-    defer listener.deinit(io);
-    address.setPort(listener.socket.address.getPort());
+    var server_bytes: [2048]u8 = undefined;
+    var server_used: usize = 0;
 
-    var received: std.atomic.Value(usize) = .init(0);
-    var server: InformationalServer = .{
-        .io = io,
-        .listener = &listener,
-        .received = &received,
-    };
-    const thread = try std.Thread.spawn(.{}, InformationalServer.run, .{&server});
-    defer {
-        thread.join();
-        if (server.result) |err| std.debug.panic("info server failed: {s}", .{@errorName(err)});
-    }
+    var settings_buffer: [64]u8 = undefined;
+    var settings_writer = frame.Writer.init(&settings_buffer);
+    try settings_writer.begin(.settings, 0, 0);
+    settings_writer.end();
+    const settings_bytes = settings_writer.written();
+    @memcpy(server_bytes[server_used..][0..settings_bytes.len], settings_bytes);
+    server_used += settings_bytes.len;
 
-    const stream = try address.connect(io, .{ .mode = .stream });
-    defer stream.close(io);
-    var reader = stream.reader(io, &.{});
-    var write_buffer: [4096]u8 = undefined;
-    var writer = stream.writer(io, &write_buffer);
+    var storage = try hpack.TableStorage.init(testing.allocator, 4096);
+    defer storage.deinit(testing.allocator);
+    var encoder = hpack.Encoder.init(storage);
+    var block_buffer: [1024]u8 = undefined;
+    var frame_buffer: [2048]u8 = undefined;
+
+    const info = try encoder.encodeResponse(.{ .status = .@"continue" }, &block_buffer);
+    var info_writer = frame.Writer.init(&frame_buffer);
+    try info_writer.begin(.headers, frame.flags.end_headers, 1);
+    try info_writer.bytes(info);
+    info_writer.end();
+    const info_bytes = info_writer.written();
+    @memcpy(server_bytes[server_used..][0..info_bytes.len], info_bytes);
+    server_used += info_bytes.len;
+
+    const final = try encoder.encodeResponse(.{ .status = .ok }, &block_buffer);
+    var final_writer = frame.Writer.init(&frame_buffer);
+    try final_writer.begin(.headers, frame.flags.end_headers, 1);
+    try final_writer.bytes(final);
+    final_writer.end();
+    const final_bytes = final_writer.written();
+    @memcpy(server_bytes[server_used..][0..final_bytes.len], final_bytes);
+    server_used += final_bytes.len;
+
+    var reader = Io.Reader.fixed(server_bytes[0..server_used]);
+    var output: [256 * 1024]u8 = undefined;
+    var writer = Io.Writer.fixed(&output);
 
     var client: Client = undefined;
     try client.init(
-        &reader.interface,
-        &writer.interface,
+        &reader,
+        &writer,
         .{ .allocator = testing.allocator },
     );
     defer client.deinit();
@@ -1508,5 +1410,7 @@ test "informational response does not become the final head" {
     defer response.body.close();
 
     try testing.expectEqual(@as(u16, 200), response.head.status.code());
-    try testing.expect(received.load(.monotonic) < payload.len);
+    // The server never released the request window. If request() had waited
+    // for the body to drain, the whole 100 KiB would be in the writer.
+    try testing.expect(writer.end < payload.len);
 }
