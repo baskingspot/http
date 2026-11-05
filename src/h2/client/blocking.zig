@@ -333,6 +333,8 @@ pub const Client = struct {
             error.EndOfStream,
             error.ConnectionClosed,
             error.ReadFailed,
+            error.WriteFailed,
+            error.BrokenPipe,
             error.InputFull,
             error.WouldBlock,
             error.Canceled,
