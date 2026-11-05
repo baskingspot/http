@@ -31,6 +31,7 @@ pub const Class = enum {
     control,
 };
 
+// ast-grep-ignore: public-struct-field-default -- most frames do not carry END_STREAM
 pub const Frame = struct {
     /// One complete encoded frame. Copied into the queue's storage.
     bytes: []const u8,
@@ -38,6 +39,8 @@ pub const Frame = struct {
     class: Class,
     /// The frame carries the END_HEADERS flag.
     end_headers: bool,
+    /// The frame carries the END_STREAM flag.
+    end_stream: bool = false,
 };
 
 /// Retry state for the request being written.
@@ -75,6 +78,9 @@ pub const Queue = struct {
     /// Bytes of the head frame the transport already accepted.
     offset: usize,
     state: State,
+    /// The frame carrying END_STREAM was fully accepted. Retry safety flips at
+    /// END_HEADERS; the request ends at END_STREAM.
+    complete: bool,
     /// Stream whose header block is open, if any.
     run_stream: ?u31,
 
@@ -84,6 +90,7 @@ pub const Queue = struct {
         stream_id: u31,
         class: Class,
         end_headers: bool,
+        end_stream: bool,
     };
 
     pub fn init(storage: []u8, meta: []Meta) Queue {
@@ -95,6 +102,7 @@ pub const Queue = struct {
             .tail = 0,
             .offset = 0,
             .state = .staged,
+            .complete = false,
             .run_stream = null,
         };
     }
@@ -126,7 +134,7 @@ pub const Queue = struct {
     pub fn push(self: *Queue, frame: Frame) PushError!void {
         if (self.offset != 0) return error.AppendWhilePartial;
         if (frame.bytes.len == 0) return error.EmptyFrame;
-        if (self.isEmpty() and self.state == .committed and frame.class != .control) {
+        if (self.isEmpty() and self.complete and frame.class != .control) {
             return error.NeedsReset;
         }
         if (self.count() == self.meta.len) return error.QueueFull;
@@ -150,6 +158,7 @@ pub const Queue = struct {
             .stream_id = frame.stream_id,
             .class = frame.class,
             .end_headers = frame.end_headers,
+            .end_stream = frame.end_stream,
         };
         self.tail += 1;
 
@@ -177,6 +186,7 @@ pub const Queue = struct {
         self.offset = 0;
         self.head += 1;
         if (m.end_headers and self.state != .committed) self.state = .committed;
+        if (m.end_stream) self.complete = true;
         if (self.head == self.tail) {
             self.head = 0;
             self.tail = 0;
@@ -190,6 +200,7 @@ pub const Queue = struct {
         self.used = 0;
         self.offset = 0;
         self.state = .staged;
+        self.complete = false;
         self.run_stream = null;
     }
 };
@@ -360,7 +371,7 @@ test "storage and metadata exhaustion are reported before any state change" {
     }));
 }
 
-test "a committed request needs reset before another request" {
+test "DATA after END_HEADERS is legal until END_STREAM" {
     var storage: [64]u8 = undefined;
     var meta: [8]Queue.Meta = undefined;
     var q: Queue = .init(&storage, &meta);
@@ -371,6 +382,45 @@ test "a committed request needs reset before another request" {
         .stream_id = 1,
         .class = .headers,
         .end_headers = true,
+    });
+    q.accepted(1);
+    try testing.expectEqual(State.committed, q.currentState());
+    try testing.expect(q.isEmpty());
+
+    // END_HEADERS committed the request, but the body is still coming.
+    try q.push(.{
+        .bytes = encode(&buf, 'D'),
+        .stream_id = 1,
+        .class = .data,
+        .end_headers = false,
+    });
+    try testing.expectEqual(@as(usize, 1), q.count());
+
+    q.accepted(1);
+    try q.push(.{
+        .bytes = encode(&buf, 'E'),
+        .stream_id = 1,
+        .class = .data,
+        .end_headers = false,
+        .end_stream = true,
+    });
+    q.accepted(1);
+    try testing.expect(q.isEmpty());
+    try testing.expect(q.complete);
+}
+
+test "a completed request needs reset before another request" {
+    var storage: [64]u8 = undefined;
+    var meta: [8]Queue.Meta = undefined;
+    var q: Queue = .init(&storage, &meta);
+
+    var buf: [4]u8 = undefined;
+    try q.push(.{
+        .bytes = encode(&buf, 'H'),
+        .stream_id = 1,
+        .class = .headers,
+        .end_headers = true,
+        .end_stream = true,
     });
     q.accepted(1);
     try testing.expectEqual(State.committed, q.currentState());
