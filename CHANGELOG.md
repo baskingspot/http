@@ -19,6 +19,12 @@ All notable changes to http are recorded here. The format follows
   deadline expires. A 408 is queued only after a request head or body has
   started. A keep-alive connection with only CRLF bytes is idle.
 
+- An h1 readiness listener reports `error.AddressInUse` when a bind conflicts,
+  instead of collapsing every bind failure into `error.BindFailed`. The
+  readiness `drain_bytes` buffer is not allocated when it is zero or when
+  `Limits.drain_timeout` is zero. When every slot is busy, new connections
+  remain in the accept backlog until a slot frees.
+
 - `h1.ClientConn.start` accepts an optional `Method`. An unknown method token
   parses the response with body-capable framing instead of forcing the caller
   to map the token to a known method.
@@ -291,6 +297,10 @@ All notable changes to http are recorded here. The format follows
   `content_length` parses its digits with it.
 
 ### Fixed
+
+- `h2.client.blocking` treats a zero-byte `readVec` with buffered bytes as a
+  buffered fill, not EOF. This fixes HTTP/2 over TLS readers that fill their
+  own buffer before returning bytes.
 
 - `h1.ClientConn`: a response head stays readable after its body arrives in a
   later read. Refills no longer overwrite the head bytes that `Event.response`

@@ -33,9 +33,14 @@ pub const Config = struct {
     response_head_bytes: usize = 1024,
     /// Coalesce and cap response chunks. Zero preserves separate head/body.
     write_chunk_bytes: usize = 0,
+    /// Scratch for the close-after-drain phase. Zero skips the allocation;
+    /// a zero `Limits.drain_timeout` also skips the phase and this buffer.
     drain_bytes: usize = 4 * 1024,
     limits: h1.ServerConn.Limits = .{},
     accept_backoff: Io.Duration = .fromMilliseconds(50),
+    /// When every slot is busy, new connections stay in the accept backlog
+    /// until one frees; they are not accepted and closed.
+    ///
     /// Linux `TCP_DEFER_ACCEPT`. The listener wakes only when the peer sends
     /// data, not when the handshake completes. Other platforms ignore it.
     tcp_defer_accept: bool = false,
@@ -530,8 +535,11 @@ fn makeSlot(allocator: Allocator, config: Config) !Slot {
     errdefer allocator.free(response_head);
     var arena: ArenaAllocator = .init(allocator);
     errdefer arena.deinit();
-    const drain = try allocator.alloc(u8, config.drain_bytes);
-    errdefer allocator.free(drain);
+    const drain: []u8 = if (config.drain_bytes == 0 or
+        limits(config).drain_timeout.nanoseconds == 0)
+        @constCast(&.{})
+    else
+        try allocator.alloc(u8, config.drain_bytes);
 
     return .{
         .conn = .init(.{
@@ -561,7 +569,7 @@ fn freeSlotBuffers(allocator: Allocator, slot: *Slot) void {
     allocator.free(slot.headers);
     allocator.free(slot.response_head);
     slot.arena.deinit();
-    allocator.free(slot.drain);
+    if (slot.drain.len != 0) allocator.free(slot.drain);
 }
 
 fn earliest(a: ?Io.Timestamp, b: Io.Timestamp) Io.Timestamp {

@@ -155,8 +155,10 @@ pub fn openListener(address: Io.net.IpAddress, tcp_defer_accept: bool) !Listener
                 .port = mem.nativeToBig(u16, a.port),
                 .addr = @bitCast(a.bytes),
             };
-            if (posix.errno(c.bind(fd, @ptrCast(&sa), @sizeOf(c.sockaddr.in))) != .SUCCESS) {
-                return error.BindFailed;
+            switch (posix.errno(c.bind(fd, @ptrCast(&sa), @sizeOf(c.sockaddr.in)))) {
+                .SUCCESS => {},
+                .ADDRINUSE => return error.AddressInUse,
+                else => return error.BindFailed,
             }
         },
         .ip6 => |a| {
@@ -168,8 +170,10 @@ pub fn openListener(address: Io.net.IpAddress, tcp_defer_accept: bool) !Listener
                 .addr = a.bytes,
                 .scope_id = a.interface.index,
             };
-            if (posix.errno(c.bind(fd, @ptrCast(&sa), @sizeOf(c.sockaddr.in6))) != .SUCCESS) {
-                return error.BindFailed;
+            switch (posix.errno(c.bind(fd, @ptrCast(&sa), @sizeOf(c.sockaddr.in6)))) {
+                .SUCCESS => {},
+                .ADDRINUSE => return error.AddressInUse,
+                else => return error.BindFailed,
             }
         },
     }

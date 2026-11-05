@@ -152,7 +152,11 @@ pub fn openListener(address: Io.net.IpAddress, tcp_defer_accept: bool) !Listener
                 .addr = @bitCast(a.bytes),
             };
             const bind_rc = linux.bind(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in));
-            if (linux.errno(bind_rc) != .SUCCESS) return error.BindFailed;
+            switch (linux.errno(bind_rc)) {
+                .SUCCESS => {},
+                .ADDRINUSE => return error.AddressInUse,
+                else => return error.BindFailed,
+            }
         },
         .ip6 => |a| {
             var sa: linux.sockaddr.in6 = .{
@@ -162,7 +166,11 @@ pub fn openListener(address: Io.net.IpAddress, tcp_defer_accept: bool) !Listener
                 .scope_id = a.interface.index,
             };
             const bind_rc = linux.bind(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in6));
-            if (linux.errno(bind_rc) != .SUCCESS) return error.BindFailed;
+            switch (linux.errno(bind_rc)) {
+                .SUCCESS => {},
+                .ADDRINUSE => return error.AddressInUse,
+                else => return error.BindFailed,
+            }
         },
     }
 

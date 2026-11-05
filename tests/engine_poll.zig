@@ -375,7 +375,7 @@ test "poll answers a handler that forgets to respond" {
     try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 500 Internal Server Error\r\n"));
 }
 
-test "poll listener does not set SO_REUSEPORT" {
+test "poll second listener reports AddressInUse" {
     var h: Harness = undefined;
     try h.init(.{}, 8);
     defer h.deinit();
@@ -384,7 +384,7 @@ test "poll listener does not set SO_REUSEPORT" {
     address.setPort(h.server.port());
     var second_app: TestApp = .{};
     try testing.expectError(
-        error.BindFailed,
+        error.AddressInUse,
         PollServer.init(h.io, address, second_app.handler(), .{
             .allocator = testing.allocator,
             .max_connections = 8,
