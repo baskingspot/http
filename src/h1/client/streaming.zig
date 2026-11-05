@@ -19,6 +19,7 @@ const h1 = @import("../root.zig");
 pub const Request = common.Request;
 pub const ResponseHead = common.ResponseHead;
 pub const Body = common.Body;
+pub const BodyRead = common.BodyRead;
 pub const Response = common.Response;
 pub const Config = common.Config;
 
@@ -169,37 +170,49 @@ pub const Client = struct {
         return if (n == 0) self.conn.eof() else self.conn.received(n);
     }
 
-    fn bodyRead(ptr: *anyopaque, out: []u8) anyerror!usize {
+    fn bodyRead(ptr: *anyopaque) BodyRead {
         const self: *Client = @ptrCast(@alignCast(ptr));
-        return self.readBody(out);
+        return self.readBody();
     }
 
-    fn readBody(self: *Client, out: []u8) !usize {
-        if (!self.active or out.len == 0) return 0;
+    fn readBody(self: *Client) BodyRead {
+        if (!self.active) return .eof;
         while (true) {
-            if (self.pending.len != 0) {
-                const n = @min(out.len, self.pending.len);
-                @memcpy(out[0..n], self.pending[0..n]);
-                self.pending = self.pending[n..];
-                return n;
-            }
-            var event = try self.conn.next();
+            // A slice returned on the previous call is still the current
+            // slice. The next read releases it and advances the connection.
+            if (self.pending.len != 0) self.pending = &.{};
+            if (self.body_eof) return .eof;
+
+            var event = self.conn.next() catch |err| return mapBodyError(err);
             while (true) {
                 switch (event) {
                     .body => |bytes| {
+                        if (bytes.len == 0) return .protocol;
                         self.pending = bytes;
-                        break;
+                        return .{ .data = bytes };
                     },
                     .done => {
                         self.body_eof = true;
-                        return 0;
+                        return .eof;
                     },
-                    .need_more => event = try self.readEvent(),
-                    .response => return error.UnexpectedResponse,
-                    .closed => return error.EndOfStream,
+                    .need_more => event = self.readEvent() catch |err| return mapBodyError(err),
+                    .response => return .protocol,
+                    .closed => return .truncated,
                 }
             }
         }
+    }
+
+    fn mapBodyError(err: anyerror) BodyRead {
+        return switch (err) {
+            error.Incomplete,
+            error.EndOfStream,
+            error.ReadFailed,
+            error.Canceled,
+            error.WouldBlock,
+            => .truncated,
+            else => .protocol,
+        };
     }
 
     fn bodyClose(ptr: *anyopaque) void {
@@ -215,14 +228,15 @@ pub const Client = struct {
             // connection dirty for the caller to close.
             const max_drain_bytes = 1024 * 1024;
             var drained: usize = 0;
-            var scratch: [1024]u8 = undefined;
             while (drained < max_drain_bytes) {
-                const n = self.readBody(&scratch) catch {
-                    self.dirty = true;
-                    break;
-                };
-                if (n == 0) break;
-                drained += n;
+                switch (self.readBody()) {
+                    .data => |bytes| drained += bytes.len,
+                    .eof => break,
+                    .reset, .truncated, .protocol => {
+                        self.dirty = true;
+                        break;
+                    },
+                }
             }
             if (!self.body_eof) self.dirty = true;
         }
@@ -328,14 +342,18 @@ test "streaming client copies a body that arrives after the head" {
     try testing.expectEqual(.ok, response.head.status);
     try testing.expectEqual(common.Protocol.h1, response.head.protocol);
 
-    var body: [3]u8 = undefined;
     var got: [11]u8 = undefined;
     var used: usize = 0;
     while (true) {
-        const n = try response.body.read(&body);
-        if (n == 0) break;
-        @memcpy(got[used..][0..n], body[0..n]);
-        used += n;
+        switch (response.body.read()) {
+            .data => |bytes| {
+                try testing.expect(bytes.len != 0);
+                @memcpy(got[used..][0..bytes.len], bytes);
+                used += bytes.len;
+            },
+            .eof => break,
+            else => return error.UnexpectedBodyResult,
+        }
     }
     try testing.expectEqualStrings("hello world", got[0..used]);
     response.body.close();

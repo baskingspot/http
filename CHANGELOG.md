@@ -7,6 +7,18 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
+- `http.client.Body.read` returns the tagged `BodyRead` instead of a copied
+  byte count. A `data` slice is borrowed for the life of the connection
+  operation, never empty, and pins the h2 connection flow-control window until
+  the next read or close. `reset` carries the RST_STREAM code, including
+  REFUSED_STREAM; `truncated` covers an incomplete body; `protocol` covers a
+  peer violation. GOAWAY stays on the connection (`h2.client.blocking.Client.goAway`).
+  Blocking `Body` never returns `would_block`; evented clients use `BodyStep`.
+
+- An idle h1 connection with no request bytes closes silently when its idle
+  deadline expires. A 408 is queued only after a request head or body has
+  started. A keep-alive connection with only CRLF bytes is idle.
+
 - `h1.ClientConn.start` accepts an optional `Method`. An unknown method token
   parses the response with body-capable framing instead of forcing the caller
   to map the token to a known method.
@@ -61,6 +73,9 @@ All notable changes to http are recorded here. The format follows
   `h1.client.streaming.Client` implements it with a streaming response body.
   A clean body close keeps the h1 connection reusable; an early close drains a
   bounded amount and marks the connection dirty when it cannot finish.
+
+- `http.client.BodyStep`: the non-blocking body shape for evented clients;
+  `would_block` is separate from the terminal body outcomes.
 
 - `http.client.blocking.Client` dispatches the shared contract to either the h1
   or h2 adapter. `Config.protocol` is the caller's cleartext choice; TLS ALPN

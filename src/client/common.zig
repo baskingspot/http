@@ -51,21 +51,58 @@ pub const ResponseHead = struct {
     headers: Headers,
 };
 
+/// The terminal outcome of one blocking body read.
+pub const BodyRead = union(enum) {
+    /// A borrowed body slice. Never empty. Its lifetime is per connection, not
+    /// per body: the next operation that advances the connection invalidates
+    /// it. Holding it pins the h2 connection-level flow-control window, so a
+    /// caller that keeps bytes across another read must copy them.
+    data: []const u8,
+    /// The body is complete.
+    eof,
+    /// The peer reset this stream. The code is the RFC 9113 RST_STREAM code;
+    /// REFUSED_STREAM (0x08) is the only reset that guarantees no processing.
+    reset: u32,
+    /// The transport or stream ended before the body was complete. A GOAWAY
+    /// boundary can make this retry-safe; see the connection's `goAway()`.
+    truncated,
+    /// The peer sent a malformed frame or an invalid response.
+    protocol,
+};
+
+/// A non-blocking body outcome. Blocking `Body` adapters never return
+/// `would_block`; evented clients use this shape instead of overloading Body.
+pub const BodyStep = union(enum) {
+    data: []const u8,
+    eof,
+    reset: u32,
+    truncated,
+    protocol,
+    would_block,
+};
+
+/// The blocking-client body contract.
+///
+/// `read` may block, never returns `would_block`, never returns empty data, and
+/// reports completion with `eof`. A step client gets `BodyStep`; the evented
+/// engines deliver exchanges through their own pump.
 pub const Body = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
-        /// Copy response body bytes into `out`. Returns 0 at clean EOF.
-        /// Protocol errors (reset, GOAWAY, framing) are returned as errors.
-        read: *const fn (ptr: *anyopaque, out: []u8) anyerror!usize,
+        /// Return the next body bytes or a terminal outcome. The borrowed slice
+        /// is valid until any operation that advances the connection; a caller
+        /// that holds it across another read must copy. Holding an h2 slice
+        /// pins the connection window for every stream.
+        read: *const fn (ptr: *anyopaque) BodyRead,
         /// Finish the response. Idempotent. Releases unread flow control and
         /// resets an incomplete stream where the protocol supports it.
         close: *const fn (ptr: *anyopaque) void,
     };
 
-    pub fn read(self: Body, out: []u8) anyerror!usize {
-        return self.vtable.read(self.ptr, out);
+    pub fn read(self: Body) BodyRead {
+        return self.vtable.read(self.ptr);
     }
 
     pub fn close(self: Body) void {
@@ -76,6 +113,13 @@ pub const Body = struct {
 pub const Response = struct {
     head: ResponseHead,
     body: Body,
+};
+
+/// A connection-level GOAWAY. Streams at or below `last_stream_id` remain
+/// valid; streams above it were not processed.
+pub const GoAway = struct {
+    last_stream_id: u31,
+    code: u32,
 };
 
 // ast-grep-ignore: public-struct-field-default -- options bag; arena policy

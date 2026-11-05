@@ -65,6 +65,7 @@ pub const Client = struct {
     net_start: usize = 0,
     net_end: usize = 0,
     body: Body = undefined,
+    goaway: ?shared.GoAway = null,
 
     /// Initialize in its final location. The caller owns the reader, writer,
     /// header storage, and allocator.
@@ -119,11 +120,18 @@ pub const Client = struct {
         return self.connection_poisoned;
     }
 
+    /// The connection-level GOAWAY boundary, if one arrived. A body result of
+    /// `truncated` above this boundary was not processed by the peer.
+    pub fn goAway(self: *const Client) ?shared.GoAway {
+        return self.goaway;
+    }
+
     /// Send one request and wait for its response head. The request body is
     /// not supported in this slice; pass an empty `body`.
     pub fn request(self: *Client, value: Request) !Response {
         if (self.active) return error.RequestInProgress;
         if (self.connection_poisoned) return error.ConnectionPoisoned;
+        if (self.goaway != null) return error.GoAway;
         if (value.body.len != 0) return error.RequestBodyUnsupported;
         self.request_state = .idle;
         _ = self.arena.reset(.free_all);
@@ -183,9 +191,15 @@ pub const Client = struct {
                         .body = self.body,
                     };
                 },
-                .goaway => {
-                    self.connection_poisoned = true;
-                    return error.GoAway;
+                .goaway => |goaway| {
+                    self.goaway = .{
+                        .last_stream_id = goaway.last_stream_id,
+                        .code = @intFromEnum(goaway.code),
+                    };
+                    if (id > goaway.last_stream_id) {
+                        self.connection_poisoned = true;
+                        return error.GoAway;
+                    }
                 },
                 .connection_error => {
                     self.connection_poisoned = true;
@@ -236,64 +250,95 @@ pub const Client = struct {
         return .{ .items = items };
     }
 
-    fn readBody(self: *Client, out: []u8) !usize {
-        if (!self.active or out.len == 0) return 0;
+    fn readBody(self: *Client) shared.BodyRead {
+        if (!self.active) return .eof;
 
         while (true) {
             if (self.pending.len != 0) {
-                const n = @min(out.len, self.pending.len);
-                @memcpy(out[0..n], self.pending[0..n]);
-                self.pending = self.pending[n..];
-                if (self.pending.len == 0) {
-                    try self.releasePending();
-                    if (self.remote_end) self.body_eof = true;
+                // The previous read returned this slice. Release its flow
+                // before advancing; the caller is done with it by contract.
+                self.pending = &.{};
+                self.releasePending() catch |err| {
+                    self.connection_poisoned = true;
+                    return mapBodyError(err);
+                };
+                if (self.remote_end) {
+                    self.body_eof = true;
+                    return .eof;
                 }
-                return n;
             }
 
-            if (self.body_eof) return 0;
+            if (self.body_eof) return .eof;
 
-            const event = try self.nextEvent();
+            const event = self.nextEvent() catch |err| return mapBodyError(err);
             switch (event) {
                 .data => |data| {
-                    if (data.stream_id != self.stream_id) return error.UnexpectedStream;
-                    self.pending = data.bytes;
+                    if (data.stream_id != self.stream_id) return .protocol;
                     self.pending_flow = data.flow_len;
                     if (data.end_stream) self.remote_end = true;
                     if (data.bytes.len == 0) {
-                        try self.releasePending();
-                        if (self.remote_end) self.body_eof = true;
+                        self.releasePending() catch |err| {
+                            self.connection_poisoned = true;
+                            return mapBodyError(err);
+                        };
+                        if (self.remote_end) {
+                            self.body_eof = true;
+                            return .eof;
+                        }
                         continue;
                     }
+                    self.pending = data.bytes;
+                    return .{ .data = data.bytes };
                 },
                 .trailers => |trailers| {
-                    if (trailers.stream_id != self.stream_id) return error.UnexpectedStream;
+                    if (trailers.stream_id != self.stream_id) return .protocol;
                     if (trailers.end_stream) {
                         self.remote_end = true;
                         self.body_eof = true;
+                        return .eof;
                     }
                 },
                 .response => |response| {
-                    if (response.stream_id != self.stream_id) return error.UnexpectedStream;
+                    if (response.stream_id != self.stream_id) return .protocol;
                     if (response.end_stream) {
                         self.remote_end = true;
                         self.body_eof = true;
+                        return .eof;
                     }
                 },
-                .settings => try self.flushFrames(),
+                .settings => self.flushFrames() catch |err| return mapBodyError(err),
                 .window_update => {},
-                .goaway => {
-                    self.connection_poisoned = true;
-                    return error.GoAway;
+                .goaway => |goaway| {
+                    self.goaway = .{
+                        .last_stream_id = goaway.last_stream_id,
+                        .code = @intFromEnum(goaway.code),
+                    };
+                    if (self.stream_id > goaway.last_stream_id) {
+                        self.connection_poisoned = true;
+                        return .truncated;
+                    }
                 },
                 .connection_error => {
                     self.connection_poisoned = true;
-                    return error.ConnectionError;
+                    return .protocol;
                 },
-                .reset => return error.StreamReset,
-                .request => return error.UnexpectedRequest,
+                .reset => |reset| return .{ .reset = @intFromEnum(reset.code) },
+                .request => return .protocol,
             }
         }
+    }
+
+    fn mapBodyError(err: anyerror) shared.BodyRead {
+        return switch (err) {
+            error.EndOfStream,
+            error.ConnectionClosed,
+            error.ReadFailed,
+            error.InputFull,
+            error.WouldBlock,
+            error.Canceled,
+            => .truncated,
+            else => .protocol,
+        };
     }
 
     fn releasePending(self: *Client) !void {
@@ -483,9 +528,9 @@ const body_vtable: Body.VTable = .{
     .close = bodyClose,
 };
 
-fn bodyRead(ptr: *anyopaque, out: []u8) anyerror!usize {
+fn bodyRead(ptr: *anyopaque) shared.BodyRead {
     const self: *Client = @ptrCast(@alignCast(ptr));
-    return self.readBody(out);
+    return self.readBody();
 }
 
 fn bodyClose(ptr: *anyopaque) void {
@@ -627,14 +672,17 @@ test "the blocking client streams a response body" {
         response.head.headers.get("content-type").?,
     );
 
-    var body: [7]u8 = undefined;
     var received: [expected.len]u8 = undefined;
     var used: usize = 0;
     while (true) {
-        const n = try response.body.read(&body);
-        if (n == 0) break;
-        @memcpy(received[used..][0..n], body[0..n]);
-        used += n;
+        switch (response.body.read()) {
+            .data => |bytes| {
+                @memcpy(received[used..][0..bytes.len], bytes);
+                used += bytes.len;
+            },
+            .eof => break,
+            else => return error.UnexpectedBodyResult,
+        }
     }
     try testing.expectEqual(@as(usize, expected.len), used);
     try testing.expectEqualStrings(expected, &received);
@@ -676,14 +724,17 @@ test "the blocking client releases flow control while streaming" {
     });
     defer response.body.close();
 
-    var body: [1024]u8 = undefined;
     var offset: usize = 0;
     while (true) {
-        const n = try response.body.read(&body);
-        if (n == 0) break;
-        try testing.expect(offset + n <= big.len);
-        try testing.expectEqualSlices(u8, big[offset..][0..n], body[0..n]);
-        offset += n;
+        switch (response.body.read()) {
+            .data => |bytes| {
+                try testing.expect(offset + bytes.len <= big.len);
+                try testing.expectEqualSlices(u8, big[offset..][0..bytes.len], bytes);
+                offset += bytes.len;
+            },
+            .eof => break,
+            else => return error.UnexpectedBodyResult,
+        }
     }
     try testing.expectEqual(big.len, offset);
 }
@@ -719,12 +770,14 @@ test "closing an incomplete response resets the stream and is idempotent" {
         .target = "/",
     });
 
-    var one: [1]u8 = undefined;
-    try testing.expectEqual(@as(usize, 1), try response.body.read(&one));
+    switch (response.body.read()) {
+        .data => |bytes| try testing.expect(bytes.len > 0),
+        else => return error.UnexpectedBodyResult,
+    }
     response.body.close();
     try testing.expect(client.reset_sent);
     response.body.close();
-    try testing.expectEqual(@as(usize, 0), try response.body.read(&one));
+    try testing.expectEqual(.eof, response.body.read());
 }
 
 test "connection poison is separate from request commit" {
@@ -783,8 +836,7 @@ test "a no-body response can be followed by another request" {
             .authority = "example.com",
             .target = "/",
         });
-        var body: [1]u8 = undefined;
-        try testing.expectEqual(@as(usize, 0), try response.body.read(&body));
+        try testing.expectEqual(.eof, response.body.read());
         response.body.close();
     }
     try testing.expectEqual(@as(usize, 2), harness.app.seen);
@@ -863,11 +915,13 @@ test "closing after remote END_STREAM releases without resetting" {
         .authority = "example.com",
         .target = "/",
     });
-    var one: [1]u8 = undefined;
-    try testing.expectEqual(@as(usize, 1), try response.body.read(&one));
+    switch (response.body.read()) {
+        .data => |bytes| try testing.expect(bytes.len > 0),
+        else => return error.UnexpectedBodyResult,
+    }
     response.body.close();
     try testing.expect(!client.reset_sent);
-    try testing.expectEqual(@as(usize, 0), try response.body.read(&one));
+    try testing.expectEqual(.eof, response.body.read());
 }
 
 test "header snapshot enforces byte and field limits" {

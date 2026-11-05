@@ -131,7 +131,6 @@ fn parseUrl(arena: Allocator, text: []const u8) !Url {
 fn printResponse(io: Io, response: client.Response) !void {
     defer response.body.close();
     var write_buffer: [4096]u8 = undefined;
-    var read_buffer: [16 * 1024]u8 = undefined;
     var stdout_writer: Io.File.Writer = .init(.stdout(), io, &write_buffer);
     var writer = &stdout_writer.interface;
 
@@ -144,9 +143,13 @@ fn printResponse(io: Io, response: client.Response) !void {
     try writer.flush();
 
     while (true) {
-        const n = try response.body.read(&read_buffer);
-        if (n == 0) break;
-        try writer.writeAll(read_buffer[0..n]);
+        switch (response.body.read()) {
+            .data => |bytes| try writer.writeAll(bytes),
+            .eof => break,
+            .reset => return error.StreamReset,
+            .truncated => return error.TruncatedBody,
+            .protocol => return error.ProtocolError,
+        }
     }
     try writer.flush();
 }
