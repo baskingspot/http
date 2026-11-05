@@ -142,9 +142,14 @@ fn printResponse(io: Io, response: client.Response) !void {
     try writer.writeByte('\n');
     try writer.flush();
 
+    defer writer.flush() catch {};
+    try drain(response.body, writer);
+}
+
+fn drain(body: http.client.Body, w: *Io.Writer) !void {
     while (true) {
-        switch (response.body.read()) {
-            .data => |bytes| try writer.writeAll(bytes),
+        switch (body.read()) {
+            .data => |bytes| try w.writeAll(bytes),
             .eof => break,
             .reset => return error.StreamReset,
             .truncated => return error.TruncatedBody,
@@ -156,5 +161,4 @@ fn printResponse(io: Io, response: client.Response) !void {
             },
         }
     }
-    try writer.flush();
 }
