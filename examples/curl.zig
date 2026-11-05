@@ -1,4 +1,4 @@
-//! A deliberately small curl: one HTTP/1.1 GET, body to stdout.
+//! A deliberately small curl: one HTTP/1.1 GET with a streaming body.
 //!
 //!     just curl http://127.0.0.1:8080/
 //!     just curl https://127.0.0.1:8444/
@@ -13,7 +13,7 @@ const Allocator = mem.Allocator;
 const print = std.debug.print;
 
 const http = @import("http");
-const client = http.h1.client.blocking;
+const client = http.h1.client.streaming;
 const tls = @import("tls_std");
 
 pub fn main(init: std.process.Init) !void {
@@ -26,11 +26,11 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const url = try parseUrl(arena, args[1]);
-    var buffers: Buffers = .{};
     const request: client.Request = .{
-        .method = .GET,
+        .method_token = "GET",
+        .scheme = if (url.https) .https else .http,
+        .authority = url.authority,
         .target = url.target,
-        .headers = &.{.{ .name = "Host", .value = url.authority }},
     };
 
     if (url.https) {
@@ -45,17 +45,25 @@ pub fn main(init: std.process.Init) !void {
             conn.deinit();
             conn.close();
         }
-        const response = try client.fetchIo(
-            conn.reader(),
-            conn.writer(),
-            request,
-            buffers.config(),
-        );
+        var http_client: client.Client = undefined;
+        try http_client.init(conn.reader(), conn.writer(), .{
+            .allocator = arena,
+        });
+        defer http_client.deinit();
+        const response = try http_client.request(request);
         try printResponse(io, response);
     } else {
         const stream = try url.address.connect(io, .{ .mode = .stream });
         defer stream.close(io);
-        const response = try client.fetch(io, stream, request, buffers.config());
+        var write_buffer: [4 * 1024]u8 = undefined;
+        var stream_writer = stream.writer(io, &write_buffer);
+        var stream_reader = stream.reader(io, &.{});
+        var http_client: client.Client = undefined;
+        try http_client.init(&stream_reader.interface, &stream_writer.interface, .{
+            .allocator = arena,
+        });
+        defer http_client.deinit();
+        const response = try http_client.request(request);
         try printResponse(io, response);
     }
 }
@@ -101,41 +109,25 @@ fn parseUrl(arena: Allocator, text: []const u8) !Url {
     };
 }
 
-const Buffers = struct {
-    recv: [16 * 1024]u8 = undefined,
-    headers: [64]http.Header = undefined,
-    trailers: [8]http.Header = undefined,
-    body: [1024 * 1024]u8 = undefined,
-    write: [4 * 1024]u8 = undefined,
-
-    fn config(self: *Buffers) client.Config {
-        return .{
-            .recv_buffer = &self.recv,
-            .headers = &self.headers,
-            .trailers = &self.trailers,
-            .body_buffer = &self.body,
-            .write_buffer = &self.write,
-        };
-    }
-};
-
 fn printResponse(io: Io, response: client.Response) !void {
-    var buf: [4096]u8 = undefined;
-    var stdout_writer: Io.File.Writer = .init(.stdout(), io, &buf);
+    defer response.body.close();
+    var write_buffer: [4096]u8 = undefined;
+    var read_buffer: [16 * 1024]u8 = undefined;
+    var stdout_writer: Io.File.Writer = .init(.stdout(), io, &write_buffer);
     var writer = &stdout_writer.interface;
 
     const head = response.head;
-    try writer.print("{s} {d} {s}\n", .{
-        @tagName(head.version),
-        head.status.code(),
-        head.reason,
-    });
+    try writer.print("{s} {d}\n", .{ @tagName(head.protocol), head.status.code() });
     for (head.headers.items) |header| {
         try writer.print("{s}: {s}\n", .{ header.name, header.value });
     }
     try writer.writeByte('\n');
     try writer.flush();
 
-    try writer.writeAll(response.body);
+    while (true) {
+        const n = try response.body.read(&read_buffer);
+        if (n == 0) break;
+        try writer.writeAll(read_buffer[0..n]);
+    }
     try writer.flush();
 }
