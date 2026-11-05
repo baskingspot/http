@@ -1430,20 +1430,26 @@ const InformationalServer = struct {
             &block_buffer,
         );
         var final_writer = frame.Writer.init(&send_buffer);
-        try final_writer.begin(
-            .headers,
-            frame.flags.end_headers | frame.flags.end_stream,
-            id,
-        );
+        try final_writer.begin(.headers, frame.flags.end_headers, id);
         try final_writer.bytes(final);
         final_writer.end();
         try writer.interface.writeAll(final_writer.written());
         try writer.interface.flush();
+
+        // Keep the connection open until the client closes; otherwise the
+        // response can race the client's pending request-body writes.
+        while (try nextServerEvent(&session, &reader.interface)) |event| {
+            switch (event) {
+                .reset, .connection_error, .goaway => return,
+                else => {},
+            }
+        }
     }
 };
 
 test "informational response does not become the final head" {
-    const payload = "body";
+    var payload: [100 * 1024]u8 = undefined;
+    @memset(&payload, 'q');
 
     const io = testing.io;
     var address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
@@ -1480,10 +1486,10 @@ test "informational response does not become the final head" {
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
-        .body = payload,
+        .body = &payload,
     });
     defer response.body.close();
 
     try testing.expectEqual(@as(u16, 200), response.head.status.code());
-    try testing.expectEqual(.eof, response.body.read());
+    try testing.expect(client.pending_body.len != 0);
 }
