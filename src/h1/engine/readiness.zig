@@ -6,6 +6,7 @@
 //! completion engine.
 
 const std = @import("std");
+const testing = std.testing;
 const Io = std.Io;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
@@ -20,6 +21,8 @@ pub const Handler = @import("common.zig").Handler;
 pub const PolicyContext = @import("common.zig").PolicyContext;
 pub const PolicyResponse = @import("common.zig").PolicyResponse;
 const wait = @import("../../transport/wait.zig");
+const wait_poll_test = @import("../../transport/wait_poll.zig");
+const wait_kqueue_test = @import("../../transport/wait_kqueue.zig");
 const common = @import("../../engine/common.zig");
 const api = @import("common.zig");
 
@@ -579,4 +582,55 @@ fn earliest(a: ?Io.Timestamp, b: Io.Timestamp) Io.Timestamp {
 
 fn clock(io: Io) Io.Timestamp {
     return Io.Clock.awake.now(io);
+}
+
+const DeadListenerHandler = struct {
+    fn handle(_: *anyopaque, _: *Exchange) anyerror!void {}
+    fn complete(_: *anyopaque, _: *Exchange) void {}
+    fn report(_: *anyopaque, _: anyerror) void {}
+    fn policy(
+        _: *anyopaque,
+        context: common.PolicyContext,
+    ) anyerror!common.PolicyResponse {
+        return .{ .options = .{ .status = context.status }, .body = "" };
+    }
+
+    fn value() Handler {
+        return .{ .ptr = undefined, .vtable = &.{
+            .handle = handle,
+            .complete = complete,
+            .report_error = report,
+            .policy_response = policy,
+        } };
+    }
+};
+
+fn testDeadListener(comptime Wait: type) !void {
+    const ServerType = Server(Wait);
+    var server = try ServerType.init(
+        testing.io,
+        try .parseLiteral("127.0.0.1:0"),
+        DeadListenerHandler.value(),
+        .{
+            .allocator = testing.allocator,
+            .max_connections = 1,
+        },
+    );
+    defer server.deinit();
+
+    const fd = server.listener.fd;
+    Wait.Platform.close(fd);
+    server.listener.fd = -1;
+    try testing.expectError(error.ListenerFailed, server.acceptAll(Io.Timestamp.zero));
+}
+
+test "a dead listener returns ListenerFailed" {
+    const builtin = @import("builtin");
+    if (builtin.os.tag == .linux) {
+        try testDeadListener(wait_poll_test.Wait);
+    } else if (builtin.os.tag == .macos) {
+        try testDeadListener(wait_kqueue_test.Wait);
+    } else {
+        return error.SkipZigTest;
+    }
 }
