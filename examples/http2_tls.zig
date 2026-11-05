@@ -24,12 +24,15 @@ const response_body = "h2c over tls hello\n";
 
 const tls_fixture = @import("tls_fixture.zig");
 
+const Handler = http.h2.engine.Handler;
+
 const App = struct {
-    fn handler() http.h2.engine.Handler {
+    fn handler() Handler {
         return .{ .ptr = undefined, .vtable = &.{
             .handle = handle,
-            .complete = http.h2.engine.Handler.noopComplete,
+            .complete = Handler.noopComplete,
             .report_error = reportError,
+            .policy_response = Handler.defaultPolicyResponse,
         } };
     }
 

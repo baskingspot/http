@@ -13,11 +13,15 @@ const assert = std.debug.assert;
 
 const fd_t = std.posix.fd_t;
 const Header = @import("../../header.zig").Header;
+const Status = @import("../../status.zig").Status;
 const h1 = @import("../root.zig");
 pub const Exchange = @import("common.zig").Exchange;
 pub const Handler = @import("common.zig").Handler;
+pub const PolicyContext = @import("common.zig").PolicyContext;
+pub const PolicyResponse = @import("common.zig").PolicyResponse;
 const wait = @import("../../transport/wait.zig");
 const common = @import("../../engine/common.zig");
+const api = @import("common.zig");
 
 // ast-grep-ignore: public-struct-field-default -- options bag; the defaults are the buffer policy
 pub const Config = struct {
@@ -243,7 +247,10 @@ pub fn Server(comptime Waiter: type) type {
                 if (now.durationTo(at).nanoseconds > 0) continue;
                 switch (slot.conn.tick(now)) {
                     .none => {},
-                    .reject => slot.state = .write,
+                    .reject => |status| {
+                        self.reviewPolicy(slot, status);
+                        slot.state = .write;
+                    },
                     .close => self.closeSlot(slot),
                 }
             }
@@ -289,7 +296,10 @@ pub fn Server(comptime Waiter: type) type {
         }
 
         fn finishExchange(self: *Self, slot: *Slot) void {
-            if (!slot.exchange_active) return;
+            if (!slot.exchange_active) {
+                common.resetArena(&slot.arena, self.config.common.arena_retain_bytes);
+                return;
+            }
             slot.exchange_active = false;
             self.handler.vtable.complete(self.handler.ptr, &slot.exchange);
             common.resetArena(&slot.arena, self.config.common.arena_retain_bytes);
@@ -377,7 +387,8 @@ pub fn Server(comptime Waiter: type) type {
                     }
                     return true;
                 },
-                .reject => {
+                .reject => |status| {
+                    self.reviewPolicy(slot, status);
                     slot.state = .write;
                     return true;
                 },
@@ -400,8 +411,19 @@ pub fn Server(comptime Waiter: type) type {
                     self.closeSlot(slot);
                     return false;
                 };
+                self.reviewPolicy(slot, .internal_server_error);
             }
             return true;
+        }
+
+        fn reviewPolicy(self: *Self, slot: *Slot, status: Status) void {
+            api.review(
+                self.handler,
+                slot.exchange.id,
+                slot.arena.allocator(),
+                &slot.conn,
+                status,
+            ) catch self.closeSlot(slot);
         }
 
         fn writeSlot(self: *Self, slot: *Slot, now: Io.Timestamp) void {
@@ -463,7 +485,10 @@ pub fn Server(comptime Waiter: type) type {
                 .need_more => {
                     slot.state = if (slot.conn.sendSlices().head.len != 0) .write else .read;
                 },
-                .reject => slot.state = .write,
+                .reject => |status| {
+                    self.reviewPolicy(slot, status);
+                    slot.state = .write;
+                },
                 .closed => self.closeSlot(slot),
             }
         }

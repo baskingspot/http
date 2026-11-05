@@ -12,10 +12,14 @@ const mem = std.mem;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
 const Header = @import("../../header.zig").Header;
+const Status = @import("../../status.zig").Status;
 const h1 = @import("../root.zig");
 const common = @import("../../engine/common.zig");
+const api = @import("common.zig");
 pub const Exchange = @import("common.zig").Exchange;
 pub const Handler = @import("common.zig").Handler;
+pub const PolicyContext = @import("common.zig").PolicyContext;
+pub const PolicyResponse = @import("common.zig").PolicyResponse;
 
 /// Buffers and policy for one connection. The request buffer holds the head
 /// and body.
@@ -150,7 +154,8 @@ pub fn serveIo(
                     event = conn.received(n, now(io));
                 }
             },
-            .reject => {
+            .reject => |status| {
+                try reviewPolicy(handler, &arena, &conn, status);
                 _ = try writePending(io, &conn, writer);
                 return;
             },
@@ -181,6 +186,7 @@ fn handleRequest(
                 complete(handler, &exchange, arena, config.common.arena_retain_bytes);
                 return resp_err;
             };
+            try reviewPolicy(handler, arena, conn, .internal_server_error);
         }
     };
 
@@ -209,6 +215,15 @@ fn complete(
 ) void {
     handler.vtable.complete(handler.ptr, exchange);
     common.resetArena(arena, retain_bytes);
+}
+
+fn reviewPolicy(
+    handler: Handler,
+    arena: *ArenaAllocator,
+    conn: *h1.ServerConn,
+    status: Status,
+) !void {
+    try api.review(handler, 0, arena.allocator(), conn, status);
 }
 
 fn writePending(
@@ -283,6 +298,7 @@ const TestHandler = struct {
             .handle = handle,
             .complete = Handler.noopComplete,
             .report_error = Handler.noopReportError,
+            .policy_response = Handler.defaultPolicyResponse,
         } };
     }
 

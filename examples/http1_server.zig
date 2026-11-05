@@ -100,12 +100,15 @@ fn serveConnection(
     };
 }
 
+const Handler = http.h1.engine.Handler;
+
 const App = struct {
     fn handler(self: *App) engine.Handler {
         return .{ .ptr = self, .vtable = &.{
             .handle = handle,
             .complete = engine.Handler.noopComplete,
             .report_error = reportError,
+            .policy_response = Handler.defaultPolicyResponse,
         } };
     }
 

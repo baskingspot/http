@@ -26,12 +26,15 @@ const Engine = switch (builtin.os.tag) {
 const address_text = "127.0.0.1:8443";
 const response_body = "h2 over tls readiness hello\n";
 
+const Handler = http.h2.engine.Handler;
+
 const App = struct {
-    fn handler() http.h2.engine.Handler {
+    fn handler() Handler {
         return .{ .ptr = undefined, .vtable = &.{
             .handle = handle,
-            .complete = http.h2.engine.Handler.noopComplete,
+            .complete = Handler.noopComplete,
             .report_error = reportError,
+            .policy_response = Handler.defaultPolicyResponse,
         } };
     }
 

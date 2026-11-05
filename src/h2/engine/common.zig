@@ -52,6 +52,9 @@ pub const Exchange = struct {
         body: []const u8,
     ) RespondError!void {
         if (self.response != null) return error.AlreadyResponded;
+        // h1 owns Connection close on this option. h2 does not silently treat
+        // it as a stream or connection shutdown.
+        if (options.close) return error.InvalidResponse;
 
         _ = head.validateResponse(.{
             .status = options.status,

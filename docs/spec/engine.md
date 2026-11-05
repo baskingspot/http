@@ -48,10 +48,18 @@ pub const Handler = struct {
         handle: *const fn (ptr: *anyopaque, exchange: *Exchange) anyerror!void,
         complete: *const fn (ptr: *anyopaque, exchange: *Exchange) void,
         report_error: *const fn (ptr: *anyopaque, err: anyerror) void,
+        policy_response: *const fn (
+            ptr: *anyopaque,
+            context: PolicyContext,
+        ) anyerror!PolicyResponse,
     };
 
     pub fn noopComplete(_: *anyopaque, _: *Exchange) void {}
     pub fn noopReportError(_: *anyopaque, _: anyerror) void {}
+    pub fn defaultPolicyResponse(
+        _: *anyopaque,
+        context: PolicyContext,
+    ) anyerror!PolicyResponse;
 };
 ```
 
@@ -60,8 +68,14 @@ returns. `complete` runs once per exchange, after the final response bytes are
 written or after the connection closes first. The exchange arena is still
 readable there; the engine resets it after the callback. Do not respond from
 `complete`. `report_error` runs after `handle` returns an error; the engine has
-already queued the 500. A handler with no hooks passes `Handler.noopComplete`
-and `Handler.noopReportError`.
+already queued the 500. `policy_response` can replace a rejection's status,
+content type, extra fields, and body before writing. Its context has the slot
+id, chosen status, and arena. The body borrows that arena or other memory until
+the response completes. It covers parser errors such as 501 and a handler's
+500. `defaultPolicyResponse` preserves the status and empty body.
+
+A handler with no hooks names `Handler.noopComplete`, `Handler.noopReportError`,
+and `Handler.defaultPolicyResponse` in its vtable.
 
 A stateless handler passes `ptr = undefined`. A stateful handler sets `ptr` to
 its state and casts it back in each function. The vtable is usually built by a
@@ -97,7 +111,9 @@ The body passed to `respond` may also point at handler-owned memory that
 outlives the response. In both cases the bytes must stay valid until the
 response completes. The engine resets the arena with `arena_retain_bytes`
 (default 16 KiB) after the completion callback, before the slot serves another
-request or connection.
+request or connection. `ResponseOptions.close` makes h1 emit one
+`Connection: close` and close after the response; an app does not inspect
+`conn.keep_alive` to decide that itself. h2 rejects this field.
 
 If `handle` returns an error before it responds, the engine queues a 500. If it
 returns an error after it responds, the engine sends that response. The engine

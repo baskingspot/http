@@ -146,6 +146,7 @@ const TestApp = struct {
             .handle = handle,
             .complete = engine.Handler.noopComplete,
             .report_error = engine.Handler.noopReportError,
+            .policy_response = engine.Handler.defaultPolicyResponse,
         } };
     }
 

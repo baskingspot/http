@@ -9,4 +9,6 @@ const Wait = @import("../../transport/wait_kqueue.zig").Wait;
 pub const Config = readiness.Config;
 pub const Exchange = readiness.Exchange;
 pub const Handler = readiness.Handler;
+pub const PolicyContext = readiness.PolicyContext;
+pub const PolicyResponse = readiness.PolicyResponse;
 pub const Server = readiness.Server(Wait);

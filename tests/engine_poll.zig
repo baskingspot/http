@@ -24,7 +24,8 @@ const TestApp = struct {
         return .{ .ptr = self, .vtable = &.{
             .handle = handle,
             .complete = complete,
-            .report_error = engine.Handler.noopReportError,
+            .report_error = reportError,
+            .policy_response = policyResponse,
         } };
     }
 
@@ -59,6 +60,25 @@ const TestApp = struct {
         _ = exchange;
         const self: *TestApp = @ptrCast(@alignCast(ptr));
         self.complete_count += 1;
+    }
+
+    fn reportError(_: *anyopaque, err: anyerror) void {
+        _ = @errorName(err);
+    }
+
+    fn policyResponse(_: *anyopaque, context: engine.PolicyContext) anyerror!engine.PolicyResponse {
+        if (context.status != .not_implemented) {
+            return .{ .options = .{ .status = context.status }, .body = "" };
+        }
+        const body = try std.fmt.allocPrint(
+            context.arena,
+            "{{\"error\":{d}}}\n",
+            .{context.status.code()},
+        );
+        return .{
+            .options = .{ .status = .bad_request, .content_type = "application/json" },
+            .body = body,
+        };
     }
 };
 
@@ -533,4 +553,25 @@ test "poll accept backoff defaults to 50 ms" {
         .max_connections = 1,
     };
     try testing.expectEqual(50 * std.time.ns_per_ms, config.accept_backoff.nanoseconds);
+}
+
+test "poll lets the application shape a framing rejection" {
+    var h: Harness = undefined;
+    try h.init(.{}, 8);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+    try send(
+        stream,
+        h.io,
+        "POST / HTTP/1.1\r\nHost: x\r\n" ++
+            "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+    );
+
+    var response: [1024]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 400 Bad Request\r\n") != false);
+    try testing.expect(mem.find(u8, got, "Content-Type: application/json") != null);
+    try testing.expect(mem.endsWith(u8, got, "{\"error\":501}\n"));
 }

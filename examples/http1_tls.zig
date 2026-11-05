@@ -30,12 +30,15 @@ const cert_b64 =
     "jvjL7Ad2t9wZAiB7s3wziFsMpfnXGN05V/q29wgFLilNG8YQX6ssYxwWog==";
 const scalar_b64 = "139HGdxmRe2N5F69cAY4IgK8B4ybwx0hgPE0siIOaeY=";
 
+const Handler = http.h1.engine.Handler;
+
 const App = struct {
-    fn handler() http.h1.engine.Handler {
+    fn handler() Handler {
         return .{ .ptr = undefined, .vtable = &.{
             .handle = handle,
-            .complete = http.h1.engine.Handler.noopComplete,
+            .complete = Handler.noopComplete,
             .report_error = reportError,
+            .policy_response = Handler.defaultPolicyResponse,
         } };
     }
 

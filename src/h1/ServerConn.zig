@@ -24,8 +24,9 @@
 //! Call `eof` when the peer closes during a request and `tick` when the poll
 //! deadline expires; `tick` covers every phase.
 //!
-//! Policy responses are queued by the machine. The application never writes a
-//! 400, 408, 413, 417, 431, 501, or 505 path itself.
+//! Policy responses are queued by the machine. A handler can review the status
+//! and body through `Handler.VTable.policy_response` before they are written.
+//! The parser and engine still own the rejection and drain decision.
 //!
 //! Request bodies default to the request buffer. A `.request_head` event lets
 //! the application respond from the head alone or call `acceptBody` with its
@@ -49,6 +50,7 @@ const Method = @import("../method.zig").Method;
 const Status = @import("../status.zig").Status;
 const token_list = @import("../token_list.zig");
 const h1 = @import("root.zig");
+const PolicyResponse = @import("../engine/common.zig").PolicyResponse;
 
 const ServerConn = @This();
 
@@ -418,9 +420,9 @@ fn respondInner(
     if (options.status.class()) |class| {
         if (class == .informational and !switching) return error.InvalidStatus;
     }
-    if (self.unreadBody() and !switching) {
+    if ((options.close or self.unreadBody()) and !switching) {
         self.keep_alive = false;
-        self.drain_close = true;
+        self.drain_close = self.unreadBody();
     }
     self.switch_protocols = switching;
 
@@ -429,6 +431,20 @@ fn respondInner(
         else => return err,
     };
     self.phase = .response;
+}
+
+/// Replace a queued machine rejection with an application response. The
+/// response still owns unread input and closes after sending.
+pub fn reviewRejection(self: *ServerConn, replacement: PolicyResponse) RespondError!void {
+    if (self.phase != .response or self.response_kind != .final) {
+        return error.InvalidState;
+    }
+    if (replacement.options.status.class() == .informational) return error.InvalidStatus;
+    self.keep_alive = false;
+    self.queueResponse(replacement.options, replacement.body, .final) catch |err| switch (err) {
+        error.WriteFailed => return error.ResponseHeadTooLarge,
+        else => return err,
+    };
 }
 
 /// The next response bytes, in order. Zero-length head means the head is done.
@@ -1495,4 +1511,31 @@ test "external short-body scratch preserves a pipelined request" {
     try testing.expectEqual(.keep_alive, std.meta.activeTag(try t.drain()));
     const second = try expectRequest(t.advance());
     try testing.expectEqualStrings("/next", second.head.target);
+}
+
+test "a machine rejection accepts a shaped policy response" {
+    var t: TestConn = undefined;
+    t.init(.{});
+
+    try expectReject(try t.feed(
+        "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n",
+    ), .not_implemented);
+    try t.conn.reviewRejection(.{
+        .options = .{ .status = .bad_request, .content_type = "application/json" },
+        .body = "{\"error\":\"bad framing\"}",
+    });
+    try testing.expectEqual(.close_after_drain, std.meta.activeTag(try t.drain()));
+    try testing.expect(mem.startsWith(u8, t.out(), "HTTP/1.1 400 Bad Request\r\n"));
+    try testing.expect(mem.find(u8, t.out(), "Content-Type: application/json") != null);
+    try testing.expect(mem.endsWith(u8, t.out(), "{\"error\":\"bad framing\"}"));
+}
+
+test "ResponseOptions.close owns the connection close" {
+    var t: TestConn = undefined;
+    t.init(.{});
+
+    _ = try expectRequest(try t.feed("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
+    try t.conn.respond(.{ .status = .ok, .close = true }, "");
+    try testing.expectEqual(.close, std.meta.activeTag(try t.drain()));
+    try testing.expectEqual(1, mem.count(u8, t.out(), "Connection: close"));
 }

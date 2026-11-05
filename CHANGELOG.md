@@ -7,6 +7,15 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
+- `ResponseOptions.close` closes an h1 connection after the response and emits
+  one `Connection: close`; the handler no longer needs to inspect `keep_alive`.
+  h2's `Exchange.respond` rejects this field because it has no stream meaning.
+
+- `Handler.VTable.policy_response` lets an application choose the status,
+  fields, and body of h1 parser and handler policy responses. `PolicyContext`
+  carries the slot, status, and exchange arena. `defaultPolicyResponse` keeps
+  the status and an empty body.
+
 - `h2.engine.transport.tls.Transport.Options.handshake` now takes reusable `tls.ServerHandshake.ServerConfig`. Accept loops no longer provide placeholder keypairs or random values (baskingspot/tls#168).
 - `h1.ServerConn`: a request head can arrive before an incomplete body.
   `acceptBody` selects application-owned destination memory; `bufferBody`

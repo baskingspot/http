@@ -30,12 +30,15 @@ pub fn main(init: std.process.Init) !void {
     try server.run();
 }
 
+const Handler = http.h1.engine.Handler;
+
 const App = struct {
     fn handler(_: *App) engine.Handler {
         return .{ .ptr = undefined, .vtable = &.{
             .handle = handle,
             .complete = engine.Handler.noopComplete,
             .report_error = reportError,
+            .policy_response = Handler.defaultPolicyResponse,
         } };
     }
 

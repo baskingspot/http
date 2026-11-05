@@ -21,6 +21,7 @@ const TestApp = struct {
             .handle = handle,
             .complete = Handler.noopComplete,
             .report_error = reportError,
+            .policy_response = Handler.defaultPolicyResponse,
         } };
     }
 

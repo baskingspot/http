@@ -15,8 +15,28 @@ const Status = @import("../status.zig").Status;
 pub const ResponseOptions = struct {
     status: Status = .ok,
     content_type: ?[]const u8 = null,
+    /// For h1, close after this response and emit `Connection: close`.
+    /// h2 `Exchange.respond` rejects this field; it has no stream-level
+    /// Connection-close meaning.
+    close: bool = false,
     /// Extra regular fields. The engine adds framing and protocol fields.
     headers: []const Header = &.{},
+};
+
+/// The context for a machine rejection. The head may not exist yet.
+pub const PolicyContext = struct {
+    /// The engine slot that rejected input.
+    id: usize,
+    /// The status chosen by the parser or connection machine.
+    status: Status,
+    /// Storage for a replacement body. It lives until the response completes.
+    arena: Allocator,
+};
+
+/// A replacement for the default status-and-empty-body rejection.
+pub const PolicyResponse = struct {
+    options: ResponseOptions,
+    body: []const u8,
 };
 
 /// One type-erased handler over an engine's exchange type.
@@ -36,10 +56,24 @@ pub fn Handler(comptime Exchange: type) type {
             /// `handle` or the engine failed. The engine has already arranged
             /// its policy response or reset.
             report_error: *const fn (ptr: *anyopaque, err: anyerror) void,
+            /// Review a parser or handler rejection. The body is allocated
+            /// from `context.arena` or borrowed until the response completes.
+            policy_response: *const fn (
+                ptr: *anyopaque,
+                context: PolicyContext,
+            ) anyerror!PolicyResponse,
         };
 
         pub fn noopComplete(_: *anyopaque, _: *Exchange) void {}
         pub fn noopReportError(_: *anyopaque, _: anyerror) void {}
+
+        /// Keep the machine's status and an empty body.
+        pub fn defaultPolicyResponse(
+            _: *anyopaque,
+            context: PolicyContext,
+        ) anyerror!PolicyResponse {
+            return .{ .options = .{ .status = context.status }, .body = "" };
+        }
     };
 }
 
