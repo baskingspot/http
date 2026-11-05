@@ -114,7 +114,10 @@ pub const Client = struct {
                         event = try self.conn.next();
                         continue;
                     }
-                    const head = try self.snapshot(response.head);
+                    const head = self.snapshot(response.head) catch |err| {
+                        self.dirty = true;
+                        return err;
+                    };
                     self.active = true;
                     return .{
                         .head = head,
