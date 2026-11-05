@@ -126,6 +126,12 @@ pub const Client = struct {
         return self.goaway;
     }
 
+    /// The last request's stream id. Preserved after `Body.close` so a caller
+    /// can compare it with `goAway().last_stream_id`.
+    pub fn streamId(self: *const Client) u31 {
+        return self.stream_id;
+    }
+
     /// Send one request and wait for its response head. The request body is
     /// not supported in this slice; pass an empty `body`.
     pub fn request(self: *Client, value: Request) !Response {
@@ -386,7 +392,6 @@ pub const Client = struct {
         self.pending_flow = 0;
         self.flushFrames() catch |err| ignoreError(err);
 
-        self.stream_id = 0;
         self.active = false;
         self.remote_end = false;
         self.body_eof = false;
@@ -776,7 +781,10 @@ test "closing an incomplete response resets the stream and is idempotent" {
         .data => |bytes| try testing.expect(bytes.len > 0),
         else => return error.UnexpectedBodyResult,
     }
+    const stream_id = client.streamId();
+    try testing.expect(stream_id != 0);
     response.body.close();
+    try testing.expectEqual(stream_id, client.streamId());
     try testing.expect(client.reset_sent);
     response.body.close();
     try testing.expectEqual(.eof, response.body.read());
