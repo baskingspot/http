@@ -1442,9 +1442,10 @@ const InformationalServer = struct {
         while (try nextServerEvent(&session, &reader.interface)) |event| {
             switch (event) {
                 .data => |data| {
+                    // Deliberately do not release the receive window. The
+                    // 100 KiB body cannot finish, so the assertion below
+                    // proves request() returned while flow control was held.
                     _ = self.received.fetchAdd(data.bytes.len, .monotonic);
-                    try session.release(testing.allocator, id, data.flow_len);
-                    try flushServer(&session, &writer.interface);
                 },
                 .reset, .connection_error, .goaway => return,
                 else => {},
