@@ -51,8 +51,8 @@
             .hash = "stdx-0.3.0-CcWego4nDwC5PxPd4F-nlcOWXxAVCZ6MDI5f3YNVNSO7",
         },
         .tls = .{
-            .url = "https://baskingspot.dev/tls/v0.2.0.tar.gz",
-            .hash = "tls-0.2.0-nf2MKPHUJQBNc9cOmoKh5H8UQ5rgJCfl60wigXALZsaj",
+            .url = "https://baskingspot.dev/tls/v0.2.1.tar.gz",
+            .hash = "tls-0.2.1-nf2MKPHUJQDtLnWHBdB3z08_tzu0kvn5kLzZRtdDhjI-",
         },
     },
     .paths = .{
