@@ -495,6 +495,39 @@ pub fn build(b: *std.Build) void {
         h1_tls_client_run.dependOn(&run_h1_tls_client.step);
     }
 
+    // One TLS port serving h1 and h2 by ALPN.
+    const unified_example_bin = b.step(
+        "example-unified-bin",
+        "Build the HTTP/1.1 and HTTP/2 TLS example server",
+    );
+    const unified_example_run = b.step(
+        "example-unified",
+        "Run the HTTP/1.1 and HTTP/2 TLS example server",
+    );
+    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+        const unified_mod = b.createModule(.{
+            .root_source_file = b.path("examples/http_unified_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "tls", .module = tls_dep.module("tls") },
+                .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
+            },
+        });
+        unified_mod.link_libc = true;
+        unified_mod.linkSystemLibrary("crypto", .{});
+        const unified = b.addExecutable(.{
+            .name = "http-unified-server",
+            .root_module = unified_mod,
+        });
+        unified_example_bin.dependOn(&unified.step);
+
+        const run_unified = b.addRunArtifact(unified);
+        if (b.args) |args| run_unified.addArgs(args);
+        unified_example_run.dependOn(&run_unified.step);
+    }
+
     // The tiny curl example. HTTPS uses the same tls_std wrapper as the h1 TLS
     // examples; the HTTP layer still sees only reader and writer interfaces.
     const curl_example_bin = b.step("example-curl-bin", "Build the HTTP/1.1 curl example");

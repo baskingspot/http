@@ -213,6 +213,7 @@ check-example:
     zig build example-h2-tls-readiness-bin
     zig build example-h1-tls-bin
     zig build example-h1-tls-client-bin
+    zig build example-unified-bin
     zig build example-curl-bin
     zig build interop-client-bin
 
@@ -234,10 +235,15 @@ interop:
     done
     zig build interop-client
 
-[doc("Run the tiny HTTP/1.1 curl example: just curl http://127.0.0.1:8080/")]
+[doc("Run the tiny curl example: just curl [--http2] <url>")]
 [group("example")]
 curl *ARGS:
     zig build example-curl -- {{ ARGS }}
+
+[doc("Run one TLS port serving HTTP/1.1 and HTTP/2 by ALPN on 127.0.0.1:8445")]
+[group("example")]
+example-unified:
+    zig build example-unified
 
 [doc("Run the HTTP/1.1 TLS example server on 127.0.0.1:8444")]
 [group("example")]

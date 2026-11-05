@@ -99,13 +99,27 @@ The server and client use the blocking `tls_std` integration from
 The example certificate and scalar are the public test fixture from
 `baskingspot/tls`.
 
+## One port, both protocols
+
+```sh
+just example-unified       # TLS server on 127.0.0.1:8445
+just curl https://127.0.0.1:8445/
+curl -k --http1.1 https://127.0.0.1:8445/
+```
+
+The server offers `h2` and `http/1.1` through ALPN and dispatches the blocking
+engine after the handshake. The client selects its adapter from the ALPN
+result.
+
 ## Tiny curl
 
 ```sh
 just curl http://127.0.0.1:8080/
-just curl https://127.0.0.1:8444/
+just curl --http2 http://127.0.0.1:8081/
+just curl https://127.0.0.1:8445/
 ```
 
-One HTTP/1.1 GET, headers to stderr, body to stdout. Hosts are IP literals;
-HTTPS uses `tls_std` with no chain verification because this is a local
-experiment, not a curl replacement.
+One GET, headers to stdout before the body, body streamed to stdout. Hosts are
+IP literals. `--http2` is h2c prior knowledge; HTTPS offers `h2` and
+`http/1.1` through ALPN. HTTPS uses `tls_std` with no chain verification
+because this is a local experiment, not a curl replacement.
