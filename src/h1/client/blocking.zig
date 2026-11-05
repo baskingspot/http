@@ -136,6 +136,9 @@ const Fixture = struct {
     listener: Io.net.Server,
     address: Io.net.IpAddress,
     response: []const u8,
+    /// Write the head and the body as two writes with a gap, so the client
+    /// reads them separately. Real servers do this.
+    split: bool = false,
     result: ?anyerror = null,
     thread: std.Thread,
 
@@ -177,13 +180,31 @@ const Fixture = struct {
 
         var buffer: [256]u8 = undefined;
         var writer = stream.writer(self.io, &buffer);
-        writer.interface.writeAll(self.response) catch |err| {
+        const head_len = if (self.split)
+            (mem.find(u8, self.response, "\r\n\r\n") orelse 0) + 4
+        else
+            self.response.len;
+        writer.interface.writeAll(self.response[0..head_len]) catch |err| {
             self.result = err;
             return;
         };
         writer.interface.flush() catch |err| {
             self.result = err;
+            return;
         };
+        if (self.split) {
+            self.io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake) catch |err| {
+                self.result = err;
+                return;
+            };
+            writer.interface.writeAll(self.response[head_len..]) catch |err| {
+                self.result = err;
+                return;
+            };
+            writer.interface.flush() catch |err| {
+                self.result = err;
+            };
+        }
     }
 };
 
@@ -254,4 +275,21 @@ test "blocking client reads a close-delimited body" {
     const response = try fetch(fixture.io, stream, sampleRequest(), buffers.config());
     try testing.expectEqual(.ok, response.head.status);
     try testing.expectEqualStrings("hello", response.body);
+}
+
+test "blocking client keeps the head when the body arrives later" {
+    var fixture: Fixture = undefined;
+    try fixture.init("HTTP/1.1 200 OK\r\nServer: h1\r\nContent-Length: 20\r\n\r\n" ++
+        "0123456789abcdefghij");
+    defer fixture.deinit();
+    fixture.split = true;
+
+    var buffers: TestBuffers = .{};
+    const stream = try fixture.address.connect(fixture.io, .{ .mode = .stream });
+    defer stream.close(fixture.io);
+    const response = try fetch(fixture.io, stream, sampleRequest(), buffers.config());
+    try testing.expectEqualStrings("0123456789abcdefghij", response.body);
+    // The head borrows the receive buffer; the body read must not land on it.
+    try testing.expectEqualStrings("OK", response.head.reason);
+    try testing.expectEqualStrings("h1", response.head.headers.items[0].value);
 }

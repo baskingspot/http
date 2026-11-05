@@ -240,3 +240,9 @@ All notable changes to http are recorded here. The format follows
   `h1.Version` no longer alias `std.http`.
 - The package depends on `baskingspot/stdx` for `stdx.fmt.atoi`;
   `content_length` parses its digits with it.
+
+### Fixed
+
+- `h1.ClientConn`: a response head stays readable after its body arrives in a
+  later read. Refills no longer overwrite the head bytes that `Event.response`
+  handed out.

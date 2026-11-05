@@ -65,6 +65,9 @@ body_bytes: u64,
 phase: Phase,
 used: usize,
 cursor: usize,
+/// End of the current response head. The head borrows `recv_buffer[0..head_end]`,
+/// so a refill must not write below it.
+head_end: usize,
 search: h1.SearchState,
 method: ?Method,
 version: h1.Version,
@@ -84,6 +87,7 @@ pub fn init(config: Config) ClientConn {
         .phase = .head,
         .used = 0,
         .cursor = 0,
+        .head_end = 0,
         .search = .init,
         .method = null,
         .version = .@"HTTP/1.1",
@@ -101,7 +105,9 @@ pub fn init(config: Config) ClientConn {
 /// buffer.
 pub fn start(self: *ClientConn, method: Method) void {
     assert(self.phase == .head or self.phase == .done);
-    if (self.phase == .done) self.compact();
+    // The finished head is dead; the next one is parsed from offset 0.
+    self.head_end = 0;
+    if (self.phase == .done) self.compactTo(0);
     self.phase = .head;
     self.cursor = 0;
     self.search = .init;
@@ -120,7 +126,7 @@ pub fn recvBuffer(self: *ClientConn) []u8 {
         .head, .body => {},
         .done, .closed => return self.recv_buffer[0..0],
     }
-    if (self.cursor != 0 and self.cursor == self.used) self.compact();
+    if (self.cursor != 0 and self.cursor == self.used) self.compactTo(self.head_end);
     return self.recv_buffer[self.used..];
 }
 
@@ -188,6 +194,7 @@ fn parseHead(self: *ClientConn) Error!Event {
     self.version = parsed.head.version;
     self.head = parsed.head;
     self.cursor = parsed.consumed;
+    self.head_end = parsed.consumed;
     self.framing = try h1.framing.response(
         self.head.version,
         self.head.status,
@@ -258,10 +265,10 @@ fn chunkedBody(self: *ClientConn) Error!Event {
             self.recv_buffer[body_start..self.used],
         ) catch |err| switch (err) {
             error.Incomplete => {
-                if (body_start == 0 and self.used == self.recv_buffer.len) {
+                if (body_start == self.head_end and self.used == self.recv_buffer.len) {
                     return error.BodyTooLarge;
                 }
-                self.compact();
+                self.compactTo(self.head_end);
                 return .need_more;
             },
             else => return err,
@@ -277,7 +284,7 @@ fn chunkedBody(self: *ClientConn) Error!Event {
             .need_more => {
                 if (self.cursor == body_start) {
                     if (self.used == self.recv_buffer.len) {
-                        self.compact();
+                        self.compactTo(self.head_end);
                         if (self.used == self.recv_buffer.len) return error.BodyTooLarge;
                     }
                     return .need_more;
@@ -285,7 +292,7 @@ fn chunkedBody(self: *ClientConn) Error!Event {
                 // The decoder consumed a size line or a chunk terminator.
                 // Loop so a complete chunk in this buffer becomes a body
                 // event without another call from the caller.
-                if (self.cursor == self.used) self.compact();
+                if (self.cursor == self.used) self.compactTo(self.head_end);
             },
         }
     }
@@ -298,18 +305,25 @@ fn deliver(self: *ClientConn, n: usize) Error!void {
 
 fn finish(self: *ClientConn) Event {
     self.phase = .done;
-    self.compact();
+    // Nothing of this head is live any more: move leftover bytes to offset 0
+    // for the next response.
+    self.head_end = 0;
+    self.compactTo(0);
     return .done;
 }
 
-fn compact(self: *ClientConn) void {
-    if (self.cursor == 0) return;
+/// Move unconsumed bytes down to `floor` and account for the reads already
+/// made. While a head is live the floor is `head_end`, which keeps its text
+/// intact for the caller; `0` repositions leftover bytes for the next head.
+fn compactTo(self: *ClientConn, floor: usize) void {
+    assert(floor <= self.cursor);
+    if (self.cursor == floor) return;
     const remaining = self.used - self.cursor;
     if (remaining != 0) {
-        @memmove(self.recv_buffer[0..remaining], self.recv_buffer[self.cursor..self.used]);
+        @memmove(self.recv_buffer[floor..][0..remaining], self.recv_buffer[self.cursor..self.used]);
     }
-    self.used = remaining;
-    self.cursor = 0;
+    self.used = floor + remaining;
+    self.cursor = floor;
 }
 
 test "content-length response" {
@@ -499,4 +513,119 @@ test "body over the limit" {
     const bytes = "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc";
     @memcpy(buffer[0..bytes.len], bytes);
     try testing.expectError(error.BodyTooLarge, conn.received(bytes.len));
+}
+
+test "a body read keeps the head it borrowed" {
+    var buffer: [1024]u8 = undefined;
+    var headers: [8]Header = undefined;
+    var conn: ClientConn = .init(.{ .recv_buffer = &buffer, .headers = &headers });
+    conn.start(.GET);
+
+    const head = "HTTP/1.1 200 OK\r\nServer: h1\r\nContent-Length: 20\r\n\r\n";
+    @memcpy(buffer[0..head.len], head);
+    const response = switch (try conn.received(head.len)) {
+        .response => |response| response,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(Event.need_more, try conn.next());
+
+    // The head is consumed, so the next read gets the front of the buffer
+    // after the head, never over it: the caller still holds `response.head`.
+    const body = "0123456789abcdefghij";
+    const dst = conn.recvBuffer();
+    @memcpy(dst[0..body.len], body);
+    switch (try conn.received(body.len)) {
+        .body => |slice| try testing.expectEqualStrings(body, slice),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqualStrings("OK", response.head.reason);
+    try testing.expectEqualStrings("h1", response.head.headers.items[0].value);
+    try testing.expectEqual(Event.done, try conn.next());
+}
+
+test "chunked body reads keep the head" {
+    var buffer: [1024]u8 = undefined;
+    var headers: [8]Header = undefined;
+    var conn: ClientConn = .init(.{ .recv_buffer = &buffer, .headers = &headers });
+    conn.start(.GET);
+
+    const head = "HTTP/1.1 200 OK\r\nServer: h1\r\nTransfer-Encoding: chunked\r\n\r\n";
+    @memcpy(buffer[0..head.len], head);
+    const response = switch (try conn.received(head.len)) {
+        .response => |response| response,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(Event.need_more, try conn.next());
+
+    const rest = "14\r\n0123456789abcdefghij\r\n0\r\n\r\n";
+    const dst = conn.recvBuffer();
+    @memcpy(dst[0..rest.len], rest);
+    switch (try conn.received(rest.len)) {
+        .body => |slice| try testing.expectEqualStrings("0123456789abcdefghij", slice),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqualStrings("OK", response.head.reason);
+    try testing.expectEqualStrings("h1", response.head.headers.items[0].value);
+    try testing.expectEqual(Event.done, try conn.next());
+}
+
+test "close-delimited body reads keep the head" {
+    var buffer: [1024]u8 = undefined;
+    var headers: [8]Header = undefined;
+    var conn: ClientConn = .init(.{ .recv_buffer = &buffer, .headers = &headers });
+    conn.start(.GET);
+
+    const head = "HTTP/1.1 200 OK\r\nServer: h1\r\n\r\n";
+    @memcpy(buffer[0..head.len], head);
+    const response = switch (try conn.received(head.len)) {
+        .response => |response| response,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(Event.need_more, try conn.next());
+
+    const body = "0123456789abcdefghij";
+    const dst = conn.recvBuffer();
+    @memcpy(dst[0..body.len], body);
+    switch (try conn.received(body.len)) {
+        .body => |slice| try testing.expectEqualStrings(body, slice),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(Event.done, try conn.eof());
+    try testing.expectEqualStrings("OK", response.head.reason);
+    try testing.expectEqualStrings("h1", response.head.headers.items[0].value);
+}
+
+test "a final head after an interim response survives its body read" {
+    var buffer: [1024]u8 = undefined;
+    var headers: [8]Header = undefined;
+    var conn: ClientConn = .init(.{ .recv_buffer = &buffer, .headers = &headers });
+    conn.start(.GET);
+
+    const interim = "HTTP/1.1 100 Continue\r\n\r\n";
+    @memcpy(buffer[0..interim.len], interim);
+    switch (try conn.received(interim.len)) {
+        .response => |response| try testing.expectEqual(.@"continue", response.head.status),
+        else => return error.TestUnexpectedResult,
+    }
+    conn.start(.GET);
+
+    const head = "HTTP/1.1 200 OK\r\nServer: h1\r\nContent-Length: 20\r\n\r\n";
+    const dst = conn.recvBuffer();
+    @memcpy(dst[0..head.len], head);
+    const response = switch (try conn.received(head.len)) {
+        .response => |response| response,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(Event.need_more, try conn.next());
+
+    const body = "0123456789abcdefghij";
+    const body_dst = conn.recvBuffer();
+    @memcpy(body_dst[0..body.len], body);
+    switch (try conn.received(body.len)) {
+        .body => |slice| try testing.expectEqualStrings(body, slice),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqualStrings("OK", response.head.reason);
+    try testing.expectEqualStrings("h1", response.head.headers.items[0].value);
+    try testing.expectEqual(Event.done, try conn.next());
 }
