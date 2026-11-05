@@ -9,23 +9,23 @@
 const std = @import("std");
 const Io = std.Io;
 const mem = std.mem;
+const Allocator = mem.Allocator;
 const print = std.debug.print;
 
 const http = @import("http");
-const tls_std = @import("tls_std");
 const client = http.h1.client.blocking;
-
-const max_authority = 300;
+const tls = @import("tls_std");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const arena = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(arena);
     if (args.len != 2) {
         print("usage: curl <http://ip[:port]/path | https://ip[:port]/path>\n", .{});
         return error.InvalidArguments;
     }
 
-    const url = try parseUrl(args[1]);
+    const url = try parseUrl(arena, args[1]);
     var buffers: Buffers = .{};
     const request: client.Request = .{
         .method = .GET,
@@ -33,16 +33,18 @@ pub fn main(init: std.process.Init) !void {
         .headers = &.{.{ .name = "Host", .value = url.authority }},
     };
 
-    if (url.tls) {
+    if (url.https) {
         const stream = try url.address.connect(io, .{ .mode = .stream });
-        var conn: tls_std.Client = undefined;
+        var conn: tls.Client = undefined;
         try conn.connect(io, stream, .{
             .host = null,
             .verify = .insecure,
             .alpn = &.{"http/1.1"},
         });
-        defer conn.deinit();
-        defer conn.close();
+        defer {
+            conn.deinit();
+            conn.close();
+        }
         const response = try client.fetchIo(
             conn.reader(),
             conn.writer(),
@@ -59,51 +61,43 @@ pub fn main(init: std.process.Init) !void {
 }
 
 const Url = struct {
-    tls: bool,
+    https: bool,
     authority: []const u8,
     address: Io.net.IpAddress,
     target: []const u8,
 };
 
-fn parseUrl(text: []const u8) !Url {
-    var rest: []const u8 = undefined;
-    var tls = false;
-    if (mem.startsWith(u8, text, "https://")) {
-        tls = true;
-        rest = text["https://".len..];
-    } else if (mem.startsWith(u8, text, "http://")) {
-        rest = text["http://".len..];
-    } else {
+/// Parses `http://ip[:port][/path][?query]`. The request target is allocated
+/// from `arena`.
+fn parseUrl(arena: Allocator, text: []const u8) !Url {
+    const uri: std.Uri = try .parse(text);
+    if (uri.user != null or uri.password != null) return error.InvalidUrl;
+    const https = if (mem.eql(u8, uri.scheme, "https"))
+        true
+    else if (mem.eql(u8, uri.scheme, "http"))
+        false
+    else
         return error.InvalidUrl;
-    }
 
-    const slash = mem.findScalar(u8, rest, '/') orelse rest.len;
-    const authority = rest[0..slash];
-    if (authority.len == 0) return error.InvalidUrl;
-    const target = if (slash == rest.len) "/" else rest[slash..];
+    // `Uri.parse` fills `host` only after consuming "//", so the authority
+    // starts three bytes past the scheme and ends at the path, query, or
+    // fragment. `Host` carries it as written.
+    const after_scheme = text[uri.scheme.len + 3 ..];
+    const authority_end = mem.findAny(u8, after_scheme, "/?#") orelse after_scheme.len;
+    const authority = after_scheme[0..authority_end];
 
-    var authority_buf: [max_authority]u8 = undefined;
-    if (authority.len > authority_buf.len) return error.InvalidUrl;
-    @memcpy(authority_buf[0..authority.len], authority);
-    var address_text = authority_buf[0..authority.len];
-
-    const has_port = if (authority[0] == '[') blk: {
-        const close = mem.findScalar(u8, authority, ']') orelse return error.InvalidUrl;
-        break :blk close + 1 < authority.len and authority[close + 1] == ':';
-    } else mem.findScalarLast(u8, authority, ':') != null;
-
-    if (!has_port) {
-        const port = if (tls) ":443" else ":80";
-        if (address_text.len + port.len > authority_buf.len) return error.InvalidUrl;
-        @memcpy(authority_buf[address_text.len..][0..port.len], port);
-        address_text = authority_buf[0 .. address_text.len + port.len];
-    }
+    var host_buffer: [Io.net.HostName.max_len]u8 = undefined;
+    const host = (try uri.getHost(&host_buffer)).bytes;
+    const literal = if (host.len > 1 and host[0] == '[') host[1 .. host.len - 1] else host;
 
     return .{
-        .tls = tls,
+        .https = https,
         .authority = authority,
-        .address = try .parseLiteral(address_text),
-        .target = target,
+        .address = try .parse(literal, uri.port orelse if (https) 443 else 80),
+        // Origin-form request target: the path, then the query when present.
+        .target = try std.fmt.allocPrint(arena, "{f}", .{
+            std.Uri.fmt(&uri, .{ .path = true, .query = true }),
+        }),
     };
 }
 
@@ -126,19 +120,22 @@ const Buffers = struct {
 };
 
 fn printResponse(io: Io, response: client.Response) !void {
+    var buf: [4096]u8 = undefined;
+    var stdout_writer: Io.File.Writer = .init(.stdout(), io, &buf);
+    var writer = &stdout_writer.interface;
+
     const head = response.head;
-    print("{s} {d} {s}\n", .{
+    try writer.print("{s} {d} {s}\n", .{
         @tagName(head.version),
         head.status.code(),
         head.reason,
     });
     for (head.headers.items) |header| {
-        print("{s}: {s}\n", .{ header.name, header.value });
+        try writer.print("{s}: {s}\n", .{ header.name, header.value });
     }
-    print("\n", .{});
+    try writer.writeByte('\n');
+    try writer.flush();
 
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
-    try stdout_writer.interface.writeAll(response.body);
-    try stdout_writer.interface.flush();
+    try writer.writeAll(response.body);
+    try writer.flush();
 }
