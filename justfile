@@ -1,4 +1,4 @@
-# http: Pure HTTP field-value parsers: content negotiation, ranges, entity tags, dates, and media types. `just --list` shows the recipes.
+# http: HTTP/1.1 and HTTP/2 in Zig: field-value parsers, sans-I/O connection machines, and the engines you build a server or client on. `just --list` shows the recipes.
 # AGENTS.md holds the working conventions.
 
 [private]
@@ -140,7 +140,7 @@ lint:
     baskingspot-lint src
     zig fmt --check src tests bench examples build.zig build.zig.zon
     nix fmt -- --ci
-    oxfmt --check README.md AGENTS.md .github
+    oxfmt --check README.md AGENTS.md docs/content docs/config.toml .github
     actionlint
     zizmor .
     test -z "$(gofmt -l tools)"
@@ -151,8 +151,29 @@ lint:
 fmt:
     zig fmt src tests bench examples build.zig build.zig.zon
     nix fmt
-    oxfmt README.md AGENTS.md .github
+    oxfmt README.md AGENTS.md docs/content docs/config.toml .github
     just --fmt
+
+[doc("Build the site into zig-out/site/http/: the guide (Zola, from docs/) and the API reference (docgen JSON, rendered by the theme's api.html) under api/. The router in baskingspot/site serves /http/... from it")]
+[group("docs")]
+doc: api
+    baskingspot-docs build http
+
+[doc("Edit the guide with live reload (http://127.0.0.1:1111), API reference included")]
+[group("docs")]
+guide: api
+    baskingspot-docs serve http
+
+# The API reference data. docgen comes from the baskingspot flake's docs shell,
+# so this is not a Zig build dependency.
+[private]
+api:
+    docgen --root src/root.zig --title http --repo-url https://github.com/baskingspot/http --rev main --format json --out docs/data
+
+[doc("Deploy the rendered docs to Cloudflare as an assets-only Worker (config in wrangler.jsonc). Needs CLOUDFLARE_API_TOKEN in the environment, plus CLOUDFLARE_ACCOUNT_ID if the token can see more than one account")]
+[group("docs")]
+doc-deploy: doc
+    wrangler deploy
 
 [doc("Run the HTTP/1.1 example server on 127.0.0.1:8080")]
 [group("example")]
@@ -286,4 +307,4 @@ conformance-ci:
 
 [doc("Everything CI runs")]
 [group("ci")]
-ci: test lint interop interop-tls check-example conformance-ci
+ci: test lint interop interop-tls check-example conformance-ci doc
