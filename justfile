@@ -240,7 +240,7 @@ interop:
 curl *ARGS:
     zig build example-curl -- {{ ARGS }}
 
-[doc("Run one TLS port serving HTTP/1.1 and HTTP/2 by ALPN on 127.0.0.1:8445")]
+[doc("Run TLS 8445 and cleartext 8082, both serving HTTP/1.1 and HTTP/2")]
 [group("example")]
 example-unified:
     zig build example-unified
