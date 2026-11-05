@@ -5,312 +5,106 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
-### Changed
-
-- `http.client.Body.read` returns the tagged `BodyRead` instead of a copied
-  byte count. A `data` slice is borrowed for the life of the connection
-  operation, never empty, and pins the h2 connection flow-control window until
-  the next read or close. `reset` carries the RST_STREAM code, including
-  REFUSED_STREAM; `truncated` covers an incomplete body; `protocol` covers a
-  peer violation. Local failures are `local: {canceled, capacity,
-  out_of_memory, unusable}`: canceled keeps the connection, capacity keeps
-  it after a stream reset, and out_of_memory/unusable close it. `protocol`
-  means the connection is unusable. GOAWAY stays on the connection
-  (`h2.client.blocking.Client.goAway`); compare `streamId()` for the retry
-  boundary. Blocking `Body` never returns `would_block`; evented clients use
-  `BodyStep`.
-
-- An idle h1 connection with no request bytes closes silently when its idle
-  deadline expires. A 408 is queued only after a request head or body has
-  started. A keep-alive connection with only CRLF bytes is idle.
-
-- An h1 readiness listener reports `error.AddressInUse` when a bind conflicts,
-  instead of collapsing every bind failure into `error.BindFailed`. The
-  readiness `drain_bytes` buffer is not allocated when it is zero or when
-  `Limits.drain_timeout` is zero. When every slot is busy, new connections
-  remain in the accept backlog until a slot frees.
-
-- `h1.client.streaming` sends a non-empty `Request.body` with
-  `Content-Length` when the caller did not supply a framing field.
-  `h2.client.blocking` sends a static body as DATA frames.
-
-- `h1.ClientConn.start` accepts an optional `Method`. An unknown method token
-  parses the response with body-capable framing instead of forcing the caller
-  to map the token to a known method.
-
-- `h1.ServerConn.received` and `h1.ClientConn.received` now require `n > 0`.
-  Call `eof()` for a clean close; an empty transport completion cannot become
-  an accidental policy 400.
-
-- `h1.ServerConn` stores clocks and copied duration limits as i64 nanoseconds,
-  removing the i96/16-byte alignment from its public struct layout. Public
-  calls continue to use `Io.Timestamp` and `Io.Duration`.
-
-- `write_chunk_bytes` on `ServerConn.Config`, `h1.engine.blocking.Config`,
-  and h1 readiness Config coalesces a head and a fitting body prefix into one
-  slice, then caps each send at that size. Zero preserves separate head/body
-  slices; interim 100 responses remain separate.
-
-- `ResponseOptions.close` closes an h1 connection after the response and emits
-  one `Connection: close`; the handler no longer needs to inspect `keep_alive`.
-  h2's `Exchange.respond` rejects this field because it has no stream meaning.
-
-- `Handler.VTable.policy_response` lets an application choose the status,
-  fields, and body of h1 parser and handler policy responses. `PolicyContext`
-  carries the slot, status, `RejectReason`, and exchange arena.
-  `defaultPolicyResponse` keeps the status and an empty body. `.reject` carries
-  a `Rejection` with both status and reason, so error messages do not reparse
-  the request head.
-
-- `h1.ServerConn`: leading CRLF bytes before a request line keep the idle
-  deadline and still permit a close with `.closed`. The head and total
-  deadlines start only when the request line arrives.
-
-- `h2.engine.transport.tls.Transport.Options.handshake` now takes reusable `tls.ServerHandshake.ServerConfig`. Accept loops no longer provide placeholder keypairs or random values (baskingspot/tls#168).
-- `h1.ServerConn`: a request head can arrive before an incomplete body.
-  `acceptBody` selects application-owned destination memory; `bufferBody`
-  preserves the old default. `switchProtocols` and `.switched` provide the 101
-  stream handoff with leftover bytes. The caller owns `Connection` for that
-  switch. `min_read_bytes` prevents undersized transport reads; a short external
-  body tail uses request-buffer scratch and preserves any pipelined bytes after
-  the body. The lifetime docs pin when header storage may be shared.
-
-- Align the h1/h2 engine foundations: `http.engine.Handler(Exchange)` is the
-  shared vtable shape, `http.engine.ResponseOptions` is the common response
-  type, and `Config.common` holds the body/arena knobs. Protocol-specific
-  exchanges and machine configs remain separate.
+## [0.1.0] - 2026-11-05
 
 ### Added
 
-- `http.client`: the shared client contract. `Request`, `ResponseHead`,
-  `Body`, `Response`, and `Config` are protocol-neutral; `Config` carries the
-  allocator, a 16 KiB response-header snapshot limit, and a 128-field limit.
-  `h1.client.streaming.Client` implements it with a streaming response body.
-  A clean body close keeps the h1 connection reusable; an early close drains a
-  bounded amount and marks the connection dirty when it cannot finish.
-
-- `http.client.BodyStep`: the non-blocking body shape for evented clients;
-  `would_block` is separate from the terminal body outcomes.
-
-- `http.client.blocking.Client` dispatches the shared contract to either the h1
-  or h2 adapter. `Config.protocol` is the caller's cleartext choice; TLS ALPN
-  selection belongs above this layer.
-
-- `h1.ClientConn`: a sans-I/O HTTP/1 response machine for one request at a
-  time. It parses response heads, Content-Length, chunked, and close-delimited
-  bodies, preserves pipelined leftovers, and returns borrowed body slices
-  without allocating. The caller writes the request with `h1.Writer`.
-
+- `http`: HTTP/1.1 and HTTP/2 protocol kernels in one Zig module. The parsers
+  return borrowed slices or fill caller-owned storage, take no allocator, do
+  no I/O, and import no socket.
+- `Header`, `Headers`, `Headers.values`, and `Headers.containsToken`: field
+  lines with ordered duplicates, case-insensitive lookup, OWS trimming, and
+  token-list membership.
+- `Method`, `Status`, `Version`, and `WireVersion`: case-sensitive method
+  tokens, open three-digit status values, and the effective and wire HTTP
+  versions.
+- `Cursor`: one infallible byte cursor for the parsers. Each protocol maps end
+  of input to its own error.
+- `encoding.negotiate` and `encoding.negotiateFields`: `Accept-Encoding` and
+  content-coding choice over q-values, wildcard, identity, and repeated field
+  lines.
+- `token_list`, `content_length`, and `transfer_encoding.summarize`:
+  comma-separated token lists, `Content-Length` accumulation, and
+  `Transfer-Encoding` parsing with parameters and chunked checks.
+- `h1.parseRequest`, `h1.parseResponse`, and `h1.parseFieldSection`:
+  resumable sans-I/O head parsing with `SearchState`, exact method and status
+  bytes, and rejection of bare LF, obs-fold, and whitespace before the colon.
+- `h1.framing`, `h1.persistent`, `h1.targetForm`, and `h1.host`: request and
+  response body framing, connection persistence, the four request-target
+  forms, and the single `Host` value.
+- `h1.chunked.Decoder` and `h1.Writer`: resumable chunked decoding with
+  trailers and extensions, and request, status, field, Content-Length, body,
+  and chunked writing over a caller-owned `std.Io.Writer`.
+- `h1.ServerConn`: a sans-I/O HTTP/1 server connection machine with
+  keep-alive, pipelining, buffered or application-owned request bodies,
+  `Expect: 100-continue`, policy responses, idle and request deadlines, HEAD
+  rules, drain, and the 101 protocol switch.
+- `h1.engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts
+  connections and `serve` drives one stream; the handler uses `Exchange` and
+  the per-exchange arena. Every connection timeout is zero.
 - `h1.engine.poll`, `h1.engine.epoll`, and `h1.engine.kqueue`: HTTP/1
-  readiness engines. Poll and epoll are Linux; kqueue is macOS. They share
-  fixed slots, nonblocking descriptors, accept backoff, connection deadlines,
-  keep-alive and pipelining, and a stop descriptor (eventfd on Linux, pipe on
-  macOS). The handler is the shared `Handler` vtable, the same as the blocking
-  engine. The wait, registration, and platform edge live in a backend; the slot
-  state machine is shared. io_uring is separate. `Config.tcp_defer_accept` sets
-  Linux `TCP_DEFER_ACCEPT`. A wait that returns `SystemResources` backs off and
-  retries.
-
-- `Exchange.id` and `Handler.VTable.complete`: the engine reports when the
-  final response bytes are written or the connection ends, so a handler can
-  release a response body it owns. The slot id is stable for the exchange.
-  `Exchange.arena` is the engine-owned allocator; it is reset to
-  `Config.arena_retain_bytes` after completion.
-
-- `h1.engine.blocking.serveIo` and `h1.client.blocking.fetchIo`: plaintext
-  reader/writer seams for the blocking engines. The TLS examples use them
-  after the `tls_std` handshake, so the HTTP layers stay free of a TLS
-  dependency.
-
-- `examples/http1_tls.zig` and `examples/http1_tls_client.zig`: HTTP/1.1 over
-  TLS 1.3 through `baskingspot/tls`. `just interop-tls` runs the pair.
-
-- `examples/curl.zig`: a tiny one-request HTTP/1.1 client. It prints response
-  headers to stderr and the body to stdout; `just curl <url>` runs it. HTTPS is
-  local-only and unverified.
-
-- `h1.client.blocking`: the first client adapter. `fetch` writes a request,
-  drives `ClientConn`, and copies the body into caller-owned storage. It has
-  no allocator and no connection reuse. `just interop` checks it against a Go
-  `net/http` server for Content-Length, chunked, and request-body echo.
-
-- `h1.engine.blocking`: a blocking HTTP/1 server over `std.Io`. `run` accepts one
-  connection at a time; `serve` drives one stream. The handler is the shared
-  `Handler` vtable with `handle`, `complete`, and `report_error`. A handler
-  formats a response body with the exchange arena. The connection machine
-  handles parsing, framing, keep-alive, pipelining, and policy responses.
-  Every timeout is zero: a blocking syscall cannot enforce the connection
-  deadlines. Evented engines are separate.
-
-- `h2.head.request` and `h2.head.response`: field-section validation and the
-  two heads. Pseudo-headers are ordered, deduplicated, and checked per
-  direction; `:method`, `:scheme`, `:path`, `:authority`, `:protocol`, and
-  `:status` follow RFC 9113 §8.3. Field names are lowercase `tchar`, values
-  reject controls and edge whitespace, and the connection-specific fields are
-  rejected. The regular fields come back as `Headers`; cookie lines are not
-  combined.
-- `h2.settings`, `h2.flow`, `h2.stream`, and `h2.header_block`: the h2 state
-  pieces. `settings.apply` validates a peer's SETTINGS with the RFC 9113
-  defaults; `flow.Window` accounts DATA and WINDOW_UPDATE with signed windows;
-  `stream.transition` implements the §5.1 states and `stream.Ids` allocates by
-  role parity; `header_block.Assembler` joins CONTINUATION fragments.
-- `h2.Session`: the sans-I/O h2 connection machine. `receive`/`send` move
-  bytes, `nextEvent` yields requests, responses, DATA, trailers, resets,
-  SETTINGS, and GOAWAY, and `submit*` queues frames. SETTINGS, the stream table,
-  HPACK, flow control, CONTINUATION assembly, and the outbound queue are
-  inside; sockets, TLS, and the event loop are not. `submitResponse` takes a
-  typed `http.response.Response`; the status and content length stay values
-  until the HPACK encoder writes them. The allocator is per call;
-  stream records and output chunks come from `std.heap.MemoryPool`, so a
-  `FixedBufferAllocator` sets a fixed ceiling. `submitData` returns the prefix
-  flow control accepts, and `release` returns consumed bytes to both windows.
-  `submitSettings` sends a local SETTINGS change and applies its receive-side
-  effects, capped by the storage `init` allocated. Closed streams keep a
-  tombstone ring for the right `STREAM_CLOSED` behavior; a self-dependent
-  HEADERS or PRIORITY and a trailer without END_STREAM are stream errors. The
-  h2c example serves connections on threads and the full h2spec suite passes,
-  strict included.
-- `h2.engine.blocking`: the blocking h2 server engine over `std.Io`, the h2
-  counterpart to `h1.engine.blocking`. `serve` buffers one complete request per
-  stream and hands it to a type-erased `Handler` as an `Exchange` with a typed
-  head, whole body, trailers, and a per-stream arena. `respond` records the
-  response; the engine validates it, sends the HEADERS, and pumps the body
-  under flow control. `complete` and `report_error` close the lifecycle. The
-  sans-I/O `h2.engine.Connection` core holds the session, slots, arenas, and
-  handler; the blocking engine is a transport driver around it, and the h2c
-  example uses it with a thread per connection.
-- `h2.engine.poll`, `h2.engine.epoll`, and `h2.engine.kqueue`: the h2
-  readiness engines over the same exchange core. One thread, fixed connection
-  slots, nonblocking sockets, partial writes, optional idle/write/total/head/body
-  deadlines, accept backoff, and a GOAWAY drain on stop. poll and epoll are
-  Linux; kqueue is macOS. The wait backends and platform edge live in
-  `src/transport`, shared with the h1 engines. `just ci` runs the strict h2spec
-  conformance suite against the readiness example.
-- `h2.engine.blocking.serveIo`: the blocking engine can run over an existing
-  `*std.Io.Reader`/`*std.Io.Writer` pair instead of a socket. The
-  `examples/http2_tls.zig` server uses it with `baskingspot/tls`'s blocking
-  `tls_std` integration and ALPN `h2`; `just conformance-run-tls` runs h2spec
-  over TLS. TLS on the readiness engines is not wired yet.
-- `Status`: the status codes as an open enum. Named codes are constants; any
-  other three-digit code is still a value. `Status.code()`, `Status.class()`,
-  `Status.phrase()`, and `Status.parse()` work on the wire number, and the
-  parser returns `Status` directly.
-- `Method`: the conventional nine request methods as a local enum, with
-  `Method.token()`, the case-sensitive `Method.parse()`, and the RFC 9110
-  §9.2 predicates.
-- `Header`, `Headers`, and `Headers.values`: borrowed field lines and ordered,
-  case-insensitive lookup over a field section. Duplicate lines are yielded
-  separately, and lookups trim OWS.
-- `Headers.containsToken`: list-element membership across every line with a
-  given name.
-- `encoding.negotiate`: `Accept-Encoding` parsing and content-coding
-  negotiation over the q-value, wildcard, and identity rules. The chosen
-  token is borrowed from the caller's supported list.
-- `encoding.negotiateFields`: the same negotiation across multiple field
-  lines, which combine as one ordered list.
-- `token_list.contains` and `token_list.iterator`: comma-separated token
-  lists such as `Connection` and `Upgrade`, with OWS handling and
-  case-insensitive membership.
-- `h1.parseRequest` and `h1.parseResponse`: sans-I/O HTTP/1.1 head parsing.
-  `RequestHead.method` is `?Method` and `method_token` keeps the exact wire
-  bytes; `ResponseHead.status` is `Status`; `version` is the effective version
-  after RFC 9110 §6.2 and `wire_version` keeps the wire pair. Both heads carry
-  `Headers`. Both report `error.Incomplete` until a whole head arrives, take
-  a `SearchState` for a resumable completeness check, and reject bare LF,
-  obs-fold, and whitespace before the colon.
-- `h1.ServerConn`: a sans-I/O server connection state machine. It owns no
-  memory and does no I/O. The caller supplies the request buffer, field
-  storage, response head buffer, and time. It handles keep-alive and
-  pipelining, buffers request bodies up to a limit, answers `Expect:
-  100-continue`, and queues policy responses. Call `start` after accept so a
-  silent connection has a deadline. Separate idle and head timeouts bound the
-  keep-alive wait and the request head; `drain_timeout` bounds a lingering
-  close, and zero skips the drain. HEAD responses keep Content-Length and omit
-  the body. Chunked request bodies return 501 for now. A final 1xx response is
-  rejected; an HTTP/1.0 request never receives 100 Continue.
-- `h1.framing.request` and `h1.framing.response`: body framing per RFC 9112
-  §6.3. A request returns `RequestBody`: `.none`, `.length`, or `.chunked`. A
-  response returns `ResponseBody`, which adds `.close` and `.tunnel`. TE with
-  CL, TE on an HTTP/1.0 message, and a request whose final coding is not
-  `chunked` are errors.
-- `h1.persistent`: the RFC 9112 §9.3 connection decision from the version and
-  the `Connection` tokens. HTTP/1.1 persists by default; HTTP/1.0 persists
-  only with `keep-alive`; `close` wins.
-- `h1.targetForm`: the four request-target forms from RFC 9112 §3.2, classified
-  by the method. The target stays syntax; routing is the caller's.
-- `h1.host`: the single `Host` value, or `error.DuplicateHost` when the field
-  repeats. A missing Host in an HTTP/1.1 request is the caller's 400.
-- `h1.parseFieldSection`: a standalone field section and the trailer parser.
-  An empty section is a single CRLF; the returned headers borrow the input and
-  the caller's storage.
-- `h1.chunked.Decoder`: resumable chunked transfer coding (RFC 9112 §7.1).
-  `next` returns a borrowed data slice, the trailer `Headers`, or `need_more`,
-  with the consumed prefix on every step. Chunk extensions are parsed and
-  ignored; a chunk-size overflow is `error.Overflow`.
-- `h1.Writer`: carries a caller-owned `std.Io.Writer` and writes request/status
-  lines, field lines, Content-Length, body bytes, and chunked bodies with
-  trailers. Checked methods validate the parser's grammar; the `assume*`
-  variants skip validation for trusted data. The writer never allocates,
-  flushes, or closes the sink.
-- `transfer_encoding.summarize`: the `Transfer-Encoding` coding list in field
-  order, with the final coding, a seen/last `chunked` flag, parameter parsing
-  (including quoted values), and rejection of repeated or parameterized
-  `chunked`.
-- `content_length.Parser`: `Content-Length` accumulation one field line at a
-  time for a caller that already has a field view. `parse` remains the slice
-  form.
-- `Version` and `WireVersion`: the effective version and the exact wire pair,
-  exported at the package root and from `h1`.
-- `Cursor`: one byte cursor for every parser here, replacing the private
-  cursors in `h1`, `prefix_int`, and the Huffman decoder. It is infallible;
-  each protocol maps the end of input to its own error.
-- `prefix_int.decode`, `prefix_int.encode`, and `prefix_int.encodedLen`:
-  RFC 7541 §5.1 integers, shared by HPACK and QPACK. Values are `u32`;
-  encodings that need more are `error.InvalidInteger`.
-- `huffman.decode` and `huffman.encode`: the RFC 7541 Appendix B code, shared
-  by HPACK and QPACK. Decoding rejects EOS and padding that is over seven bits
-  or not EOS's prefix.
-- `hpack.static_table`: the 61 predefined fields from RFC 7541 Appendix A, as
-  `Header` values with static storage.
-- `hpack.TableStorage`: the dynamic table's byte arena, slot records, and
-  parallel hash array. `init(allocator, max_size)` allocates one chunk for all
-  three from a runtime SETTINGS_HEADER_TABLE_SIZE. `initBuffer(memory, max_size)`
-  wraps a caller blob and returns `error.BufferTooSmall` when it is too short;
-  `TableStorage.Buffer(max_size)` is the blob type.
-- `hpack.DynamicTable`: the per-connection table over `TableStorage`, with the
-  RFC 7541 §4.1 size accounting, §4.4 eviction, compaction, and
-  `find`/`findName` over a contiguous hash array.
-- `hpack.static_table.find` and `hpack.static_table.findName`: name and
-  name-and-value lookup over a comptime map, instead of a 61-entry scan.
-- `hpack.Encoder` and `hpack.Mode`: header block encoding for HTTP/2.
-  Incremental indexing is the default, an exact name and value reuse an
-  indexed field, and Huffman is chosen only when it is strictly shorter.
-  `setMaxSize` follows a SETTINGS change and emits the size update, including
-  the minimum-first pair RFC 7541 §4.2 needs after a reduction and a growth.
-- `hpack.Decoder`: header block decoding for HTTP/2. Decoded fields are copied
-  into a caller-owned buffer, so a field never borrows a dynamic-table entry.
-  `decode` returns `Headers`; `decodeFlags` also records the RFC 7541 §6.2.3
-  never-indexed flag per field for an intermediary that re-encodes.
-- `content_length.parse`: `Content-Length` parsing and duplicate
-  combination. Conflicting values, non-digits, and overflow are errors;
-  `null` means the field was absent.
-
-### Changed
-
-- `h1.parseRequest`, `h1.parseResponse`, and `h1.parseFieldSection` take a
-  `SearchState` instead of a raw `last_len`. The parser records the searched
-  length on `error.Incomplete` and clears it after a complete parse.
-- The package owns its public types. `Header`, `Method`, `Status`, and
-  `h1.Version` no longer alias `std.http`.
-- The package depends on `baskingspot/stdx` for `stdx.fmt.atoi`;
-  `content_length` parses its digits with it.
-
-### Fixed
-
-- `h2.client.blocking` treats a zero-byte `readVec` with buffered bytes as a
-  buffered fill, not EOF. This fixes HTTP/2 over TLS readers that fill their
-  own buffer before returning bytes.
-
-- `h1.ClientConn`: a response head stays readable after its body arrives in a
-  later read. Refills no longer overwrite the head bytes that `Event.response`
-  handed out.
+  readiness engines with fixed slots, nonblocking descriptors, connection
+  deadlines, accept backoff, a stop descriptor, keep-alive, and pipelining.
+  Poll and epoll run on Linux; kqueue runs on macOS. `error.AddressInUse`
+  reports a bind conflict, and `Config.tcp_defer_accept` sets Linux
+  `TCP_DEFER_ACCEPT`.
+- `http.engine.Handler`, `Exchange`, `ResponseOptions`, and `PolicyContext`:
+  the shared engine handler vtable with `handle`, `complete`, `report_error`,
+  and `policy_response`; a stable exchange id; an engine-owned per-exchange
+  arena; and response close control.
+- `h1.ClientConn`: a sans-I/O HTTP/1 response machine for Content-Length,
+  chunked, and close-delimited bodies, interim 1xx responses, and pipelined
+  leftovers.
+- `h1.client.streaming.Client`: the HTTP/1 blocking client adapter. It writes
+  a request and static body, parses the response head into an arena, and
+  streams the response body as a borrowed slice. A clean close keeps the
+  connection reusable.
+- `h2.head`, `h2.settings`, `h2.flow`, `h2.stream`, and `h2.header_block`:
+  HTTP/2 field-section validation, SETTINGS application, flow-control
+  windows, stream states and ids, and CONTINUATION assembly.
+- `h2.Session`: a sans-I/O HTTP/2 connection machine with frame input and
+  output, SETTINGS, flow control, HPACK, CONTINUATION assembly, stream
+  tombstones, typed events, and `submit*` methods for requests, responses,
+  data, settings, resets, and pings. The allocator is per call, so a fixed
+  buffer allocator sets the ceiling.
+- `h2.engine.blocking`: a blocking HTTP/2 server over `std.Io`, with a
+  per-stream arena, a typed request, whole-body request buffering, flow-
+  controlled response writing, and `serveIo` for a caller-owned reader and
+  writer.
+- `h2.engine.poll`, `h2.engine.epoll`, and `h2.engine.kqueue`: HTTP/2
+  readiness engines over the shared exchange core, with fixed connection
+  slots, nonblocking sockets, partial writes, deadlines, accept backoff, and a
+  GOAWAY drain on stop. `http_tls` supplies the TLS transports.
+- `h2.client.blocking.Client`: the HTTP/2 client adapter. It sends a request
+  head and static request body, consumes WINDOW_UPDATE under flow control,
+  streams a response body as a borrowed slice, reports RST_STREAM codes and
+  GOAWAY boundaries, and exposes commit state and connection poison.
+- `hpack.static_table`, `hpack.TableStorage`, `hpack.DynamicTable`,
+  `hpack.Encoder`, and `hpack.Decoder`: HTTP/2 header compression with a
+  caller-owned table, allocation-backed or fixed-buffer storage, indexed and
+  literal fields, Huffman choice, and decoded fields copied into caller
+  storage.
+- `prefix_int` and `huffman`: the RFC 7541 integer and Huffman primitives
+  shared by HPACK and QPACK.
+- `http.client`: the protocol-neutral client contract. `Request`,
+  `ResponseHead`, `Body`, `BodyRead`, `BodyStep`, `Response`, `Config`, and
+  `GoAway` cover a request, a response head snapshot, borrowed body data,
+  terminal and local body outcomes, and the 16 KiB header and 128 field
+  limits.
+- `http.client.blocking.Client`: one blocking client interface for the h1 and
+  h2 adapters. `Config.protocol` selects the adapter.
+- `http.client.frame_queue`: a resumable outbound frame queue for a step
+  client. It keeps one partially written frame, refuses an append while a
+  frame is partial, holds HEADERS and CONTINUATION contiguity, and marks
+  END_HEADERS commit separately from END_STREAM completion.
+- `response.Response`: status, fields, and body as a typed response value for
+  the h2 session and engine writers.
+- `http_tls`: an optional module for TLS 1.3 over `baskingspot/tls`, with
+  `tls_std` blocking seams, ALPN h1 and h2 selection, and h2 TLS readiness
+  transports. The core `http` module stays h2c-only and links no crypto.
+- `examples/curl.zig` and `examples/http_unified_server.zig`: a streaming
+  HTTP/1.1 and HTTP/2 client with ALPN and cleartext selection, and a server
+  that serves both protocols on one TLS port and one cleartext port.
+- Build requirements: Zig 0.16. `http` depends on `baskingspot/stdx` for
+  `stdx.fmt.atoi`; `http_tls` also links OpenSSL for its TLS examples and
+  transports.
