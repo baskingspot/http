@@ -62,6 +62,10 @@ All notable changes to http are recorded here. The format follows
   A clean body close keeps the h1 connection reusable; an early close drains a
   bounded amount and marks the connection dirty when it cannot finish.
 
+- `http.client.blocking.Client` dispatches the shared contract to either the h1
+  or h2 adapter. `Config.protocol` is the caller's cleartext choice; TLS ALPN
+  selection belongs above this layer.
+
 - `h1.ClientConn`: a sans-I/O HTTP/1 response machine for one request at a
   time. It parses response heads, Content-Length, chunked, and close-delimited
   bodies, preserves pipelined leftovers, and returns borrowed body slices
