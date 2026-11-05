@@ -21,6 +21,8 @@ const Status = @import("../../status.zig").Status;
 const session_mod = @import("../session.zig");
 const Session = session_mod.Session;
 const Event = session_mod.Event;
+const frame = @import("../frame.zig");
+const hpack = @import("../../hpack/root.zig");
 
 const shared = @import("../../client/root.zig");
 
@@ -218,6 +220,10 @@ pub const Client = struct {
                 .window_update => {},
                 .response => |response| {
                     if (response.stream_id != id) return error.UnexpectedStream;
+                    if (response.head.status.class() == .informational) {
+                        if (response.end_stream) return error.ProtocolError;
+                        continue;
+                    }
                     const head = try self.snapshot(response.head.headers);
                     if (response.end_stream) {
                         self.remote_end = true;
@@ -285,6 +291,10 @@ pub const Client = struct {
                 },
                 .response => |response| {
                     if (response.stream_id != id) return error.UnexpectedStream;
+                    if (response.head.status.class() == .informational) {
+                        if (response.end_stream) return error.ProtocolError;
+                        continue;
+                    }
                     if (self.early_head != null) return error.UnexpectedResponse;
                     self.early_head = .{
                         .protocol = .h2,
@@ -432,6 +442,10 @@ pub const Client = struct {
                     if (response.stream_id != self.stream_id) {
                         self.connection_poisoned = true;
                         return .protocol;
+                    }
+                    if (response.head.status.class() == .informational) {
+                        if (response.end_stream) return .protocol;
+                        continue;
                     }
                     if (response.end_stream) {
                         self.remote_end = true;
@@ -1328,4 +1342,148 @@ test "a split header run commits when END_HEADERS fails" {
     }));
     try testing.expectEqual(RequestState.committed, client.commitState());
     try testing.expect(client.isConnectionPoisoned());
+}
+
+fn nextServerEvent(session: *Session, reader: *Io.Reader) !?Event {
+    while (true) {
+        if (try session.nextEvent(testing.allocator)) |event| return event;
+        var buffer: [4096]u8 = undefined;
+        var vecs: [1][]u8 = .{&buffer};
+        const n = reader.readVec(&vecs) catch |err| switch (err) {
+            error.EndOfStream => return null,
+            else => return err,
+        };
+        if (n == 0) return null;
+        _ = session.receive(buffer[0..n]);
+    }
+}
+
+fn flushServer(session: *Session, writer: *Io.Writer) !void {
+    var buffer: [4096]u8 = undefined;
+    while (true) {
+        const n = session.send(&buffer);
+        if (n == 0) break;
+        try writer.writeAll(buffer[0..n]);
+    }
+    try writer.flush();
+}
+
+const InformationalServer = struct {
+    io: Io,
+    listener: *Io.net.Server,
+    result: ?anyerror = null,
+
+    fn run(self: *InformationalServer) void {
+        self.serve() catch |err| {
+            self.result = err;
+        };
+    }
+
+    fn serve(self: *InformationalServer) !void {
+        const stream = try self.listener.accept(self.io);
+        defer stream.close(self.io);
+
+        var reader = stream.reader(self.io, &.{});
+        var write_buffer: [4096]u8 = undefined;
+        var writer = stream.writer(self.io, &write_buffer);
+
+        var session = try Session.init(testing.allocator, .{
+            .role = .server,
+            .max_streams = 4,
+        });
+        defer session.deinit(testing.allocator);
+        try flushServer(&session, &writer.interface);
+
+        var id: u31 = 0;
+        while (true) {
+            const event = try nextServerEvent(&session, &reader.interface) orelse
+                return error.EndOfStream;
+            switch (event) {
+                .settings => try flushServer(&session, &writer.interface),
+                .request => |request| {
+                    id = request.stream_id;
+                    break;
+                },
+                else => {},
+            }
+        }
+
+        var storage = try hpack.TableStorage.init(testing.allocator, 4096);
+        defer storage.deinit(testing.allocator);
+        var encoder = hpack.Encoder.init(storage);
+        var block_buffer: [1024]u8 = undefined;
+        var send_buffer: [2048]u8 = undefined;
+
+        const info = try encoder.encodeResponse(
+            .{ .status = .@"continue" },
+            &block_buffer,
+        );
+        var info_writer = frame.Writer.init(&send_buffer);
+        try info_writer.begin(.headers, frame.flags.end_headers, id);
+        try info_writer.bytes(info);
+        info_writer.end();
+        try writer.interface.writeAll(info_writer.written());
+        try writer.interface.flush();
+
+        const final = try encoder.encodeResponse(
+            .{ .status = .ok },
+            &block_buffer,
+        );
+        var final_writer = frame.Writer.init(&send_buffer);
+        try final_writer.begin(
+            .headers,
+            frame.flags.end_headers | frame.flags.end_stream,
+            id,
+        );
+        try final_writer.bytes(final);
+        final_writer.end();
+        try writer.interface.writeAll(final_writer.written());
+        try writer.interface.flush();
+    }
+};
+
+test "informational response does not become the final head" {
+    const payload = "body";
+
+    const io = testing.io;
+    var address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
+    var listener = try address.listen(io, .{
+        .mode = .stream,
+        .reuse_address = true,
+    });
+    defer listener.deinit(io);
+    address.setPort(listener.socket.address.getPort());
+
+    var server: InformationalServer = .{ .io = io, .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, InformationalServer.run, .{&server});
+    defer {
+        thread.join();
+        if (server.result) |err| std.debug.panic("info server failed: {s}", .{@errorName(err)});
+    }
+
+    const stream = try address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var reader = stream.reader(io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(io, &write_buffer);
+
+    var client: Client = undefined;
+    try client.init(
+        &reader.interface,
+        &writer.interface,
+        .{ .allocator = testing.allocator },
+    );
+    defer client.deinit();
+
+    const response = try client.request(.{
+        .method_token = "POST",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+        .body = payload,
+    });
+    defer response.body.close();
+
+    try testing.expectEqual(@as(u16, 200), response.head.status.code());
+    try testing.expectEqual(.eof, response.body.read());
 }

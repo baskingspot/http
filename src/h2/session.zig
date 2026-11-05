@@ -972,13 +972,25 @@ pub const Session = struct {
                 },
                 .end_stream = end_stream,
             } },
-            .response => .{ .response = .{
-                .stream_id = id,
-                .head = head.response(fields) catch {
+            .response => blk: {
+                const response_head = head.response(fields) catch {
                     return self.failStream(allocator, id, .protocol_error);
-                },
-                .end_stream = end_stream,
-            } },
+                };
+                if (response_head.status.class() == .informational) {
+                    if (end_stream) {
+                        return self.failStream(allocator, id, .protocol_error);
+                    }
+                    // An informational response is not the final head. Keep
+                    // the stream open so the next HEADERS is a response, not
+                    // trailers.
+                    if (self.streams.getPtr(id)) |state| state.recv_head = false;
+                }
+                break :blk .{ .response = .{
+                    .stream_id = id,
+                    .head = response_head,
+                    .end_stream = end_stream,
+                } };
+            },
             .trailers => .{ .trailers = .{
                 .stream_id = id,
                 .headers = head.trailers(fields) catch {
