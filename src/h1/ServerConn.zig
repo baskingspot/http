@@ -380,7 +380,11 @@ pub fn advance(self: *ServerConn, now: Io.Timestamp) Event {
     if (self.used == 0) {
         assert(self.phase == .head);
         self.startIdleDeadline(now);
-        if (self.timedOut(now)) return self.reject(.request_timeout, false, .request_timeout);
+        if (self.timedOut(now)) {
+            self.phase = .closed;
+            self.clearDeadlines();
+            return .closed;
+        }
         return .need_more;
     }
 
@@ -406,11 +410,18 @@ pub fn eof(self: *ServerConn, now: Io.Timestamp) Event {
     return self.reject(.bad_request, false, .malformed_head);
 }
 
-/// The poll deadline fired. Covers every phase. A head, body, or application
-/// timeout queues a 408. A response or drain timeout closes.
+/// The poll deadline fired. Covers every phase. An idle connection with no
+/// request bytes closes silently; a started head, body, or application timeout
+/// queues a 408. A response or drain timeout closes.
 pub fn tick(self: *ServerConn, now: Io.Timestamp) Tick {
     self.last_now = @intCast(now.nanoseconds);
     if (!self.timedOut(now)) return .none;
+
+    if (self.phase == .head and self.idle) {
+        self.phase = .closed;
+        self.clearDeadlines();
+        return .close;
+    }
 
     return switch (self.phase) {
         .head, .body, .app => self.rejectTick(),
@@ -1208,6 +1219,28 @@ test "partial sends advance the head and body" {
     try testing.expectEqual(.keep_alive, std.meta.activeTag(t.conn.sent(total, t.clock.now)));
 }
 
+test "an idle timeout closes without a policy response" {
+    var t: TestConn = undefined;
+    t.init(.{ .idle_timeout = .fromSeconds(1) });
+    t.conn.start(t.clock.now);
+    t.clock.advance(2 * std.time.ns_per_s);
+
+    try testing.expectEqual(.close, t.conn.tick(t.clock.now));
+}
+
+test "a keep-alive idle timeout closes without a policy response" {
+    var t: TestConn = undefined;
+    t.init(.{ .idle_timeout = .fromSeconds(1) });
+    t.conn.start(t.clock.now);
+
+    _ = try expectRequest(try t.feed("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
+    try t.conn.respond(.{ .status = .ok }, "hello");
+    try testing.expectEqual(.keep_alive, std.meta.activeTag(try t.drain()));
+
+    t.clock.advance(2 * std.time.ns_per_s);
+    try testing.expectEqual(.close, t.conn.tick(t.clock.now));
+}
+
 test "a timeout is a 408 policy response" {
     var t: TestConn = undefined;
     t.init(.{ .head_timeout = .fromSeconds(1) });
@@ -1281,13 +1314,7 @@ test "start gives a silent connection a deadline" {
     try testing.expect(t.conn.deadline() != null);
 
     t.clock.advance(6 * std.time.ns_per_s);
-    switch (t.conn.tick(t.clock.now)) {
-        .reject => |rejection| {
-            try testing.expectEqual(Status.request_timeout, rejection.status);
-            try testing.expectEqual(.request_timeout, rejection.reason);
-        },
-        else => return error.TestExpectedTimeout,
-    }
+    try testing.expectEqual(.close, t.conn.tick(t.clock.now));
 }
 
 test "the total timeout starts with the first request byte" {
@@ -1698,13 +1725,7 @@ test "trickled CRLF keeps the idle deadline until a request starts" {
     t.clock.advance(10 * std.time.ns_per_ms);
     try testing.expectEqual(.need_more, std.meta.activeTag(try t.feed("\n")));
     t.clock.advance(100 * std.time.ns_per_ms);
-    switch (t.conn.tick(t.clock.now)) {
-        .reject => |rejection| {
-            try testing.expectEqual(.request_timeout, rejection.status);
-            try testing.expectEqual(.request_timeout, rejection.reason);
-        },
-        else => return error.TestExpectedTimeout,
-    }
+    try testing.expectEqual(.close, t.conn.tick(t.clock.now));
 }
 
 test "CRLF followed by a request works normally" {

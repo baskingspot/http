@@ -252,7 +252,7 @@ test "poll closes an idle connection" {
 
     var response: [512]u8 = undefined;
     const got = try readAll(stream, h.io, &response);
-    try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 408 Request Timeout\r\n"));
+    try testing.expectEqualStrings("", got);
 }
 
 test "poll stalled mid-head does not block another connection" {
