@@ -10,6 +10,26 @@ const Allocator = std.mem.Allocator;
 const Header = @import("../header.zig").Header;
 const Status = @import("../status.zig").Status;
 
+/// Why the connection machine selected a rejection. Statuses stay the same;
+/// this is the additional information an application needs for its message.
+pub const RejectReason = enum {
+    malformed_head,
+    conflicting_length,
+    invalid_length,
+    conflicting_framing,
+    invalid_framing,
+    chunked_unsupported,
+    missing_host,
+    invalid_host,
+    too_many_fields,
+    head_too_large,
+    body_too_large,
+    unsupported_version,
+    unsupported_expectation,
+    request_timeout,
+    internal_error,
+};
+
 /// The response fields the application controls.
 // ast-grep-ignore: public-struct-field-default -- options bag; status defaults to 200
 pub const ResponseOptions = struct {
@@ -29,6 +49,8 @@ pub const PolicyContext = struct {
     id: usize,
     /// The status chosen by the parser or connection machine.
     status: Status,
+    /// The precise rejection category.
+    reason: RejectReason,
     /// Storage for a replacement body. It lives until the response completes.
     arena: Allocator,
 };

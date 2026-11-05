@@ -19,6 +19,7 @@ else
 
 const TestApp = struct {
     complete_count: usize = 0,
+    last_reason: ?h1.ServerConn.RejectReason = null,
 
     fn handler(self: *TestApp) engine.Handler {
         return .{ .ptr = self, .vtable = &.{
@@ -66,7 +67,12 @@ const TestApp = struct {
         _ = @errorName(err);
     }
 
-    fn policyResponse(_: *anyopaque, context: engine.PolicyContext) anyerror!engine.PolicyResponse {
+    fn policyResponse(
+        ptr: *anyopaque,
+        context: engine.PolicyContext,
+    ) anyerror!engine.PolicyResponse {
+        const self: *TestApp = @ptrCast(@alignCast(ptr));
+        self.last_reason = context.reason;
         if (context.status != .not_implemented) {
             return .{ .options = .{ .status = context.status }, .body = "" };
         }

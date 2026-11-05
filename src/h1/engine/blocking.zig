@@ -154,8 +154,8 @@ pub fn serveIo(
                     event = conn.received(n, now(io));
                 }
             },
-            .reject => |status| {
-                try reviewPolicy(handler, &arena, &conn, status);
+            .reject => |rejection| {
+                try reviewPolicy(handler, &arena, &conn, rejection);
                 _ = try writePending(io, &conn, writer);
                 return;
             },
@@ -186,7 +186,10 @@ fn handleRequest(
                 complete(handler, &exchange, arena, config.common.arena_retain_bytes);
                 return resp_err;
             };
-            try reviewPolicy(handler, arena, conn, .internal_server_error);
+            try reviewPolicy(handler, arena, conn, .{
+                .status = .internal_server_error,
+                .reason = .internal_error,
+            });
         }
     };
 
@@ -221,9 +224,9 @@ fn reviewPolicy(
     handler: Handler,
     arena: *ArenaAllocator,
     conn: *h1.ServerConn,
-    status: Status,
+    rejection: h1.ServerConn.Rejection,
 ) !void {
-    try api.review(handler, 0, arena.allocator(), conn, status);
+    try api.review(handler, 0, arena.allocator(), conn, rejection);
 }
 
 fn writePending(

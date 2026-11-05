@@ -4,6 +4,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const Status = @import("../../status.zig").Status;
+pub const Rejection = h1.ServerConn.Rejection;
 const h1 = @import("../root.zig");
 const common = @import("../../engine/common.zig");
 
@@ -43,12 +44,17 @@ pub fn review(
     id: usize,
     arena: Allocator,
     conn: *h1.ServerConn,
-    status: Status,
+    rejection: Rejection,
 ) !void {
-    const context: PolicyContext = .{ .id = id, .status = status, .arena = arena };
+    const context: PolicyContext = .{
+        .id = id,
+        .status = rejection.status,
+        .reason = rejection.reason,
+        .arena = arena,
+    };
     const replacement = handler.vtable.policy_response(handler.ptr, context) catch |err| {
         handler.vtable.report_error(handler.ptr, err);
-        return conn.reviewRejection(.{ .options = .{ .status = status }, .body = "" });
+        return conn.reviewRejection(.{ .options = .{ .status = context.status }, .body = "" });
     };
     return conn.reviewRejection(replacement);
 }

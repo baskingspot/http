@@ -247,8 +247,8 @@ pub fn Server(comptime Waiter: type) type {
                 if (now.durationTo(at).nanoseconds > 0) continue;
                 switch (slot.conn.tick(now)) {
                     .none => {},
-                    .reject => |status| {
-                        self.reviewPolicy(slot, status);
+                    .reject => |rejection| {
+                        self.reviewPolicy(slot, rejection);
                         slot.state = .write;
                     },
                     .close => self.closeSlot(slot),
@@ -387,8 +387,8 @@ pub fn Server(comptime Waiter: type) type {
                     }
                     return true;
                 },
-                .reject => |status| {
-                    self.reviewPolicy(slot, status);
+                .reject => |rejection| {
+                    self.reviewPolicy(slot, rejection);
                     slot.state = .write;
                     return true;
                 },
@@ -411,18 +411,21 @@ pub fn Server(comptime Waiter: type) type {
                     self.closeSlot(slot);
                     return false;
                 };
-                self.reviewPolicy(slot, .internal_server_error);
+                self.reviewPolicy(slot, .{
+                    .status = .internal_server_error,
+                    .reason = .internal_error,
+                });
             }
             return true;
         }
 
-        fn reviewPolicy(self: *Self, slot: *Slot, status: Status) void {
+        fn reviewPolicy(self: *Self, slot: *Slot, rejection: h1.ServerConn.Rejection) void {
             api.review(
                 self.handler,
                 slot.exchange.id,
                 slot.arena.allocator(),
                 &slot.conn,
-                status,
+                rejection,
             ) catch self.closeSlot(slot);
         }
 
@@ -485,8 +488,8 @@ pub fn Server(comptime Waiter: type) type {
                 .need_more => {
                     slot.state = if (slot.conn.sendSlices().head.len != 0) .write else .read;
                 },
-                .reject => |status| {
-                    self.reviewPolicy(slot, status);
+                .reject => |rejection| {
+                    self.reviewPolicy(slot, rejection);
                     slot.state = .write;
                 },
                 .closed => self.closeSlot(slot),

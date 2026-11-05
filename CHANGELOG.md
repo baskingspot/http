@@ -13,8 +13,14 @@ All notable changes to http are recorded here. The format follows
 
 - `Handler.VTable.policy_response` lets an application choose the status,
   fields, and body of h1 parser and handler policy responses. `PolicyContext`
-  carries the slot, status, and exchange arena. `defaultPolicyResponse` keeps
-  the status and an empty body.
+  carries the slot, status, `RejectReason`, and exchange arena.
+  `defaultPolicyResponse` keeps the status and an empty body. `.reject` carries
+  a `Rejection` with both status and reason, so error messages do not reparse
+  the request head.
+
+- `h1.ServerConn`: leading CRLF bytes before a request line keep the idle
+  deadline and still permit a close with `.closed`. The head and total
+  deadlines start only when the request line arrives.
 
 - `h2.engine.transport.tls.Transport.Options.handshake` now takes reusable `tls.ServerHandshake.ServerConfig`. Accept loops no longer provide placeholder keypairs or random values (baskingspot/tls#168).
 - `h1.ServerConn`: a request head can arrive before an incomplete body.

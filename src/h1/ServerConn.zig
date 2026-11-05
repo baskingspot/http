@@ -45,11 +45,13 @@ const ascii = std.ascii;
 const mem = std.mem;
 
 const Header = @import("../header.zig").Header;
+const content_length = @import("../content_length.zig");
 const Headers = @import("../header.zig").Headers;
 const Method = @import("../method.zig").Method;
 const Status = @import("../status.zig").Status;
 const token_list = @import("../token_list.zig");
 const h1 = @import("root.zig");
+pub const RejectReason = @import("../engine/common.zig").RejectReason;
 const PolicyResponse = @import("../engine/common.zig").PolicyResponse;
 
 const ServerConn = @This();
@@ -92,6 +94,11 @@ pub const Config = struct {
 /// Connection.
 pub const ResponseOptions = @import("../engine/common.zig").ResponseOptions;
 
+pub const Rejection = struct {
+    status: Status,
+    reason: RejectReason,
+};
+
 pub const Head = struct {
     head: h1.RequestHead,
     /// The complete Content-Length body size, before choosing a sink.
@@ -120,7 +127,7 @@ pub const Event = union(enum) {
     request: Request,
     /// The machine queued this policy response. Send it, then close. `sent`
     /// reports whether the engine must drain input before the close.
-    reject: Status,
+    reject: Rejection,
     /// The peer closed with no partial request.
     closed,
 };
@@ -156,7 +163,7 @@ pub const Tick = union(enum) {
     /// No deadline has expired.
     none,
     /// The machine queued this 408. Send it, then close.
-    reject: Status,
+    reject: Rejection,
     /// Close now. Part of a response is on the wire, or a drain deadline
     /// expired.
     close,
@@ -288,8 +295,7 @@ pub fn received(self: *ServerConn, n: usize, now: Io.Timestamp) Event {
 
     self.last_now = now;
     if (n == 0) return self.eof(now);
-    if (self.timedOut(now)) return self.reject(.request_timeout, false);
-    self.startInputDeadlines(now);
+    if (self.timedOut(now)) return self.reject(.request_timeout, false, .request_timeout);
 
     if (self.phase == .body and self.external_body) {
         const remaining = self.body_target.len - self.body_received;
@@ -309,15 +315,18 @@ pub fn received(self: *ServerConn, n: usize, now: Io.Timestamp) Event {
             self.body_received += copied;
             self.used += n;
             self.leftover_start = scratch_start + copied;
+            self.startInputDeadlines(now);
             return self.parseBody();
         }
         assert(n <= remaining);
         self.body_received += n;
+        self.startInputDeadlines(now);
         return self.parseBody();
     }
     assert(n <= self.request_buffer.len - self.used);
     self.used += n;
     if (self.phase == .body) self.body_received += n;
+    self.startInputDeadlines(now);
     return switch (self.phase) {
         .head => self.parseHead(now),
         .body => self.parseBody(),
@@ -334,11 +343,11 @@ pub fn advance(self: *ServerConn, now: Io.Timestamp) Event {
     if (self.used == 0) {
         assert(self.phase == .head);
         self.startIdleDeadline(now);
-        if (self.timedOut(now)) return self.reject(.request_timeout, false);
+        if (self.timedOut(now)) return self.reject(.request_timeout, false, .request_timeout);
         return .need_more;
     }
 
-    if (self.timedOut(now)) return self.reject(.request_timeout, false);
+    if (self.timedOut(now)) return self.reject(.request_timeout, false, .request_timeout);
     self.startInputDeadlines(now);
     return switch (self.phase) {
         .head => self.parseHead(now),
@@ -351,12 +360,12 @@ pub fn advance(self: *ServerConn, now: Io.Timestamp) Event {
 /// partial head or body is the policy 400.
 pub fn eof(self: *ServerConn, now: Io.Timestamp) Event {
     self.last_now = now;
-    if (self.phase == .head and self.used == 0) {
+    if (self.phase == .head and self.idle and onlyBlankLines(self.request_buffer[0..self.used])) {
         self.phase = .closed;
         self.clearDeadlines();
         return .closed;
     }
-    return self.reject(.bad_request, false);
+    return self.reject(.bad_request, false, .malformed_head);
 }
 
 /// The poll deadline fired. Covers every phase. A head, body, or application
@@ -377,7 +386,7 @@ pub fn tick(self: *ServerConn, now: Io.Timestamp) Tick {
 }
 
 fn rejectTick(self: *ServerConn) Tick {
-    return switch (self.reject(.request_timeout, false)) {
+    return switch (self.reject(.request_timeout, false, .request_timeout)) {
         .reject => |status| .{ .reject = status },
         .closed => .close,
         else => unreachable,
@@ -555,7 +564,8 @@ pub fn remainingInput(self: *ServerConn) []const u8 {
 pub fn acceptBody(self: *ServerConn, storage: []u8) Event {
     assert(self.phase == .app);
     assert(self.body_received < self.body_len);
-    if (self.body_len > storage.len) return self.reject(.payload_too_large, true);
+    self.idle = false;
+    if (self.body_len > storage.len) return self.reject(.payload_too_large, true, .body_too_large);
     return self.setBodyStorage(storage[0..self.body_len], true);
 }
 
@@ -563,7 +573,9 @@ pub fn acceptBody(self: *ServerConn, storage: []u8) Event {
 pub fn bufferBody(self: *ServerConn) Event {
     if (self.phase != .app) return .need_more;
     const end = self.body_start + self.body_len;
-    if (end > self.request_buffer.len) return self.reject(.payload_too_large, true);
+    if (end > self.request_buffer.len) {
+        return self.reject(.payload_too_large, true, .body_too_large);
+    }
     return self.setBodyStorage(self.request_buffer[self.body_start..end], false);
 }
 
@@ -591,7 +603,8 @@ fn setBodyStorage(self: *ServerConn, storage: []u8, external: bool) Event {
     self.startPhase(self.last_now, self.limits.body_timeout);
     if (self.body_received == self.body_len) return self.completeRequest();
     if (self.expect_continue and self.version != .@"HTTP/1.0") {
-        self.queueContinue() catch return self.reject(.internal_server_error, false);
+        self.queueContinue() catch
+            return self.reject(.internal_server_error, false, .internal_error);
         self.expect_continue = false;
         return .need_more;
     }
@@ -613,13 +626,21 @@ fn parseHead(self: *ServerConn, _: Io.Timestamp) Event {
     ) catch |err| switch (err) {
         error.Incomplete => {
             if (self.readTooSmall(self.request_buffer.len - self.used)) {
-                return self.reject(.request_header_fields_too_large, true);
+                return self.reject(.request_header_fields_too_large, true, .head_too_large);
             }
             return .need_more;
         },
-        error.Invalid => return self.reject(.bad_request, true),
-        error.UnsupportedVersion => return self.reject(.http_version_not_supported, true),
-        error.TooManyHeaders => return self.reject(.request_header_fields_too_large, true),
+        error.Invalid => return self.reject(.bad_request, true, .malformed_head),
+        error.UnsupportedVersion => return self.reject(
+            .http_version_not_supported,
+            true,
+            .unsupported_version,
+        ),
+        error.TooManyHeaders => return self.reject(
+            .request_header_fields_too_large,
+            true,
+            .too_many_fields,
+        ),
     };
 
     self.version = parsed.head.version;
@@ -631,38 +652,39 @@ fn parseHead(self: *ServerConn, _: Io.Timestamp) Event {
     self.body_chunked = false;
     self.external_body = false;
 
-    const framing = h1.framing.request(self.version, self.head.headers) catch {
+    const framing = h1.framing.request(self.version, self.head.headers) catch |err| {
         // The framing is unknown, so a body may still arrive. Signal a drain.
         self.body_chunked = true;
-        return self.reject(.bad_request, true);
+        return self.framingReject(err);
     };
     switch (framing) {
         .none => self.body_len = 0,
         .length => |length| {
             if (length > std.math.maxInt(usize)) {
                 self.body_len = std.math.maxInt(usize);
-                return self.reject(.payload_too_large, true);
+                return self.reject(.payload_too_large, true, .body_too_large);
             }
             self.body_len = @intCast(length);
             if (self.body_len > self.limits.body_bytes) {
-                return self.reject(.payload_too_large, true);
+                return self.reject(.payload_too_large, true, .body_too_large);
             }
         },
         .chunked => {
             self.body_len = 0;
             self.body_chunked = true;
-            return self.reject(.not_implemented, true);
+            return self.reject(.not_implemented, true, .chunked_unsupported);
         },
     }
 
-    const host_value = h1.host(self.head.headers) catch return self.reject(.bad_request, true);
+    const host_value = h1.host(self.head.headers) catch
+        return self.reject(.bad_request, true, .invalid_host);
     if (self.version == .@"HTTP/1.1" and host_value == null) {
-        return self.reject(.bad_request, true);
+        return self.reject(.bad_request, true, .missing_host);
     }
     self.keep_alive = h1.persistent(self.version, self.head.headers);
 
     self.expect_continue = expectsContinue(self.head.headers) catch
-        return self.reject(.expectation_failed, true);
+        return self.reject(.expectation_failed, true, .unsupported_expectation);
 
     const arrived = self.used - self.body_start;
     if (arrived >= self.body_len) {
@@ -681,6 +703,30 @@ fn parseHead(self: *ServerConn, _: Io.Timestamp) Event {
     } };
 }
 
+fn framingReject(self: *ServerConn, err: h1.framing.Error) Event {
+    if (err == error.ConflictingFraming) {
+        return self.reject(.bad_request, true, .conflicting_framing);
+    }
+    if (err == error.InvalidContentLength) return self.lengthReject();
+    return self.reject(.bad_request, true, .invalid_framing);
+}
+
+fn lengthReject(self: *ServerConn) Event {
+    var parser: content_length.Parser = .{};
+    var values = self.head.headers.values("Content-Length");
+    while (values.next()) |value| {
+        parser.feed(value) catch |err| switch (err) {
+            error.Conflicting => {
+                return self.reject(.bad_request, true, .conflicting_length);
+            },
+            error.Invalid, error.Overflow => {
+                return self.reject(.bad_request, true, .invalid_length);
+            },
+        };
+    }
+    return self.reject(.bad_request, true, .invalid_length);
+}
+
 fn parseBody(self: *ServerConn) Event {
     if (self.body_received >= self.body_len) return self.completeRequest();
     if (self.external_body) {
@@ -688,7 +734,7 @@ fn parseBody(self: *ServerConn) Event {
         if (self.scratchBodyRead(remaining) and
             self.request_buffer.len - self.used < self.limits.min_read_bytes)
         {
-            return self.reject(.payload_too_large, true);
+            return self.reject(.payload_too_large, true, .body_too_large);
         }
         return .need_more;
     }
@@ -696,7 +742,7 @@ fn parseBody(self: *ServerConn) Event {
         self.request_buffer.len - self.used
     else
         self.body_target.len - self.body_received;
-    if (self.readTooSmall(free)) return self.reject(.payload_too_large, true);
+    if (self.readTooSmall(free)) return self.reject(.payload_too_large, true, .body_too_large);
     return .need_more;
 }
 
@@ -710,6 +756,7 @@ fn scratchBodyRead(self: *const ServerConn, remaining: usize) bool {
 
 fn completeRequest(self: *ServerConn) Event {
     self.phase = .app;
+    self.idle = false;
     self.phase_start = null;
     self.phase_deadline = null;
     return .{ .request = .{
@@ -721,7 +768,22 @@ fn completeRequest(self: *ServerConn) Event {
     } };
 }
 
-fn reject(self: *ServerConn, status: Status, drain: bool) Event {
+/// True while the input is only complete or partial empty lines. A bare CR is
+/// a possible CRLF prefix; it is not yet a request-line byte.
+fn onlyBlankLines(bytes: []const u8) bool {
+    for (bytes, 0..) |byte, index| {
+        const expected: u8 = if (index % 2 == 0) '\r' else '\n';
+        if (byte != expected) return false;
+    }
+    return true;
+}
+
+fn reject(
+    self: *ServerConn,
+    status: Status,
+    drain: bool,
+    reason: RejectReason,
+) Event {
     self.keep_alive = false;
     self.drain_close = drain and self.unreadBody();
     self.total_deadline = null;
@@ -731,7 +793,7 @@ fn reject(self: *ServerConn, status: Status, drain: bool) Event {
         return .closed;
     };
     self.phase = .response;
-    return .{ .reject = status };
+    return .{ .reject = .{ .status = status, .reason = reason } };
 }
 
 fn unreadBody(self: *const ServerConn) bool {
@@ -809,6 +871,8 @@ fn clearDeadlines(self: *ServerConn) void {
 }
 
 fn startInputDeadlines(self: *ServerConn, now: Io.Timestamp) void {
+    if (self.phase != .head) self.idle = false;
+    if (self.idle and onlyBlankLines(self.request_buffer[0..self.used])) return;
     if (self.total_deadline == null) {
         self.total_deadline = addDeadline(now, self.limits.total_timeout);
     }
@@ -940,7 +1004,7 @@ fn expectRequest(event: Event) !Request {
 
 fn expectReject(event: Event, status: Status) !void {
     switch (event) {
-        .reject => |got| try testing.expectEqual(status, got),
+        .reject => |got| try testing.expectEqual(status, got.status),
         else => return error.TestUnexpectedEvent,
     }
 }
@@ -1093,7 +1157,10 @@ test "a timeout is a 408 policy response" {
     t.clock.advance(2 * std.time.ns_per_s);
 
     switch (t.conn.tick(t.clock.now)) {
-        .reject => |status| try testing.expectEqual(Status.request_timeout, status),
+        .reject => |rejection| {
+            try testing.expectEqual(Status.request_timeout, rejection.status);
+            try testing.expectEqual(.request_timeout, rejection.reason);
+        },
         else => return error.TestExpectedTimeout,
     }
 }
@@ -1156,7 +1223,10 @@ test "start gives a silent connection a deadline" {
 
     t.clock.advance(6 * std.time.ns_per_s);
     switch (t.conn.tick(t.clock.now)) {
-        .reject => |status| try testing.expectEqual(Status.request_timeout, status),
+        .reject => |rejection| {
+            try testing.expectEqual(Status.request_timeout, rejection.status);
+            try testing.expectEqual(.request_timeout, rejection.reason);
+        },
         else => return error.TestExpectedTimeout,
     }
 }
@@ -1194,7 +1264,10 @@ test "idle and head timeouts are separate" {
 
     t.clock.advance(1000 * std.time.ns_per_ms);
     switch (t.conn.tick(t.clock.now)) {
-        .reject => |status| try testing.expectEqual(Status.request_timeout, status),
+        .reject => |rejection| {
+            try testing.expectEqual(Status.request_timeout, rejection.status);
+            try testing.expectEqual(.request_timeout, rejection.reason);
+        },
         else => return error.TestExpectedTimeout,
     }
 }
@@ -1538,4 +1611,148 @@ test "ResponseOptions.close owns the connection close" {
     try t.conn.respond(.{ .status = .ok, .close = true }, "");
     try testing.expectEqual(.close, std.meta.activeTag(try t.drain()));
     try testing.expectEqual(1, mem.count(u8, t.out(), "Connection: close"));
+}
+
+test "CRLF after keep-alive leaves the connection idle" {
+    var t: TestConn = undefined;
+    t.init(.{ .idle_timeout = .fromSeconds(60), .head_timeout = .fromSeconds(5) });
+    t.conn.start(t.clock.now);
+
+    _ = try expectRequest(try t.feed("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
+    try t.conn.respond(.{ .status = .ok }, "");
+    try testing.expectEqual(.keep_alive, std.meta.activeTag(try t.drain()));
+
+    try testing.expectEqual(.need_more, std.meta.activeTag(try t.feed("\r\n")));
+    try testing.expectEqual(
+        60 * std.time.ns_per_s,
+        t.conn.deadline().?.nanoseconds,
+    );
+    try testing.expectEqual(.closed, std.meta.activeTag(t.conn.eof(t.clock.now)));
+}
+
+test "trickled CRLF keeps the idle deadline until a request starts" {
+    var t: TestConn = undefined;
+    t.init(.{ .idle_timeout = .fromMilliseconds(100), .head_timeout = .fromSeconds(5) });
+    t.conn.start(t.clock.now);
+
+    try testing.expectEqual(.need_more, std.meta.activeTag(try t.feed("\r")));
+    t.clock.advance(10 * std.time.ns_per_ms);
+    try testing.expectEqual(.need_more, std.meta.activeTag(try t.feed("\n")));
+    t.clock.advance(100 * std.time.ns_per_ms);
+    switch (t.conn.tick(t.clock.now)) {
+        .reject => |rejection| {
+            try testing.expectEqual(.request_timeout, rejection.status);
+            try testing.expectEqual(.request_timeout, rejection.reason);
+        },
+        else => return error.TestExpectedTimeout,
+    }
+}
+
+test "CRLF followed by a request works normally" {
+    var t: TestConn = undefined;
+    t.init(.{ .idle_timeout = .fromSeconds(2), .head_timeout = .fromMilliseconds(100) });
+    t.conn.start(t.clock.now);
+
+    try testing.expectEqual(.need_more, std.meta.activeTag(try t.feed("\r\n\r\n")));
+    t.clock.advance(10 * std.time.ns_per_ms);
+    const request = try expectRequest(try t.feed("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
+    try testing.expectEqualStrings("/", request.head.target);
+    try testing.expect(t.conn.deadline().?.nanoseconds > t.clock.now.nanoseconds);
+}
+
+fn expectRejectReason(
+    t: *TestConn,
+    input: []const u8,
+    status: Status,
+    reason: RejectReason,
+) !void {
+    switch (try t.feed(input)) {
+        .reject => |rejection| {
+            try testing.expectEqual(status, rejection.status);
+            try testing.expectEqual(reason, rejection.reason);
+        },
+        else => return error.TestUnexpectedEvent,
+    }
+}
+
+test "rejection reasons distinguish parser and framing failures" {
+    var t: TestConn = undefined;
+
+    t = undefined;
+    t.init(.{});
+    try expectRejectReason(&t, "GET / HTTP/1.1\r\n\r\n", .bad_request, .missing_host);
+
+    t = undefined;
+    t.init(.{});
+    try expectRejectReason(&t, "GET HTTP/1.1\r\n\r\n", .bad_request, .malformed_head);
+
+    t = undefined;
+    t.init(.{});
+    try expectRejectReason(
+        &t,
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n",
+        .bad_request,
+        .conflicting_length,
+    );
+
+    t = undefined;
+    t.init(.{});
+    try expectRejectReason(
+        &t,
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: no\r\n\r\n",
+        .bad_request,
+        .invalid_length,
+    );
+
+    t = undefined;
+    t.init(.{});
+    try expectRejectReason(
+        &t,
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n",
+        .bad_request,
+        .conflicting_framing,
+    );
+
+    t = undefined;
+    t.init(.{});
+    try expectRejectReason(
+        &t,
+        "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n",
+        .not_implemented,
+        .chunked_unsupported,
+    );
+
+    t = undefined;
+    t.init(.{ .body_bytes = 16 });
+    try expectRejectReason(
+        &t,
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\n",
+        .payload_too_large,
+        .body_too_large,
+    );
+
+    t = undefined;
+    t.init(.{});
+    var full: [1024]u8 = undefined;
+    @memset(&full, 'A');
+    try expectRejectReason(&t, &full, .request_header_fields_too_large, .head_too_large);
+
+    t = undefined;
+    t.init(.{});
+    var fields: [17 * 8]u8 = undefined;
+    var used: usize = 0;
+    @memcpy(fields[used..][0..16], "GET / HTTP/1.1\r\n");
+    used += 16;
+    for (0..17) |_| {
+        @memcpy(fields[used..][0..6], "X: 1\r\n");
+        used += 6;
+    }
+    @memcpy(fields[used..][0..2], "\r\n");
+    used += 2;
+    try expectRejectReason(
+        &t,
+        fields[0..used],
+        .request_header_fields_too_large,
+        .too_many_fields,
+    );
 }
