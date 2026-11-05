@@ -359,14 +359,14 @@ pub const Client = struct {
             error.BrokenPipe,
             => .truncated,
             error.Canceled => .{ .local = .canceled },
-            error.InputFull, error.WouldBlock => .{ .local = .capacity },
+            error.InputFull, error.BufferTooSmall, error.WouldBlock => .{ .local = .capacity },
             error.OutOfMemory => .{ .local = .out_of_memory },
             else => .protocol,
         };
         switch (outcome) {
             .truncated, .protocol => self.connection_poisoned = true,
             .local => |local| switch (local) {
-                .out_of_memory => self.connection_poisoned = true,
+                .out_of_memory, .unusable => self.connection_poisoned = true,
                 .canceled, .capacity => {},
             },
             .data, .eof, .reset => {},
