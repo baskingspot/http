@@ -26,7 +26,6 @@ pub const Exchange = struct {
     response_options: ?h1.ServerConn.ResponseOptions = null,
     deferred: ?common.Deferred(Exchange) = null,
     deferred_deadline: ?Io.Timestamp = null,
-    deferred_timeout: Io.Duration = .zero,
     deferred_on_timeout: ?PolicyResponse = null,
     waker: ?common.Waker = null,
     /// Set by the readiness engine. The blocking engine has no wake loop.
@@ -35,6 +34,8 @@ pub const Exchange = struct {
     /// entry until `complete` returns. The engine resets it before the slot
     /// serves another request.
     arena: Allocator,
+    /// The engine's Io. Deferred deadlines start at the deferResponse call.
+    io: Io,
 
     /// The body may borrow `arena` or handler-owned memory. Either way, the
     /// bytes must stay valid until the response completes.
@@ -88,13 +89,17 @@ pub const Exchange = struct {
             copied.on_timeout.body = try self.arena.dupe(u8, copied.on_timeout.body);
         }
         self.deferred_on_timeout = copied.on_timeout;
+        self.deferred_deadline = if (copied.timeout.nanoseconds == 0)
+            null
+        else
+            Io.Clock.awake.now(self.io).addDuration(copied.timeout);
         self.deferred = .{ .context = context, .callback = callback, .cancel = cancel };
-        self.deferred_timeout = copied.timeout;
     }
 
     /// Copy this handle before returning from `handle` if a worker may outlive
-    /// the exchange. Calling `wake` on a completed exchange reads a cleared
-    /// field.
+    /// the exchange. The copy remains valid until the server is deinitialized;
+    /// the exchange field is cleared when the slot is reset. Calling `wake` on
+    /// a completed exchange reads that cleared field.
     pub fn wakeHandle(self: *const Exchange) ?common.Waker {
         return self.waker;
     }

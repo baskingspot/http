@@ -70,12 +70,13 @@ const Slot = struct {
     stream_body: []const u8 = &.{},
     stream_body_sent: usize = 0,
 
-    fn bindExchange(self: *Slot, id: usize) void {
+    fn bindExchange(self: *Slot, id: usize, io: Io) void {
         self.exchange = .{
             .id = id,
             .conn = &self.conn,
             .request = undefined,
             .arena = self.arena.allocator(),
+            .io = io,
             .defer_supported = true,
         };
     }
@@ -133,7 +134,7 @@ pub fn Server(comptime Waiter: type) type {
             errdefer for (slots[0..initialized]) |*slot| freeSlotBuffers(allocator, slot);
             for (slots, 0..) |*slot, index| {
                 slot.* = try makeSlot(allocator, config);
-                slot.bindExchange(index);
+                slot.bindExchange(index, io);
                 initialized += 1;
             }
 
@@ -495,7 +496,6 @@ pub fn Server(comptime Waiter: type) type {
             self.handler.vtable.handle(self.handler.ptr, &slot.exchange) catch |err| {
                 self.report(err);
                 slot.exchange.deferred_deadline = null;
-                slot.exchange.deferred_timeout = .zero;
                 slot.exchange.deferred_on_timeout = null;
                 if (slot.exchange.response_stream) |source| {
                     source.stream.close();
@@ -510,11 +510,6 @@ pub fn Server(comptime Waiter: type) type {
                 {
                     self.cancelDeferred(slot);
                 } else {
-                    if (slot.exchange.deferred_timeout.nanoseconds != 0) {
-                        slot.exchange.deferred_deadline = clock(self.io).addDuration(
-                            slot.exchange.deferred_timeout,
-                        );
-                    }
                     slot.state = .app_wait;
                     return true;
                 }
@@ -712,7 +707,6 @@ pub fn Server(comptime Waiter: type) type {
                 deferred.cancel(deferred.context);
             }
             slot.exchange.deferred_deadline = null;
-            slot.exchange.deferred_timeout = .zero;
             slot.exchange.deferred_on_timeout = null;
         }
 
@@ -770,7 +764,6 @@ pub fn Server(comptime Waiter: type) type {
                 }
 
                 slot.exchange.deferred_deadline = null;
-                slot.exchange.deferred_timeout = .zero;
                 slot.exchange.deferred_on_timeout = null;
                 if (slot.exchange.response_stream) |source| {
                     if (!self.startStream(slot, source)) {

@@ -190,7 +190,9 @@ test "response options copy borrowed headers" {
     try testing.expectEqual(Status.created, copied.status);
 }
 
-/// A wake handle from the engine. It is safe to call from another thread.
+/// A wake handle from the engine. It is safe to call from another thread and
+/// remains valid until the server is deinitialized. Copy it out of the
+/// exchange before returning from `handle`.
 pub const Waker = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
