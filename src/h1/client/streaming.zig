@@ -190,12 +190,12 @@ pub const Client = struct {
     }
 
     fn readBody(self: *Client) BodyError!BodyResult {
-        if (!self.active) return .eof;
+        if (!self.active) return error.EndOfStream;
         while (true) {
             // A slice returned on the previous call is still the current
             // slice. The next read releases it and advances the connection.
             if (self.pending.len != 0) self.pending = &.{};
-            if (self.body_eof) return .eof;
+            if (self.body_eof) return error.EndOfStream;
 
             var event = self.conn.next() catch |err| return self.bodyFailure(err);
             while (true) {
@@ -210,7 +210,7 @@ pub const Client = struct {
                     },
                     .done => {
                         self.body_eof = true;
-                        return .eof;
+                        return error.EndOfStream;
                     },
                     .need_more => event = self.readEvent() catch |err| return self.bodyFailure(err),
                     .response => {
@@ -284,16 +284,14 @@ pub const Client = struct {
             var drained: usize = 0;
             while (drained < max_drain_bytes) {
                 const result = self.readBody() catch |err| switch (err) {
+                    error.EndOfStream => break,
                     error.LocalCanceled, error.LocalCapacity => break,
                     else => {
                         self.dirty = true;
                         break;
                     },
                 };
-                switch (result) {
-                    .data => |bytes| drained += bytes.len,
-                    .eof => break,
-                }
+                drained += result.data.len;
             }
             if (!self.body_eof) self.dirty = true;
         }
@@ -402,14 +400,13 @@ test "streaming client copies a body that arrives after the head" {
     var got: [11]u8 = undefined;
     var used: usize = 0;
     while (true) {
-        switch (try response.body.read()) {
-            .data => |bytes| {
-                try testing.expect(bytes.len != 0);
-                @memcpy(got[used..][0..bytes.len], bytes);
-                used += bytes.len;
-            },
-            .eof => break,
-        }
+        const result = response.body.read() catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        try testing.expect(result.data.len != 0);
+        @memcpy(got[used..][0..result.data.len], result.data);
+        used += result.data.len;
     }
     try testing.expectEqualStrings("hello world", got[0..used]);
     response.body.close();
@@ -443,13 +440,12 @@ test "streaming client sends a static request body" {
     var got: [2]u8 = undefined;
     var used: usize = 0;
     while (true) {
-        switch (try response.body.read()) {
-            .data => |bytes| {
-                @memcpy(got[used..][0..bytes.len], bytes);
-                used += bytes.len;
-            },
-            .eof => break,
-        }
+        const result = response.body.read() catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        @memcpy(got[used..][0..result.data.len], result.data);
+        used += result.data.len;
     }
     try testing.expectEqualStrings("ok", got[0..used]);
     response.body.close();

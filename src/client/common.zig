@@ -92,14 +92,14 @@ pub const Local = enum {
 
 /// A successful body read. The slice is borrowed for the connection
 /// operation and is never empty.
-pub const BodyResult = union(enum) {
+pub const BodyResult = struct {
     data: []const u8,
-    eof,
 };
 
 /// Body failures carry no payload. A reset code or local cause is available
 /// from the Body that returned the error.
 pub const BodyError = error{
+    EndOfStream,
     Truncated,
     Protocol,
     Reset,

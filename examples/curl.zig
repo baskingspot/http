@@ -149,6 +149,7 @@ fn printResponse(io: Io, response: client.Response) !void {
 fn drain(body: http.client.Body, w: *Io.Writer) !void {
     while (true) {
         const result = body.read() catch |err| switch (err) {
+            error.EndOfStream => break,
             error.Reset => return error.StreamReset,
             error.Truncated => return error.TruncatedBody,
             error.Protocol => return error.ProtocolError,
@@ -157,9 +158,6 @@ fn drain(body: http.client.Body, w: *Io.Writer) !void {
             error.LocalOutOfMemory => return error.OutOfMemory,
             error.LocalUnusable => return error.ConnectionUnusable,
         };
-        switch (result) {
-            .data => |bytes| try w.writeAll(bytes),
-            .eof => break,
-        }
+        try w.writeAll(result.data);
     }
 }

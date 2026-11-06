@@ -378,7 +378,7 @@ pub const Client = struct {
     }
 
     fn readBody(self: *Client) shared.BodyError!shared.BodyResult {
-        if (!self.active) return .eof;
+        if (!self.active) return error.EndOfStream;
 
         while (true) {
             if (self.pending.len != 0) {
@@ -388,11 +388,11 @@ pub const Client = struct {
                 self.releasePending() catch |err| return self.bodyFailure(err);
                 if (self.remote_end) {
                     self.body_eof = true;
-                    return .eof;
+                    return error.EndOfStream;
                 }
             }
 
-            if (self.body_eof) return .eof;
+            if (self.body_eof) return error.EndOfStream;
 
             if (self.pending_body.len != 0) {
                 const accepted = self.session.submitData(
@@ -426,7 +426,7 @@ pub const Client = struct {
                         self.releasePending() catch |err| return self.bodyFailure(err);
                         if (self.remote_end) {
                             self.body_eof = true;
-                            return .eof;
+                            return error.EndOfStream;
                         }
                         continue;
                     }
@@ -442,7 +442,7 @@ pub const Client = struct {
                         self.remote_end = true;
                         self.body_eof = true;
                         self.pending_body = &.{};
-                        return .eof;
+                        return error.EndOfStream;
                     }
                 },
                 .response => |response| {
@@ -458,7 +458,7 @@ pub const Client = struct {
                         self.remote_end = true;
                         self.body_eof = true;
                         self.pending_body = &.{};
-                        return .eof;
+                        return error.EndOfStream;
                     }
                 },
                 .settings => self.flushFrames() catch |err| return self.bodyFailure(err),
@@ -481,7 +481,7 @@ pub const Client = struct {
                     if (reset.code == .no_error and self.remote_end) {
                         self.pending_body = &.{};
                         self.body_eof = true;
-                        return .eof;
+                        return error.EndOfStream;
                     }
                     self.body_reset_code = @intFromEnum(reset.code);
                     return error.Reset;
@@ -715,6 +715,13 @@ pub const Client = struct {
 
 fn ignoreError(_: anyerror) void {}
 
+fn nextBody(body: Body) !?shared.BodyResult {
+    return body.read() catch |err| switch (err) {
+        error.EndOfStream => null,
+        else => return err,
+    };
+}
+
 const body_vtable: Body.VTable = .{
     .read = bodyRead,
     .resetCode = Client.bodyResetCode,
@@ -873,14 +880,10 @@ test "the blocking client streams a response body" {
 
     var received: [expected.len]u8 = undefined;
     var used: usize = 0;
-    while (true) {
-        switch (try response.body.read()) {
-            .data => |bytes| {
-                @memcpy(received[used..][0..bytes.len], bytes);
-                used += bytes.len;
-            },
-            .eof => break,
-        }
+    while (try nextBody(response.body)) |result| {
+        const bytes = result.data;
+        @memcpy(received[used..][0..bytes.len], bytes);
+        used += bytes.len;
     }
     try testing.expectEqual(@as(usize, expected.len), used);
     try testing.expectEqualStrings(expected, &received);
@@ -923,15 +926,11 @@ test "the blocking client releases flow control while streaming" {
     defer response.body.close();
 
     var offset: usize = 0;
-    while (true) {
-        switch (try response.body.read()) {
-            .data => |bytes| {
-                try testing.expect(offset + bytes.len <= big.len);
-                try testing.expectEqualSlices(u8, big[offset..][0..bytes.len], bytes);
-                offset += bytes.len;
-            },
-            .eof => break,
-        }
+    while (try nextBody(response.body)) |result| {
+        const bytes = result.data;
+        try testing.expect(offset + bytes.len <= big.len);
+        try testing.expectEqualSlices(u8, big[offset..][0..bytes.len], bytes);
+        offset += bytes.len;
     }
     try testing.expectEqual(big.len, offset);
 }
@@ -968,14 +967,10 @@ test "the blocking client sends a request body" {
 
     var received: [payload.len]u8 = undefined;
     var used: usize = 0;
-    while (true) {
-        switch (try response.body.read()) {
-            .data => |bytes| {
-                @memcpy(received[used..][0..bytes.len], bytes);
-                used += bytes.len;
-            },
-            .eof => break,
-        }
+    while (try nextBody(response.body)) |result| {
+        const bytes = result.data;
+        @memcpy(received[used..][0..bytes.len], bytes);
+        used += bytes.len;
     }
     try testing.expectEqualStrings(payload, received[0..used]);
 }
@@ -1012,14 +1007,10 @@ test "the blocking client sends a request body through flow control" {
     defer response.body.close();
 
     var offset: usize = 0;
-    while (true) {
-        switch (try response.body.read()) {
-            .data => |bytes| {
-                try testing.expectEqualSlices(u8, payload[offset..][0..bytes.len], bytes);
-                offset += bytes.len;
-            },
-            .eof => break,
-        }
+    while (try nextBody(response.body)) |result| {
+        const bytes = result.data;
+        try testing.expectEqualSlices(u8, payload[offset..][0..bytes.len], bytes);
+        offset += bytes.len;
     }
     try testing.expectEqual(payload.len, offset);
 }
@@ -1055,17 +1046,15 @@ test "closing an incomplete response resets the stream and is idempotent" {
         .target = "/",
     });
 
-    switch (try response.body.read()) {
-        .data => |bytes| try testing.expect(bytes.len > 0),
-        .eof => return error.UnexpectedBodyResult,
-    }
+    const first = try response.body.read();
+    try testing.expect(first.data.len > 0);
     const stream_id = client.streamId();
     try testing.expect(stream_id != 0);
     response.body.close();
     try testing.expectEqual(stream_id, client.streamId());
     try testing.expect(client.reset_sent);
     response.body.close();
-    try testing.expectEqual(.eof, try response.body.read());
+    try testing.expectError(error.EndOfStream, response.body.read());
 }
 
 test "connection poison is separate from request commit" {
@@ -1124,7 +1113,7 @@ test "a no-body response can be followed by another request" {
             .authority = "example.com",
             .target = "/",
         });
-        try testing.expectEqual(.eof, try response.body.read());
+        try testing.expectError(error.EndOfStream, response.body.read());
         response.body.close();
     }
     try testing.expectEqual(@as(usize, 2), harness.app.seen);
@@ -1196,13 +1185,11 @@ test "closing after remote END_STREAM releases without resetting" {
         .authority = "example.com",
         .target = "/",
     });
-    switch (try response.body.read()) {
-        .data => |bytes| try testing.expect(bytes.len > 0),
-        .eof => return error.UnexpectedBodyResult,
-    }
+    const first = try response.body.read();
+    try testing.expect(first.data.len > 0);
     response.body.close();
     try testing.expect(!client.reset_sent);
-    try testing.expectEqual(.eof, try response.body.read());
+    try testing.expectError(error.EndOfStream, response.body.read());
 }
 
 test "the blocking client sends a static request body" {
@@ -1235,14 +1222,10 @@ test "the blocking client sends a static request body" {
     try testing.expectEqual(Protocol.h2, response.head.protocol);
     var got: [13]u8 = undefined;
     var used: usize = 0;
-    while (true) {
-        switch (try response.body.read()) {
-            .data => |bytes| {
-                @memcpy(got[used..][0..bytes.len], bytes);
-                used += bytes.len;
-            },
-            .eof => break,
-        }
+    while (try nextBody(response.body)) |result| {
+        const bytes = result.data;
+        @memcpy(got[used..][0..bytes.len], bytes);
+        used += bytes.len;
     }
     try testing.expectEqualStrings("body response", got[0..used]);
     response.body.close();
