@@ -138,10 +138,14 @@ or cipher transform.
 ```sh
 just curl http://127.0.0.1:8080/
 just curl --http2 http://127.0.0.1:8081/
-just curl https://127.0.0.1:8445/
+just curl --http1.1 https://127.0.0.1:8445/
+just curl -d hello -X POST http://127.0.0.1:8080/
+just curl -I http://127.0.0.1:8080/
+just curl -s -H 'X-Test: value' http://127.0.0.1:8080/
 ```
 
-One GET, headers to stdout before the body, body streamed to stdout. Hosts are
-IP literals. `--http2` is h2c prior knowledge; HTTPS offers `h2` and
-`http/1.1` through ALPN. HTTPS uses `tls_std` with no chain verification
-because this is a local experiment, not a curl replacement.
+Headers go to stdout before the body; the body streams. `-s` suppresses the
+headers. Hosts are IP literals. `--http2` is h2c prior knowledge on cleartext
+and forces h2 in ALPN; `--http1.1` forces h1. `-d` sends a static request body,
+`-X` changes the method, `-H` adds a header, and `-I` sends HEAD. HTTPS uses
+`tls_std` with no chain verification because this is a local experiment.

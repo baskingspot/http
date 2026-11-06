@@ -258,7 +258,7 @@ interop:
     done
     zig build interop-client
 
-[doc("Run the tiny curl example: just curl [--http2] <url>")]
+[doc("Run the tiny curl example: just curl [-s] [-I] [-X method] [-d body] [-H header] <url>")]
 [group("example")]
 curl *ARGS:
     zig build example-curl -- {{ ARGS }}
