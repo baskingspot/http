@@ -224,6 +224,8 @@ example-h2-tls-readiness:
 [group("example")]
 check-example:
     zig build example-bin
+    zig build example-sse-bin
+    zig build example-stream-bin
     zig build example-poll-bin
     zig build example-epoll-bin
     zig build example-kqueue-bin
@@ -249,14 +251,14 @@ interop:
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
     for _ in {1..50}; do
-        if curl -fsS http://127.0.0.1:8091/ >/dev/null 2>&1; then
+        if zig build example-curl -- -s http://127.0.0.1:8091/ >/dev/null 2>&1; then
             break
         fi
         sleep 0.1
     done
     zig build interop-client
 
-[doc("Run the tiny curl example: just curl [--http2] <url>")]
+[doc("Run the tiny curl example: just curl [-s] [-I] [-X method] [-d body] [-H header] <url>")]
 [group("example")]
 curl *ARGS:
     zig build example-curl -- {{ ARGS }}
@@ -265,6 +267,21 @@ curl *ARGS:
 [group("example")]
 example-unified:
     zig build example-unified
+
+[doc("Run the pull-based SSE example on 127.0.0.1:8090")]
+[group("example")]
+example-sse:
+    zig build example-sse
+
+[doc("Run the poll-engine SSE example on 127.0.0.1:8092")]
+[group("example")]
+example-sse-poll:
+    zig build example-sse-poll
+
+[doc("Run the pull-based file transform example: just example-stream README.md")]
+[group("example")]
+example-stream *ARGS:
+    zig build example-stream -- {{ ARGS }}
 
 [doc("Run the HTTP/1.1 TLS example server on 127.0.0.1:8444")]
 [group("example")]
@@ -286,7 +303,7 @@ interop-tls:
     trap 'pkill -P "$server_pid" 2>/dev/null || true; pkill -x http1-tls 2>/dev/null || true; pkill -f "\\.zig-cache/.*/http1-tls$" 2>/dev/null || true; kill "$server_pid" 2>/dev/null || true' EXIT
     ready=0
     for _ in {1..300}; do
-        if curl -kfsS https://127.0.0.1:8444/ >/dev/null 2>&1; then
+        if zig build example-curl -- -s https://127.0.0.1:8444/ >/dev/null 2>&1; then
             ready=1
             break
         fi

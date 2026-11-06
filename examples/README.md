@@ -4,7 +4,7 @@
 
 ```sh
 just example
-curl -v http://127.0.0.1:8080/
+just curl http://127.0.0.1:8080/
 ```
 
 The server uses `h1.engine.blocking` over `std.Io`. The accept loop owns the
@@ -112,15 +112,40 @@ The TLS listener offers `h2` and `http/1.1` through ALPN and dispatches the
 blocking engine after the handshake. The cleartext listener reads the HTTP/2
 connection preface; anything else is HTTP/1.1.
 
+## Pull-based response streams
+
+```sh
+just example-sse             # blocking SSE, 127.0.0.1:8090
+just example-sse-poll        # poll-engine SSE, 127.0.0.1:8092
+just curl -s http://127.0.0.1:8090/
+just curl -s http://127.0.0.1:8092/
+just example-stream README.md
+just curl -s http://127.0.0.1:8091/ > /tmp/readme.xor
+```
+
+The handler returns a `http.stream.ReadStream`; the engine writes the head,
+pulls one chunk when it can accept it, and frames an unknown length as a
+close-delimited HTTP/1.1 response with `Connection: close`. The SSE examples feed the stream through an `Io.Queue` pipe and start the
+producer with `Io.async`, so closing the queue wakes the producer with
+`error.Closed`. `sse_poll.zig` uses `h1.engine.poll`; its source returns
+`pending` when the queue is empty, and the engine checks the queue again
+without blocking the other slots. `stream_pipeline.zig` reads a file in 16 KiB
+chunks and XORs each chunk before returning it, standing in for a compression
+or cipher transform.
+
 ## Tiny curl
 
 ```sh
 just curl http://127.0.0.1:8080/
 just curl --http2 http://127.0.0.1:8081/
-just curl https://127.0.0.1:8445/
+just curl --http1.1 https://127.0.0.1:8445/
+just curl -d hello -X POST http://127.0.0.1:8080/
+just curl -I http://127.0.0.1:8080/
+just curl -s -H 'X-Test: value' http://127.0.0.1:8080/
 ```
 
-One GET, headers to stdout before the body, body streamed to stdout. Hosts are
-IP literals. `--http2` is h2c prior knowledge; HTTPS offers `h2` and
-`http/1.1` through ALPN. HTTPS uses `tls_std` with no chain verification
-because this is a local experiment, not a curl replacement.
+Headers go to stdout before the body; the body streams. `-s` suppresses the
+headers. Hosts are IP literals. `--http2` is h2c prior knowledge on cleartext
+and forces h2 in ALPN; `--http1.1` forces h1. `-d` sends a static request body,
+`-X` changes the method, `-H` adds a header, and `-I` sends HEAD. HTTPS uses
+`tls_std` with no chain verification because this is a local experiment.

@@ -19,13 +19,16 @@ const h1 = @import("../root.zig");
 pub const Request = common.Request;
 pub const ResponseHead = common.ResponseHead;
 pub const Body = common.Body;
-pub const BodyRead = common.BodyRead;
+pub const BodyResult = common.BodyResult;
+pub const BodyError = common.BodyError;
 pub const Local = common.Local;
 pub const Response = common.Response;
 pub const Config = common.Config;
 
 const body_vtable: Body.VTable = .{
     .read = Client.bodyRead,
+    .resetCode = Client.bodyResetCode,
+    .localCause = Client.bodyLocalCause,
     .close = Client.bodyClose,
 };
 
@@ -41,6 +44,7 @@ pub const Client = struct {
     max_headers: usize,
     active: bool,
     body_eof: bool,
+    body_local: ?Local,
     dirty: bool,
     pending: []const u8,
 
@@ -66,6 +70,7 @@ pub const Client = struct {
             .max_headers = config.max_headers,
             .active = false,
             .body_eof = false,
+            .body_local = null,
             .dirty = false,
             .pending = &.{},
         };
@@ -90,6 +95,7 @@ pub const Client = struct {
 
         _ = self.arena.reset(.free_all);
         self.body_eof = false;
+        self.body_local = null;
         self.pending = &.{};
 
         const method = Method.parse(value.method_token);
@@ -178,18 +184,18 @@ pub const Client = struct {
         return if (n == 0) self.conn.eof() else self.conn.received(n);
     }
 
-    fn bodyRead(ptr: *anyopaque) BodyRead {
+    fn bodyRead(ptr: *anyopaque) BodyError!BodyResult {
         const self: *Client = @ptrCast(@alignCast(ptr));
         return self.readBody();
     }
 
-    fn readBody(self: *Client) BodyRead {
-        if (!self.active) return .eof;
+    fn readBody(self: *Client) BodyError!BodyResult {
+        if (!self.active) return error.EndOfStream;
         while (true) {
             // A slice returned on the previous call is still the current
             // slice. The next read releases it and advances the connection.
             if (self.pending.len != 0) self.pending = &.{};
-            if (self.body_eof) return .eof;
+            if (self.body_eof) return error.EndOfStream;
 
             var event = self.conn.next() catch |err| return self.bodyFailure(err);
             while (true) {
@@ -197,54 +203,70 @@ pub const Client = struct {
                     .body => |bytes| {
                         if (bytes.len == 0) {
                             self.dirty = true;
-                            return .protocol;
+                            return error.Protocol;
                         }
                         self.pending = bytes;
                         return .{ .data = bytes };
                     },
                     .done => {
                         self.body_eof = true;
-                        return .eof;
+                        return error.EndOfStream;
                     },
                     .need_more => event = self.readEvent() catch |err| return self.bodyFailure(err),
                     .response => {
                         self.dirty = true;
-                        return .protocol;
+                        return error.Protocol;
                     },
                     .closed => {
                         self.dirty = true;
-                        return .truncated;
+                        return error.Truncated;
                     },
                 }
             }
         }
     }
 
-    fn bodyFailure(self: *Client, err: anyerror) BodyRead {
-        const outcome = mapBodyError(err);
-        switch (outcome) {
-            .data, .eof, .reset => {},
-            .truncated, .protocol => self.dirty = true,
-            .local => |local| switch (local) {
-                .canceled, .capacity => {},
-                .out_of_memory, .unusable => self.dirty = true,
-            },
-        }
-        return outcome;
-    }
-
-    fn mapBodyError(err: anyerror) BodyRead {
+    fn bodyFailure(self: *Client, err: anyerror) BodyError {
         return switch (err) {
-            error.Canceled => .{ .local = .canceled },
-            error.OutOfMemory => .{ .local = .out_of_memory },
-            error.BufferTooSmall => .{ .local = .capacity },
-            error.WouldBlock => .{ .local = .unusable },
+            error.Canceled => blk: {
+                self.body_local = .canceled;
+                break :blk error.LocalCanceled;
+            },
+            error.OutOfMemory => blk: {
+                self.body_local = .out_of_memory;
+                self.dirty = true;
+                break :blk error.LocalOutOfMemory;
+            },
+            error.BufferTooSmall => blk: {
+                self.body_local = .capacity;
+                break :blk error.LocalCapacity;
+            },
+            error.WouldBlock => blk: {
+                self.body_local = .unusable;
+                self.dirty = true;
+                break :blk error.LocalUnusable;
+            },
             error.Incomplete,
             error.EndOfStream,
             error.ReadFailed,
-            => .truncated,
-            else => .protocol,
+            => blk: {
+                self.dirty = true;
+                break :blk error.Truncated;
+            },
+            else => blk: {
+                self.dirty = true;
+                break :blk error.Protocol;
+            },
         };
+    }
+
+    fn bodyResetCode(_: *anyopaque) ?u32 {
+        return null;
+    }
+
+    fn bodyLocalCause(ptr: *anyopaque) ?Local {
+        const self: *Client = @ptrCast(@alignCast(ptr));
+        return self.body_local;
     }
 
     fn bodyClose(ptr: *anyopaque) void {
@@ -261,14 +283,15 @@ pub const Client = struct {
             const max_drain_bytes = 1024 * 1024;
             var drained: usize = 0;
             while (drained < max_drain_bytes) {
-                switch (self.readBody()) {
-                    .data => |bytes| drained += bytes.len,
-                    .eof => break,
-                    .reset, .truncated, .protocol, .local => {
+                const result = self.readBody() catch |err| switch (err) {
+                    error.EndOfStream => break,
+                    error.LocalCanceled, error.LocalCapacity => break,
+                    else => {
                         self.dirty = true;
                         break;
                     },
-                }
+                };
+                drained += result.data.len;
             }
             if (!self.body_eof) self.dirty = true;
         }
@@ -377,15 +400,13 @@ test "streaming client copies a body that arrives after the head" {
     var got: [11]u8 = undefined;
     var used: usize = 0;
     while (true) {
-        switch (response.body.read()) {
-            .data => |bytes| {
-                try testing.expect(bytes.len != 0);
-                @memcpy(got[used..][0..bytes.len], bytes);
-                used += bytes.len;
-            },
-            .eof => break,
-            else => return error.UnexpectedBodyResult,
-        }
+        const result = response.body.read() catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        try testing.expect(result.data.len != 0);
+        @memcpy(got[used..][0..result.data.len], result.data);
+        used += result.data.len;
     }
     try testing.expectEqualStrings("hello world", got[0..used]);
     response.body.close();
@@ -419,14 +440,12 @@ test "streaming client sends a static request body" {
     var got: [2]u8 = undefined;
     var used: usize = 0;
     while (true) {
-        switch (response.body.read()) {
-            .data => |bytes| {
-                @memcpy(got[used..][0..bytes.len], bytes);
-                used += bytes.len;
-            },
-            .eof => break,
-            else => return error.UnexpectedBodyResult,
-        }
+        const result = response.body.read() catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        @memcpy(got[used..][0..result.data.len], result.data);
+        used += result.data.len;
     }
     try testing.expectEqualStrings("ok", got[0..used]);
     response.body.close();

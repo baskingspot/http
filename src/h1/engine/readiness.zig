@@ -25,6 +25,7 @@ const wait_poll_test = @import("../../transport/wait_poll.zig");
 const wait_kqueue_test = @import("../../transport/wait_kqueue.zig");
 const common = @import("../../engine/common.zig");
 const api = @import("common.zig");
+const stream_mod = @import("../../engine/stream.zig");
 
 // ast-grep-ignore: public-struct-field-default -- options bag; the defaults are the buffer policy
 pub const Config = struct {
@@ -49,7 +50,7 @@ pub const Config = struct {
     tcp_defer_accept: bool = false,
 };
 
-const State = enum { free, read, write, drain };
+const State = enum { free, read, write, stream_wait, drain };
 
 const Slot = struct {
     conn: h1.ServerConn,
@@ -62,6 +63,12 @@ const Slot = struct {
     drain: []u8,
     exchange: Exchange,
     exchange_active: bool = false,
+    response_stream: ?stream_mod.ResponseStream = null,
+    response_options: ?h1.ServerConn.ResponseOptions = null,
+    stream_head_len: usize = 0,
+    stream_head_sent: usize = 0,
+    stream_body: []const u8 = &.{},
+    stream_body_sent: usize = 0,
 
     fn bindExchange(self: *Slot, id: usize) void {
         self.exchange = .{
@@ -225,7 +232,7 @@ pub fn Server(comptime Waiter: type) type {
                     continue;
                 }
                 const interest: wait.Interest = switch (slot.state) {
-                    .read, .drain => .initOne(.read),
+                    .read, .drain, .stream_wait => .initOne(.read),
                     .write => .initOne(.write),
                     .free => unreachable,
                 };
@@ -239,6 +246,9 @@ pub fn Server(comptime Waiter: type) type {
                 if (slot.state == .free) continue;
                 if (slot.conn.deadline()) |at| {
                     deadline = earliest(deadline, at);
+                }
+                if (slot.state == .stream_wait) {
+                    deadline = earliest(deadline, now.addDuration(.fromMilliseconds(50)));
                 }
             }
             const at = deadline orelse return -1;
@@ -254,6 +264,12 @@ pub fn Server(comptime Waiter: type) type {
             }
             for (self.slots) |*slot| {
                 if (slot.state == .free) continue;
+                if (slot.state == .stream_wait) {
+                    slot.state = .write;
+                    self.writeStreamSlot(slot, now);
+                    continue;
+                }
+                if (slot.response_stream != null) continue;
                 const at = slot.conn.deadline() orelse continue;
                 if (now.durationTo(at).nanoseconds > 0) continue;
                 switch (slot.conn.tick(now)) {
@@ -297,6 +313,13 @@ pub fn Server(comptime Waiter: type) type {
 
         fn closeSlot(self: *Self, slot: *Slot) void {
             if (slot.state == .free) return;
+            if (slot.response_stream) |source| {
+                source.stream.close();
+                slot.response_stream = null;
+                slot.response_options = null;
+            }
+            slot.exchange.response_stream = null;
+            slot.exchange.response_options = null;
             self.finishExchange(slot);
             self.wait.remove(.{ .slot = slot.exchange.id });
             P.close(slot.fd);
@@ -349,6 +372,14 @@ pub fn Server(comptime Waiter: type) type {
                     }
                     if (slot.state == .free) return;
                     if (ready.flags.contains(.failed) or ready.flags.contains(.hup)) {
+                        self.closeSlot(slot);
+                    }
+                },
+                .stream_wait => {
+                    if (ready.flags.contains(.failed) or
+                        ready.flags.contains(.hup) or
+                        ready.flags.contains(.readable))
+                    {
                         self.closeSlot(slot);
                     }
                 },
@@ -416,7 +447,19 @@ pub fn Server(comptime Waiter: type) type {
             slot.exchange_active = true;
             self.handler.vtable.handle(self.handler.ptr, &slot.exchange) catch |err| {
                 self.report(err);
+                if (slot.exchange.response_stream) |source| {
+                    source.stream.close();
+                    slot.exchange.response_stream = null;
+                    slot.exchange.response_options = null;
+                }
             };
+            if (slot.exchange.response_stream) |source| {
+                if (!self.startStream(slot, source)) {
+                    self.closeSlot(slot);
+                    return false;
+                }
+                return true;
+            }
             if (slot.conn.sendSlices().head.len == 0) {
                 slot.exchange.respond(.{ .status = .internal_server_error }, "") catch {
                     self.closeSlot(slot);
@@ -441,6 +484,10 @@ pub fn Server(comptime Waiter: type) type {
         }
 
         fn writeSlot(self: *Self, slot: *Slot, now: Io.Timestamp) void {
+            if (slot.response_stream != null) {
+                self.writeStreamSlot(slot, now);
+                return;
+            }
             while (true) {
                 const slices = slot.conn.sendSlices();
                 if (slices.head.len == 0 and slices.body.len == 0) {
@@ -487,6 +534,108 @@ pub fn Server(comptime Waiter: type) type {
                         return;
                     },
                 }
+            }
+        }
+
+        fn startStream(
+            self: *Self,
+            slot: *Slot,
+            source: stream_mod.ResponseStream,
+        ) bool {
+            _ = self;
+            const options = slot.exchange.response_options orelse return false;
+            var fixed = Io.Writer.fixed(slot.response_head);
+            var writer: h1.Writer = .init(&fixed);
+            writer.statusLine(slot.conn.negotiatedVersion(), options.status) catch return false;
+            if (options.content_type) |value| {
+                writer.field("Content-Type", value) catch return false;
+            }
+            for (options.headers) |header| {
+                writer.field(header.name, header.value) catch return false;
+            }
+            writer.field("Connection", "close") catch return false;
+            if (source.content_length) |length| {
+                writer.contentLength(length) catch return false;
+            }
+            writer.endFields() catch return false;
+
+            slot.response_stream = source;
+            slot.response_options = options;
+            slot.stream_head_len = fixed.buffered().len;
+            slot.stream_head_sent = 0;
+            slot.stream_body = &.{};
+            slot.stream_body_sent = 0;
+            slot.state = .write;
+            return true;
+        }
+
+        fn writeStreamSlot(self: *Self, slot: *Slot, now: Io.Timestamp) void {
+            _ = now;
+            const source = slot.response_stream orelse {
+                self.closeSlot(slot);
+                return;
+            };
+            while (true) {
+                if (slot.stream_head_sent < slot.stream_head_len) {
+                    const n = P.send(
+                        slot.fd,
+                        slot.response_head[slot.stream_head_sent..slot.stream_head_len],
+                        "",
+                    ) catch |err| switch (err) {
+                        error.WouldBlock => return,
+                        else => {
+                            self.closeSlot(slot);
+                            return;
+                        },
+                    };
+                    if (n == 0) {
+                        self.closeSlot(slot);
+                        return;
+                    }
+                    slot.stream_head_sent += n;
+                    continue;
+                }
+
+                if (slot.stream_body_sent < slot.stream_body.len) {
+                    const n = P.send(
+                        slot.fd,
+                        "",
+                        slot.stream_body[slot.stream_body_sent..],
+                    ) catch |err| switch (err) {
+                        error.WouldBlock => return,
+                        else => {
+                            self.closeSlot(slot);
+                            return;
+                        },
+                    };
+                    if (n == 0) {
+                        self.closeSlot(slot);
+                        return;
+                    }
+                    slot.stream_body_sent += n;
+                    continue;
+                }
+
+                const result = source.stream.next() catch |err| switch (err) {
+                    error.EndOfStream => {
+                        self.closeSlot(slot);
+                        return;
+                    },
+                    error.Pending => {
+                        slot.state = .stream_wait;
+                        return;
+                    },
+                    else => {
+                        self.closeSlot(slot);
+                        return;
+                    },
+                };
+                if (result.data.len == 0) {
+                    self.closeSlot(slot);
+                    return;
+                }
+                slot.stream_body = result.data;
+                slot.stream_body_sent = 0;
             }
         }
 

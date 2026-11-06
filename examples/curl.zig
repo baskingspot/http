@@ -23,19 +23,68 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len < 2 or args.len > 3 or
-        (args.len == 3 and !mem.eql(u8, args[1], "--http2")))
-    {
-        print("usage: curl [--http2] <http://ip[:port]/path | https://ip[:port]/path>\n", .{});
-        return error.InvalidArguments;
+
+    var http2 = false;
+    var http1 = false;
+    var silent = false;
+    var head = false;
+    var method: ?[]const u8 = null;
+    var body: ?[]const u8 = null;
+    var url_text: ?[]const u8 = null;
+    const headers = try arena.alloc(http.Header, args.len);
+    var header_count: usize = 0;
+
+    var index: usize = 1;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (mem.eql(u8, arg, "--http2")) {
+            http2 = true;
+        } else if (mem.eql(u8, arg, "--http1.1")) {
+            http1 = true;
+        } else if (mem.eql(u8, arg, "-s") or mem.eql(u8, arg, "--silent")) {
+            silent = true;
+        } else if (mem.eql(u8, arg, "-I") or mem.eql(u8, arg, "--head")) {
+            head = true;
+        } else if (mem.eql(u8, arg, "-X") or mem.eql(u8, arg, "--request")) {
+            index += 1;
+            if (index == args.len) return usage();
+            method = args[index];
+        } else if (mem.eql(u8, arg, "-d") or mem.eql(u8, arg, "--data")) {
+            index += 1;
+            if (index == args.len) return usage();
+            body = args[index];
+        } else if (mem.eql(u8, arg, "-H") or mem.eql(u8, arg, "--header")) {
+            index += 1;
+            if (index == args.len) return usage();
+            const colon = mem.findScalar(u8, args[index], ':') orelse return error.InvalidHeader;
+            const name = mem.trim(u8, args[index][0..colon], " \t");
+            const value = mem.trim(u8, args[index][colon + 1 ..], " \t");
+            if (name.len == 0 or name[0] == ':') return error.InvalidHeader;
+            const lower = try arena.dupe(u8, name);
+            for (lower) |*byte| byte.* = std.ascii.toLower(byte.*);
+            headers[header_count] = .{ .name = lower, .value = value };
+            header_count += 1;
+        } else if (arg.len != 0 and arg[0] == '-') {
+            return usage();
+        } else if (url_text == null) {
+            url_text = arg;
+        } else {
+            return usage();
+        }
     }
-    const url_text = args[args.len - 1];
-    const url = try parseUrl(arena, url_text);
+
+    if (http1 and http2) return usage();
+    if (head and body != null) return usage();
+
+    const text = url_text orelse return usage();
+    const url = try parseUrl(arena, text);
     const request: client.Request = .{
-        .method_token = "GET",
+        .method_token = if (head) "HEAD" else (method orelse if (body != null) "POST" else "GET"),
         .scheme = if (url.https) .https else .http,
         .authority = url.authority,
         .target = url.target,
+        .headers = headers[0..header_count],
+        .body = body orelse "",
     };
 
     if (url.https) {
@@ -44,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
         try conn.connect(io, stream, .{
             .host = null,
             .verify = .insecure,
-            .alpn = &.{ "h2", "http/1.1" },
+            .alpn = if (http2) &.{"h2"} else if (http1) &.{"http/1.1"} else &.{ "h2", "http/1.1" },
         });
         defer {
             conn.deinit();
@@ -64,14 +113,14 @@ pub fn main(init: std.process.Init) !void {
         });
         defer http_client.deinit();
         const response = try http_client.request(request);
-        try printResponse(io, response);
+        try printResponse(io, response, silent);
     } else {
         const stream = try url.address.connect(io, .{ .mode = .stream });
         defer stream.close(io);
-        var write_buffer: [4 * 1024]u8 = undefined;
+        var write_buffer: [4096]u8 = undefined;
         var stream_writer = stream.writer(io, &write_buffer);
         var stream_reader = stream.reader(io, &.{});
-        const protocol: client.Protocol = if (args.len == 3) .h2 else .h1;
+        const protocol: client.Protocol = if (http2) .h2 else .h1;
         var http_client: client.Client = undefined;
         try http_client.init(&stream_reader.interface, &stream_writer.interface, .{
             .protocol = protocol,
@@ -79,12 +128,17 @@ pub fn main(init: std.process.Init) !void {
         });
         defer http_client.deinit();
         const response = try http_client.request(request);
-        try printResponse(io, response);
+        try printResponse(io, response, silent);
     }
 }
 
-fn urlIsHttps(text: []const u8) bool {
-    return mem.startsWith(u8, text, "https://");
+fn usage() error{InvalidArguments} {
+    print(
+        "usage: curl [-s] [-I] [-X method] [-d body] [-H 'Name: value'] " ++
+            "[--http1.1|--http2] <url>\n",
+        .{},
+    );
+    return error.InvalidArguments;
 }
 
 const Url = struct {
@@ -128,19 +182,21 @@ fn parseUrl(arena: Allocator, text: []const u8) !Url {
     };
 }
 
-fn printResponse(io: Io, response: client.Response) !void {
+fn printResponse(io: Io, response: client.Response, silent: bool) !void {
     defer response.body.close();
     var write_buffer: [4096]u8 = undefined;
     var stdout_writer: Io.File.Writer = .init(.stdout(), io, &write_buffer);
     var writer = &stdout_writer.interface;
 
-    const head = response.head;
-    try writer.print("{s} {d}\n", .{ @tagName(head.protocol), head.status.code() });
-    for (head.headers.items) |header| {
-        try writer.print("{s}: {s}\n", .{ header.name, header.value });
+    if (!silent) {
+        const head = response.head;
+        try writer.print("{s} {d}\n", .{ @tagName(head.protocol), head.status.code() });
+        for (head.headers.items) |header| {
+            try writer.print("{s}: {s}\n", .{ header.name, header.value });
+        }
+        try writer.writeByte('\n');
+        try writer.flush();
     }
-    try writer.writeByte('\n');
-    try writer.flush();
 
     defer writer.flush() catch {};
     try drain(response.body, writer);
@@ -148,17 +204,16 @@ fn printResponse(io: Io, response: client.Response) !void {
 
 fn drain(body: http.client.Body, w: *Io.Writer) !void {
     while (true) {
-        switch (body.read()) {
-            .data => |bytes| try w.writeAll(bytes),
-            .eof => break,
-            .reset => return error.StreamReset,
-            .truncated => return error.TruncatedBody,
-            .protocol => return error.ProtocolError,
-            .local => |local| return switch (local) {
-                .canceled => error.Canceled,
-                .capacity => error.LocalCapacity,
-                .out_of_memory, .unusable => error.ConnectionUnusable,
-            },
-        }
+        const result = body.read() catch |err| return switch (err) {
+            error.EndOfStream => {},
+            error.Reset => error.StreamReset,
+            error.Truncated => error.TruncatedBody,
+            error.Protocol => error.ProtocolError,
+            error.LocalCanceled => error.Canceled,
+            error.LocalCapacity => error.LocalCapacity,
+            error.LocalOutOfMemory => error.OutOfMemory,
+            error.LocalUnusable => error.ConnectionUnusable,
+        };
+        try w.writeAll(result.data);
     }
 }

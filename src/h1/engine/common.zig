@@ -7,6 +7,7 @@ const Status = @import("../../status.zig").Status;
 pub const Rejection = h1.ServerConn.Rejection;
 const h1 = @import("../root.zig");
 const common = @import("../../engine/common.zig");
+const stream = @import("../../engine/stream.zig");
 
 pub const ResponseOptions = common.ResponseOptions;
 pub const PolicyContext = common.PolicyContext;
@@ -19,6 +20,8 @@ pub const Exchange = struct {
     id: usize,
     conn: *h1.ServerConn,
     request: h1.ServerConn.Request,
+    response_stream: ?stream.ResponseStream = null,
+    response_options: ?h1.ServerConn.ResponseOptions = null,
     /// Engine-owned allocator for this exchange. It is valid from handler
     /// entry until `complete` returns. The engine resets it before the slot
     /// serves another request.
@@ -31,7 +34,21 @@ pub const Exchange = struct {
         options: h1.ServerConn.ResponseOptions,
         body: []const u8,
     ) h1.ServerConn.RespondError!void {
+        if (self.response_stream != null) return error.InvalidState;
         return self.conn.respond(options, body);
+    }
+
+    /// Register a pull-based response body. The engine writes the head and
+    /// pulls chunks after `handle` returns. `content_length` controls framing.
+    pub fn respondStream(
+        self: *Exchange,
+        options: h1.ServerConn.ResponseOptions,
+        source: stream.ResponseStream,
+    ) (h1.ServerConn.RespondError || Allocator.Error)!void {
+        if (self.response_stream != null) return error.InvalidState;
+        if (self.conn.sendSlices().head.len != 0) return error.InvalidState;
+        self.response_options = try common.copyResponseOptions(self.arena, options);
+        self.response_stream = source;
     }
 };
 
