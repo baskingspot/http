@@ -50,10 +50,22 @@ const TestApp = struct {
             try exchange.respond(.{ .status = .ok }, "plain\n");
             return;
         }
+        if (mem.eql(u8, target, "/deferred-timeout")) {
+            const ctx = try exchange.arena.create(DeferredCtx);
+            ctx.* = .{};
+            try exchange.deferResponse(ctx, deferredResume, deferredCancel, .{
+                .timeout = .fromMilliseconds(20),
+                .on_timeout = .{
+                    .options = .{ .status = .service_unavailable },
+                    .body = "timed out\n",
+                },
+            });
+            return;
+        }
         if (mem.eql(u8, target, "/deferred")) {
             const ctx = try exchange.arena.create(DeferredCtx);
             ctx.* = .{};
-            try exchange.deferResponse(ctx, deferredResume, deferredCancel);
+            try exchange.deferResponse(ctx, deferredResume, deferredCancel, .{});
             const thread = try std.Thread.spawn(
                 .{},
                 wakeDeferred,
@@ -572,6 +584,50 @@ test "poll serves a deferred handler" {
     const got = try readAll(stream, h.io, &response);
     try testing.expect(mem.find(u8, got, "HTTP/1.1 200 OK") != null);
     try testing.expect(mem.endsWith(u8, got, "deferred\n"));
+}
+
+test "poll keeps a pipelined request across a deferred response" {
+    var h: Harness = undefined;
+    try h.init(.{}, 8);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+    try send(
+        stream,
+        h.io,
+        "GET /deferred HTTP/1.1\r\nHost: x\r\n\r\n" ++
+            "GET /plain HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+
+    var response: [2048]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expectEqual(
+        @as(usize, 2),
+        mem.count(u8, got, "HTTP/1.1 200 OK"),
+    );
+    try testing.expect(mem.find(u8, got, "deferred\n") != null);
+    try testing.expect(mem.find(u8, got, "plain\n") != null);
+}
+
+test "poll serves a deferred timeout" {
+    var h: Harness = undefined;
+    try h.init(.{}, 8);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+    try send(
+        stream,
+        h.io,
+        "GET /deferred-timeout HTTP/1.1\r\nHost: x\r\n" ++
+            "Connection: close\r\n\r\n",
+    );
+
+    var response: [1024]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expect(mem.find(u8, got, "HTTP/1.1 503 Service Unavailable") != null);
+    try testing.expect(mem.endsWith(u8, got, "timed out\n"));
 }
 
 test "poll listener honors TCP_DEFER_ACCEPT" {

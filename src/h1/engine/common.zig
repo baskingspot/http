@@ -1,6 +1,7 @@
 //! Types shared by the server engines.
 
 const std = @import("std");
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const Status = @import("../../status.zig").Status;
@@ -24,6 +25,9 @@ pub const Exchange = struct {
     response_stream: ?stream.ResponseStream = null,
     response_options: ?h1.ServerConn.ResponseOptions = null,
     deferred: ?common.Deferred(Exchange) = null,
+    deferred_deadline: ?Io.Timestamp = null,
+    deferred_timeout: Io.Duration = .zero,
+    deferred_on_timeout: ?PolicyResponse = null,
     waker: ?common.Waker = null,
     /// Set by the readiness engine. The blocking engine has no wake loop.
     defer_supported: bool = false,
@@ -70,11 +74,29 @@ pub const Exchange = struct {
             exchange: *Exchange,
         ) anyerror!common.ResumeResult,
         cancel: *const fn (context: *anyopaque) void,
-    ) error{ Unsupported, InvalidState }!void {
+        defer_options: common.DeferOptions,
+    ) (error{ Unsupported, InvalidState } || Allocator.Error)!void {
         if (!self.defer_supported) return error.Unsupported;
         if (self.response_stream != null or self.deferred != null) return error.InvalidState;
         if (self.conn.sendSlices().head.len != 0) return error.InvalidState;
+        var copied = defer_options;
+        if (copied.timeout.nanoseconds != 0) {
+            copied.on_timeout.options = try common.copyResponseOptions(
+                self.arena,
+                copied.on_timeout.options,
+            );
+            copied.on_timeout.body = try self.arena.dupe(u8, copied.on_timeout.body);
+        }
+        self.deferred_on_timeout = copied.on_timeout;
         self.deferred = .{ .context = context, .callback = callback, .cancel = cancel };
+        self.deferred_timeout = copied.timeout;
+    }
+
+    /// Copy this handle before returning from `handle` if a worker may outlive
+    /// the exchange. Calling `wake` on a completed exchange reads a cleared
+    /// field.
+    pub fn wakeHandle(self: *const Exchange) ?common.Waker {
+        return self.waker;
     }
 
     /// Wake the engine so it resumes a deferred exchange. Safe from another

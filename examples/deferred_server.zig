@@ -31,14 +31,18 @@ const App = struct {
     fn handle(ptr: *anyopaque, exchange: *http.h1.engine.Exchange) anyerror!void {
         const self: *App = @ptrCast(@alignCast(ptr));
         const wait = try exchange.arena.create(Wait);
-        wait.* = .{ .io = self.io, .producer = undefined };
-        try exchange.deferResponse(wait, resumeHandler, cancelWait);
-        wait.producer = self.io.async(produce, .{ self.io, exchange });
+        wait.* = .{
+            .io = self.io,
+            .producer = undefined,
+            .waker = exchange.wakeHandle().?,
+        };
+        try exchange.deferResponse(wait, resumeHandler, cancelWait, .{});
+        wait.producer = self.io.async(produce, .{ self.io, wait.waker });
     }
 
-    fn produce(io: Io, exchange: *http.h1.engine.Exchange) void {
+    fn produce(io: Io, waker: http.engine.Waker) void {
         io.sleep(.fromMilliseconds(500), .awake) catch return;
-        exchange.wake();
+        waker.wake();
     }
 
     fn cancelWait(ctx: *anyopaque) void {
@@ -67,6 +71,7 @@ const App = struct {
 const Wait = struct {
     io: Io,
     producer: Io.Future(void),
+    waker: http.engine.Waker,
 };
 
 pub fn main(init: std.process.Init) !void {

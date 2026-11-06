@@ -5,6 +5,7 @@
 //! It does not try to hide streams, framing, or connection ownership.
 
 const std = @import("std");
+const Io = std.Io;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const math = std.math;
@@ -62,6 +63,18 @@ pub const PolicyContext = struct {
 pub const PolicyResponse = struct {
     options: ResponseOptions,
     body: []const u8,
+};
+
+/// Options for a deferred response. A zero timeout leaves the machine's own
+/// request deadline as the only bound. `on_timeout` is copied into the
+/// exchange arena at defer time.
+// ast-grep-ignore: public-struct-field-default -- options bag; 503 is the default policy
+pub const DeferOptions = struct {
+    timeout: Io.Duration = .zero,
+    on_timeout: PolicyResponse = .{
+        .options = .{ .status = .service_unavailable },
+        .body = "",
+    },
 };
 
 /// One type-erased handler over an engine's exchange type.

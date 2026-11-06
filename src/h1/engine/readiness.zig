@@ -240,10 +240,15 @@ pub fn Server(comptime Waiter: type) type {
                     self.wait.remove(.{ .slot = index });
                     continue;
                 }
+                if (slot.state == .app_wait) {
+                    self.wait.remove(.{ .slot = index });
+                    continue;
+                }
                 const interest: wait.Interest = switch (slot.state) {
-                    .read, .drain, .stream_wait, .app_wait => .initOne(.read),
+                    .read, .drain, .stream_wait => .initOne(.read),
                     .write => .initOne(.write),
                     .free => unreachable,
+                    .app_wait => unreachable,
                 };
                 try self.wait.set(.{ .slot = index }, slot.fd, interest);
             }
@@ -258,6 +263,9 @@ pub fn Server(comptime Waiter: type) type {
                 }
                 if (slot.state == .stream_wait) {
                     deadline = earliest(deadline, now.addDuration(.fromMilliseconds(50)));
+                }
+                if (slot.exchange.deferred_deadline) |at| {
+                    deadline = earliest(deadline, at);
                 }
             }
             const at = deadline orelse return -1;
@@ -279,6 +287,12 @@ pub fn Server(comptime Waiter: type) type {
                     continue;
                 }
                 if (slot.state == .app_wait) {
+                    if (slot.exchange.deferred_deadline) |at| {
+                        if (now.durationTo(at).nanoseconds <= 0) {
+                            self.timeoutDeferred(slot);
+                            continue;
+                        }
+                    }
                     const at = slot.conn.deadline() orelse continue;
                     if (now.durationTo(at).nanoseconds > 0) continue;
                     switch (slot.conn.tick(now)) {
@@ -480,6 +494,9 @@ pub fn Server(comptime Waiter: type) type {
             slot.exchange.waker = self.waker();
             self.handler.vtable.handle(self.handler.ptr, &slot.exchange) catch |err| {
                 self.report(err);
+                slot.exchange.deferred_deadline = null;
+                slot.exchange.deferred_timeout = .zero;
+                slot.exchange.deferred_on_timeout = null;
                 if (slot.exchange.response_stream) |source| {
                     source.stream.close();
                     slot.exchange.response_stream = null;
@@ -493,6 +510,11 @@ pub fn Server(comptime Waiter: type) type {
                 {
                     self.cancelDeferred(slot);
                 } else {
+                    if (slot.exchange.deferred_timeout.nanoseconds != 0) {
+                        slot.exchange.deferred_deadline = clock(self.io).addDuration(
+                            slot.exchange.deferred_timeout,
+                        );
+                    }
                     slot.state = .app_wait;
                     return true;
                 }
@@ -689,6 +711,22 @@ pub fn Server(comptime Waiter: type) type {
                 slot.exchange.deferred = null;
                 deferred.cancel(deferred.context);
             }
+            slot.exchange.deferred_deadline = null;
+            slot.exchange.deferred_timeout = .zero;
+            slot.exchange.deferred_on_timeout = null;
+        }
+
+        fn timeoutDeferred(self: *Self, slot: *Slot) void {
+            const response: common.PolicyResponse = slot.exchange.deferred_on_timeout orelse .{
+                .options = .{ .status = .internal_server_error },
+                .body = "",
+            };
+            self.cancelDeferred(slot);
+            slot.exchange.respond(response.options, response.body) catch {
+                self.closeSlot(slot);
+                return;
+            };
+            slot.state = .write;
         }
 
         fn waker(self: *Self) common.Waker {
@@ -731,6 +769,9 @@ pub fn Server(comptime Waiter: type) type {
                     continue;
                 }
 
+                slot.exchange.deferred_deadline = null;
+                slot.exchange.deferred_timeout = .zero;
+                slot.exchange.deferred_on_timeout = null;
                 if (slot.exchange.response_stream) |source| {
                     if (!self.startStream(slot, source)) {
                         self.closeSlot(slot);
