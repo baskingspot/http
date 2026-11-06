@@ -54,7 +54,8 @@ const events = [_][]const u8{
 
 const SseSource = struct {
     io: Io,
-    queue: *Io.Queue([]const u8),
+    queue: Io.Queue([]const u8),
+    buffer: [8][]const u8,
     producer: Io.Future(void),
     stream: stream.ReadStream,
 
@@ -62,25 +63,24 @@ const SseSource = struct {
 
     fn init(allocator: std.mem.Allocator, io: Io) !*SseSource {
         const self = try allocator.create(SseSource);
-        const queue = try allocator.create(Io.Queue([]const u8));
-        const buffer = try allocator.alloc([]const u8, 8);
-        queue.* = .init(buffer);
         self.* = .{
             .io = io,
-            .queue = queue,
+            .queue = undefined,
+            .buffer = undefined,
             .producer = undefined,
             .stream = .{ .ptr = self, .vtable = &vtable },
         };
-        self.producer = io.async(produce, .{ io, queue });
+        self.queue = .init(&self.buffer);
+        self.producer = io.async(produce, .{ io, self });
         return self;
     }
 
-    fn produce(io: Io, queue: *Io.Queue([]const u8)) void {
+    fn produce(io: Io, self: *SseSource) void {
         for (events) |event| {
             io.sleep(.fromSeconds(1), .awake) catch return;
-            queue.putOne(io, event) catch return;
+            self.queue.putOne(io, event) catch return;
         }
-        queue.close(io);
+        self.queue.close(io);
     }
 
     fn next(ptr: *anyopaque) stream.Read {
