@@ -5,6 +5,7 @@
 //! It does not try to hide streams, framing, or connection ownership.
 
 const std = @import("std");
+const Io = std.Io;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const math = std.math;
@@ -62,6 +63,18 @@ pub const PolicyContext = struct {
 pub const PolicyResponse = struct {
     options: ResponseOptions,
     body: []const u8,
+};
+
+/// Options for a deferred response. A zero timeout leaves the machine's own
+/// request deadline as the only bound. `on_timeout` is copied into the
+/// exchange arena at defer time.
+// ast-grep-ignore: public-struct-field-default -- options bag; 503 is the default policy
+pub const DeferOptions = struct {
+    timeout: Io.Duration = .zero,
+    on_timeout: PolicyResponse = .{
+        .options = .{ .status = .service_unavailable },
+        .body = "",
+    },
 };
 
 /// One type-erased handler over an engine's exchange type.
@@ -176,3 +189,41 @@ test "response options copy borrowed headers" {
     try testing.expectEqualStrings("text/plain", copied.content_type.?);
     try testing.expectEqual(Status.created, copied.status);
 }
+
+/// A wake handle from the engine. It is safe to call from another thread and
+/// remains valid until the server is deinitialized. Copy it out of the
+/// exchange before returning from `handle`.
+pub const Waker = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        wake: *const fn (ptr: *anyopaque) void,
+    };
+
+    pub fn wake(self: Waker) void {
+        self.vtable.wake(self.ptr);
+    }
+};
+
+/// A handler that has returned without a response and will be resumed when
+/// its external wait completes.
+pub fn Deferred(comptime Exchange: type) type {
+    return struct {
+        context: *anyopaque,
+        callback: *const fn (
+            context: *anyopaque,
+            exchange: *Exchange,
+        ) anyerror!ResumeResult,
+        /// Called if the exchange ends before the callback responds, so the
+        /// external task can be stopped before the arena is reset.
+        cancel: *const fn (context: *anyopaque) void,
+    };
+}
+
+pub const ResumeResult = enum {
+    /// The callback queued a response or a response stream.
+    responded,
+    /// The callback has more waiting to do. The slot stays parked.
+    waiting,
+};

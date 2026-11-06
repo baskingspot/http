@@ -315,6 +315,23 @@ pub fn build(b: *std.Build) void {
     b.step("example-sse", "Run the SSE example server")
         .dependOn(&run_sse.step);
 
+    const deferred_mod = b.createModule(.{
+        .root_source_file = b.path("examples/deferred_server.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "http", .module = mod }},
+    });
+    const deferred = b.addExecutable(.{
+        .name = "http-deferred",
+        .root_module = deferred_mod,
+    });
+    b.step("example-deferred-bin", "Build the deferred-handler example server")
+        .dependOn(&deferred.step);
+    const run_deferred = b.addRunArtifact(deferred);
+    if (b.args) |args| run_deferred.addArgs(args);
+    b.step("example-deferred", "Run the deferred-handler example server")
+        .dependOn(&run_deferred.step);
+
     const sse_poll_mod = b.createModule(.{
         .root_source_file = b.path("examples/sse_poll.zig"),
         .target = target,

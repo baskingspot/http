@@ -182,6 +182,7 @@ fn handleRequest(
         .conn = conn,
         .request = request,
         .arena = arena.allocator(),
+        .io = io,
     };
     handler.vtable.handle(handler.ptr, &exchange) catch |err| {
         handler.vtable.report_error(handler.ptr, err);

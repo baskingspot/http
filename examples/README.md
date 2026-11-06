@@ -112,6 +112,19 @@ The TLS listener offers `h2` and `http/1.1` through ALPN and dispatches the
 blocking engine after the handshake. The cleartext listener reads the HTTP/2
 connection preface; anything else is HTTP/1.1.
 
+## Deferred handlers
+
+```sh
+just example-deferred
+just curl -s http://127.0.0.1:8093/
+```
+
+The handler calls `exchange.deferResponse`, returns, and starts one
+`Io.async` task. The task calls `exchange.wake()` when its result is ready.
+The poll engine resumes the callback on its own thread, so other connections
+continue to run while the request waits. The cancel callback runs if the
+client disconnects or the request deadline expires before the response.
+
 ## Pull-based response streams
 
 ```sh

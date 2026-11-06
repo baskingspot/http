@@ -20,6 +20,7 @@ else
 const TestApp = struct {
     complete_count: usize = 0,
     last_reason: ?h1.ServerConn.RejectReason = null,
+    io: Io = testing.io,
 
     fn handler(self: *TestApp) engine.Handler {
         return .{ .ptr = self, .vtable = &.{
@@ -47,6 +48,30 @@ const TestApp = struct {
         }
         if (mem.eql(u8, target, "/plain")) {
             try exchange.respond(.{ .status = .ok }, "plain\n");
+            return;
+        }
+        if (mem.eql(u8, target, "/deferred-timeout")) {
+            const ctx = try exchange.arena.create(DeferredCtx);
+            ctx.* = .{};
+            try exchange.deferResponse(ctx, deferredResume, deferredCancel, .{
+                .timeout = .fromMilliseconds(20),
+                .on_timeout = .{
+                    .options = .{ .status = .service_unavailable },
+                    .body = "timed out\n",
+                },
+            });
+            return;
+        }
+        if (mem.eql(u8, target, "/deferred")) {
+            const ctx = try exchange.arena.create(DeferredCtx);
+            ctx.* = .{};
+            try exchange.deferResponse(ctx, deferredResume, deferredCancel, .{});
+            const thread = try std.Thread.spawn(
+                .{},
+                wakeDeferred,
+                .{ testing.io, exchange },
+            );
+            thread.detach();
             return;
         }
         const body = try std.fmt.allocPrint(
@@ -87,6 +112,23 @@ const TestApp = struct {
         };
     }
 };
+
+const DeferredCtx = struct {};
+
+fn deferredResume(
+    _: *anyopaque,
+    exchange: *engine.Exchange,
+) anyerror!http.engine.ResumeResult {
+    try exchange.respond(.{ .status = .ok }, "deferred\n");
+    return .responded;
+}
+
+fn deferredCancel(_: *anyopaque) void {}
+
+fn wakeDeferred(io: Io, exchange: *engine.Exchange) void {
+    io.sleep(.fromMilliseconds(10), .awake) catch return;
+    exchange.wake();
+}
 
 const PollServer = engine.Server;
 
@@ -527,6 +569,65 @@ test "poll reports exchange completion" {
     const got = try readAll(stream, h.io, &response);
     try testing.expect(mem.find(u8, got, "HTTP/1.1 200 OK") != null);
     try testing.expectEqual(1, h.app.complete_count);
+}
+
+test "poll serves a deferred handler" {
+    var h: Harness = undefined;
+    try h.init(.{}, 8);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+    try send(stream, h.io, "GET /deferred HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+
+    var response: [1024]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expect(mem.find(u8, got, "HTTP/1.1 200 OK") != null);
+    try testing.expect(mem.endsWith(u8, got, "deferred\n"));
+}
+
+test "poll keeps a pipelined request across a deferred response" {
+    var h: Harness = undefined;
+    try h.init(.{}, 8);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+    try send(
+        stream,
+        h.io,
+        "GET /deferred HTTP/1.1\r\nHost: x\r\n\r\n" ++
+            "GET /plain HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+
+    var response: [2048]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expectEqual(
+        @as(usize, 2),
+        mem.count(u8, got, "HTTP/1.1 200 OK"),
+    );
+    try testing.expect(mem.find(u8, got, "deferred\n") != null);
+    try testing.expect(mem.find(u8, got, "plain\n") != null);
+}
+
+test "poll serves a deferred timeout" {
+    var h: Harness = undefined;
+    try h.init(.{}, 8);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+    try send(
+        stream,
+        h.io,
+        "GET /deferred-timeout HTTP/1.1\r\nHost: x\r\n" ++
+            "Connection: close\r\n\r\n",
+    );
+
+    var response: [1024]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expect(mem.find(u8, got, "HTTP/1.1 503 Service Unavailable") != null);
+    try testing.expect(mem.endsWith(u8, got, "timed out\n"));
 }
 
 test "poll listener honors TCP_DEFER_ACCEPT" {

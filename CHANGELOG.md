@@ -5,6 +5,25 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `http.stream` and `Exchange.respondStream`: pull-based response bodies for
+  the h1 blocking and readiness engines. A `ReadStream` returns one borrowed
+  chunk at a time, and an unknown length is close-delimited with
+  `Connection: close`. SSE, poll-engine SSE, and file-transform examples are
+  included.
+- `h1.engine` deferred handlers: `Exchange.deferResponse`, `Exchange.wakeHandle`,
+  a copyable `Waker`, and per-exchange `timeout` and `on_timeout` policy.
+  The readiness engines park the slot without polling it, cancel the external
+  work on deadline or disconnect, and resume the callback on the engine thread.
+- `curl`: `-X`, `-d`, `-H`, `-I`, `--http1.1`, and `-s` options.
+
+### Changed
+
+- `http.client.Body.read` returns `BodyError!BodyResult`. `EndOfStream` is an
+  error; `resetCode()` and `localCause()` carry the reset and local-failure
+  details.
+
 ## [0.1.0] - 2026-11-05
 
 ### Added
