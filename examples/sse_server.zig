@@ -29,13 +29,12 @@ const App = struct {
 
     fn handle(ptr: *anyopaque, exchange: *http.h1.engine.Exchange) anyerror!void {
         const self: *App = @ptrCast(@alignCast(ptr));
-        const events = try exchange.arena.create(EventStream);
-        events.* = .{ .io = self.io };
+        const source = try SseSource.init(exchange.arena, self.io);
         try exchange.respondStream(.{
             .status = .ok,
             .content_type = "text/event-stream",
         }, .{
-            .stream = .{ .ptr = events, .vtable = &EventStream.vtable },
+            .stream = source.stream,
             .content_length = null,
         });
     }
@@ -45,27 +44,59 @@ const App = struct {
     }
 };
 
-const EventStream = struct {
+const events = [_][]const u8{
+    "data: tick 0\n\n",
+    "data: tick 1\n\n",
+    "data: tick 2\n\n",
+    "data: tick 3\n\n",
+    "data: tick 4\n\n",
+};
+
+const SseSource = struct {
     io: Io,
-    index: u8 = 0,
-    line: [64]u8 = undefined,
+    queue: *Io.Queue([]const u8),
+    producer: std.Thread,
+    stream: stream.ReadStream,
 
     const vtable: stream.ReadStream.VTable = .{ .next = next, .close = close };
 
-    fn next(ptr: *anyopaque) stream.Read {
-        const self: *EventStream = @ptrCast(@alignCast(ptr));
-        if (self.index == 5) return .eof;
-        self.io.sleep(.fromSeconds(1), .awake) catch |err| return .{ .failed = err };
-        const text = std.fmt.bufPrint(
-            &self.line,
-            "data: tick {d}\n\n",
-            .{self.index},
-        ) catch return .{ .failed = error.BufferTooSmall };
-        self.index += 1;
-        return .{ .data = text };
+    fn init(allocator: std.mem.Allocator, io: Io) !*SseSource {
+        const self = try allocator.create(SseSource);
+        const queue = try allocator.create(Io.Queue([]const u8));
+        const buffer = try allocator.alloc([]const u8, 8);
+        queue.* = .init(buffer);
+        self.* = .{
+            .io = io,
+            .queue = queue,
+            .producer = undefined,
+            .stream = .{ .ptr = self, .vtable = &vtable },
+        };
+        self.producer = try std.Thread.spawn(.{}, produce, .{ io, queue });
+        return self;
     }
 
-    fn close(_: *anyopaque) void {}
+    fn produce(io: Io, queue: *Io.Queue([]const u8)) void {
+        for (events) |event| {
+            io.sleep(.fromSeconds(1), .awake) catch return;
+            queue.putOne(io, event) catch return;
+        }
+        queue.close(io);
+    }
+
+    fn next(ptr: *anyopaque) stream.Read {
+        const self: *SseSource = @ptrCast(@alignCast(ptr));
+        const item = self.queue.getOne(self.io) catch |err| switch (err) {
+            error.Closed => return .eof,
+            error.Canceled => return .{ .failed = err },
+        };
+        return .{ .data = item };
+    }
+
+    fn close(ptr: *anyopaque) void {
+        const self: *SseSource = @ptrCast(@alignCast(ptr));
+        self.queue.close(self.io);
+        self.producer.join();
+    }
 };
 
 pub fn main(init: std.process.Init) !void {

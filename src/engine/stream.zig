@@ -40,6 +40,44 @@ pub const ResponseStream = struct {
     content_length: ?u64 = null,
 };
 
+/// A response source over an `Io.Queue`. Closing either side of the queue wakes
+/// the other side with `error.Closed`, which gives the stream pipe-style
+/// cancellation without a coroutine runtime.
+pub const QueueStream = struct {
+    io: Io,
+    queue: *Io.Queue([]const u8),
+    stream: ReadStream,
+
+    pub fn init(io: Io, queue: *Io.Queue([]const u8)) QueueStream {
+        return .{
+            .io = io,
+            .queue = queue,
+            .stream = .{ .ptr = undefined, .vtable = &vtable },
+        };
+    }
+
+    pub fn source(self: *QueueStream) ReadStream {
+        self.stream.ptr = self;
+        return self.stream;
+    }
+
+    fn next(ptr: *anyopaque) Read {
+        const self: *QueueStream = @ptrCast(@alignCast(ptr));
+        const item = self.queue.getOne(self.io) catch |err| switch (err) {
+            error.Closed => return .eof,
+            error.Canceled => return .{ .failed = err },
+        };
+        return .{ .data = item };
+    }
+
+    fn close(ptr: *anyopaque) void {
+        const self: *QueueStream = @ptrCast(@alignCast(ptr));
+        self.queue.close(self.io);
+    }
+
+    const vtable: ReadStream.VTable = .{ .next = next, .close = close };
+};
+
 /// A response source over a caller-owned `std.Io.Reader` and buffer. The source
 /// copies each chunk into `buffer`; the reader and buffer must outlive the
 /// stream.

@@ -9,10 +9,12 @@
 
 const std = @import("std");
 const Io = std.Io;
+const Allocator = std.mem.Allocator;
 const print = std.debug.print;
 
 const http = @import("http");
 const stream = http.stream;
+
 const address_text = "127.0.0.1:8091";
 
 const App = struct {
@@ -55,7 +57,7 @@ const FileSource = struct {
 
     const vtable: stream.ReadStream.VTable = .{ .next = next, .close = close };
 
-    fn init(allocator: std.mem.Allocator, io: Io, path: []const u8) !*FileSource {
+    fn init(allocator: Allocator, io: Io, path: []const u8) !*FileSource {
         const self = try allocator.create(FileSource);
         self.io = io;
         self.file = try Io.Dir.cwd().openFile(io, path, .{});
