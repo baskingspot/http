@@ -121,9 +121,11 @@ just example-stream README.md
 curl http://127.0.0.1:8091/ -o /tmp/readme.xor
 ```
 
-The handler returns a `http.engine.stream.ReadStream`; the engine writes the
-head, pulls one chunk when it can accept it, and frames the body as chunked
-HTTP/1.1 when the length is unknown. `stream_pipeline.zig` reads a file in
+The handler returns a `http.stream.ReadStream`; the engine writes the head,
+pulls one chunk when it can accept it, and frames the body as chunked HTTP/1.1
+when the length is unknown. The SSE example feeds the stream through an
+`Io.Queue` pipe and starts its producer with `Io.async`, so closing the queue
+wakes the producer with `error.Closed`. `stream_pipeline.zig` reads a file in
 16 KiB chunks and XORs each chunk before returning it, standing in for a
 compression or cipher transform.
 

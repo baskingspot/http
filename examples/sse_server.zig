@@ -55,7 +55,7 @@ const events = [_][]const u8{
 const SseSource = struct {
     io: Io,
     queue: *Io.Queue([]const u8),
-    producer: std.Thread,
+    producer: Io.Future(void),
     stream: stream.ReadStream,
 
     const vtable: stream.ReadStream.VTable = .{ .next = next, .close = close };
@@ -71,7 +71,7 @@ const SseSource = struct {
             .producer = undefined,
             .stream = .{ .ptr = self, .vtable = &vtable },
         };
-        self.producer = try std.Thread.spawn(.{}, produce, .{ io, queue });
+        self.producer = io.async(produce, .{ io, queue });
         return self;
     }
 
@@ -95,7 +95,7 @@ const SseSource = struct {
     fn close(ptr: *anyopaque) void {
         const self: *SseSource = @ptrCast(@alignCast(ptr));
         self.queue.close(self.io);
-        self.producer.join();
+        _ = self.producer.cancel(self.io);
     }
 };
 
