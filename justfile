@@ -273,6 +273,11 @@ example-unified:
 example-sse:
     zig build example-sse
 
+[doc("Run the poll-engine SSE example on 127.0.0.1:8092")]
+[group("example")]
+example-sse-poll:
+    zig build example-sse-poll
+
 [doc("Run the pull-based file transform example: just example-stream README.md")]
 [group("example")]
 example-stream *ARGS:

@@ -315,6 +315,23 @@ pub fn build(b: *std.Build) void {
     b.step("example-sse", "Run the SSE example server")
         .dependOn(&run_sse.step);
 
+    const sse_poll_mod = b.createModule(.{
+        .root_source_file = b.path("examples/sse_poll.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "http", .module = mod }},
+    });
+    const sse_poll = b.addExecutable(.{
+        .name = "http-sse-poll",
+        .root_module = sse_poll_mod,
+    });
+    b.step("example-sse-poll-bin", "Build the poll-based SSE example server")
+        .dependOn(&sse_poll.step);
+    const run_sse_poll = b.addRunArtifact(sse_poll);
+    if (b.args) |args| run_sse_poll.addArgs(args);
+    b.step("example-sse-poll", "Run the poll-based SSE example server")
+        .dependOn(&run_sse_poll.step);
+
     const pipeline_mod = b.createModule(.{
         .root_source_file = b.path("examples/stream_pipeline.zig"),
         .target = target,

@@ -254,6 +254,7 @@ fn writeStreamResponse(
     while (true) {
         switch (source.stream.next()) {
             .eof => break,
+            .pending => return error.StreamPending,
             .failed => |err| return err,
             .data => |bytes| {
                 if (bytes.len == 0) return error.EmptyChunk;

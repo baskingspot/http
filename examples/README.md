@@ -115,19 +115,23 @@ connection preface; anything else is HTTP/1.1.
 ## Pull-based response streams
 
 ```sh
-just example-sse             # 127.0.0.1:8090, chunked SSE events
+just example-sse             # blocking SSE, 127.0.0.1:8090
+just example-sse-poll        # poll-engine SSE, 127.0.0.1:8092
 curl -N http://127.0.0.1:8090/
+curl -N http://127.0.0.1:8092/
 just example-stream README.md
 curl http://127.0.0.1:8091/ -o /tmp/readme.xor
 ```
 
 The handler returns a `http.stream.ReadStream`; the engine writes the head,
 pulls one chunk when it can accept it, and frames the body as chunked HTTP/1.1
-when the length is unknown. The SSE example feeds the stream through an
-`Io.Queue` pipe and starts its producer with `Io.async`, so closing the queue
-wakes the producer with `error.Closed`. `stream_pipeline.zig` reads a file in
-16 KiB chunks and XORs each chunk before returning it, standing in for a
-compression or cipher transform.
+when the length is unknown. The SSE examples feed the stream through an `Io.Queue` pipe and start the
+producer with `Io.async`, so closing the queue wakes the producer with
+`error.Closed`. `sse_poll.zig` uses `h1.engine.poll`; its source returns
+`pending` when the queue is empty, and the engine checks the queue again
+without blocking the other slots. `stream_pipeline.zig` reads a file in 16 KiB
+chunks and XORs each chunk before returning it, standing in for a compression
+or cipher transform.
 
 ## Tiny curl
 

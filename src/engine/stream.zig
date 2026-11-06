@@ -13,6 +13,9 @@ const Io = std.Io;
 pub const Read = union(enum) {
     data: []const u8,
     eof,
+    /// No bytes are ready yet. The caller may poll again; blocking engines
+    /// treat this as unsupported.
+    pending,
     failed: anyerror,
 };
 
