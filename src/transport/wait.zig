@@ -5,6 +5,7 @@ const std = @import("std");
 pub const Owner = union(enum) {
     stop,
     listener,
+    wake,
     slot: usize,
 };
 
@@ -26,7 +27,8 @@ pub fn ownerIndex(owner: Owner) usize {
     return switch (owner) {
         .stop => 0,
         .listener => 1,
-        .slot => |index| index + 2,
+        .wake => 2,
+        .slot => |index| index + 3,
     };
 }
 
@@ -34,6 +36,7 @@ pub fn ownerFromIndex(index: usize) Owner {
     return switch (index) {
         0 => .stop,
         1 => .listener,
-        else => .{ .slot = index - 2 },
+        2 => .wake,
+        else => .{ .slot = index - 3 },
     };
 }

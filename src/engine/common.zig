@@ -176,3 +176,39 @@ test "response options copy borrowed headers" {
     try testing.expectEqualStrings("text/plain", copied.content_type.?);
     try testing.expectEqual(Status.created, copied.status);
 }
+
+/// A wake handle from the engine. It is safe to call from another thread.
+pub const Waker = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        wake: *const fn (ptr: *anyopaque) void,
+    };
+
+    pub fn wake(self: Waker) void {
+        self.vtable.wake(self.ptr);
+    }
+};
+
+/// A handler that has returned without a response and will be resumed when
+/// its external wait completes.
+pub fn Deferred(comptime Exchange: type) type {
+    return struct {
+        context: *anyopaque,
+        callback: *const fn (
+            context: *anyopaque,
+            exchange: *Exchange,
+        ) anyerror!ResumeResult,
+        /// Called if the exchange ends before the callback responds, so the
+        /// external task can be stopped before the arena is reset.
+        cancel: *const fn (context: *anyopaque) void,
+    };
+}
+
+pub const ResumeResult = enum {
+    /// The callback queued a response or a response stream.
+    responded,
+    /// The callback has more waiting to do. The slot stays parked.
+    waiting,
+};

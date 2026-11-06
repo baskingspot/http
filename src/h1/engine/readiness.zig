@@ -50,7 +50,7 @@ pub const Config = struct {
     tcp_defer_accept: bool = false,
 };
 
-const State = enum { free, read, write, stream_wait, drain };
+const State = enum { free, read, write, stream_wait, app_wait, drain };
 
 const Slot = struct {
     conn: h1.ServerConn,
@@ -76,6 +76,7 @@ const Slot = struct {
             .conn = &self.conn,
             .request = undefined,
             .arena = self.arena.allocator(),
+            .defer_supported = true,
         };
     }
 
@@ -101,6 +102,7 @@ pub fn Server(comptime Waiter: type) type {
         config: Config,
         listener: P.Listener,
         stop_event: P.Stop,
+        wake_event: P.Stop,
         slots: []Slot,
         wait: Waiter,
         active: usize,
@@ -122,6 +124,9 @@ pub fn Server(comptime Waiter: type) type {
             var stop_event = try P.Stop.init();
             errdefer stop_event.deinit();
 
+            var wake_event = try P.Stop.init();
+            errdefer wake_event.deinit();
+
             const slots = try allocator.alloc(Slot, config.max_connections);
             errdefer allocator.free(slots);
             var initialized: usize = 0;
@@ -132,7 +137,7 @@ pub fn Server(comptime Waiter: type) type {
                 initialized += 1;
             }
 
-            var waiter = try Waiter.init(allocator, config.max_connections + 2);
+            var waiter = try Waiter.init(allocator, config.max_connections + 3);
             errdefer waiter.deinit();
 
             return .{
@@ -142,6 +147,7 @@ pub fn Server(comptime Waiter: type) type {
                 .config = config,
                 .listener = listener,
                 .stop_event = stop_event,
+                .wake_event = wake_event,
                 .slots = slots,
                 .wait = waiter,
                 .active = 0,
@@ -161,6 +167,7 @@ pub fn Server(comptime Waiter: type) type {
             self.allocator.free(self.slots);
             self.wait.deinit();
             self.stop_event.deinit();
+            self.wake_event.deinit();
             self.listener.deinit();
             self.* = undefined;
         }
@@ -203,6 +210,7 @@ pub fn Server(comptime Waiter: type) type {
                             }
                             if (event.flags.contains(.readable)) try self.acceptAll(after);
                         },
+                        .wake => self.resumeDeferred(after),
                         .slot => |index| {
                             const slot = &self.slots[index];
                             if (slot.state == .free) continue;
@@ -215,6 +223,7 @@ pub fn Server(comptime Waiter: type) type {
 
         fn syncWait(self: *Self) !void {
             try self.wait.set(.stop, self.stop_event.read_fd, .initOne(.read));
+            try self.wait.set(.wake, self.wake_event.read_fd, .initOne(.read));
 
             if (self.active < self.config.max_connections and self.accept_paused_until == null) {
                 try self.wait.set(
@@ -232,7 +241,7 @@ pub fn Server(comptime Waiter: type) type {
                     continue;
                 }
                 const interest: wait.Interest = switch (slot.state) {
-                    .read, .drain, .stream_wait => .initOne(.read),
+                    .read, .drain, .stream_wait, .app_wait => .initOne(.read),
                     .write => .initOne(.write),
                     .free => unreachable,
                 };
@@ -267,6 +276,20 @@ pub fn Server(comptime Waiter: type) type {
                 if (slot.state == .stream_wait) {
                     slot.state = .write;
                     self.writeStreamSlot(slot, now);
+                    continue;
+                }
+                if (slot.state == .app_wait) {
+                    const at = slot.conn.deadline() orelse continue;
+                    if (now.durationTo(at).nanoseconds > 0) continue;
+                    switch (slot.conn.tick(now)) {
+                        .none => {},
+                        .reject => |rejection| {
+                            self.cancelDeferred(slot);
+                            self.reviewPolicy(slot, rejection);
+                            slot.state = .write;
+                        },
+                        .close => self.closeSlot(slot),
+                    }
                     continue;
                 }
                 if (slot.response_stream != null) continue;
@@ -320,6 +343,8 @@ pub fn Server(comptime Waiter: type) type {
             }
             slot.exchange.response_stream = null;
             slot.exchange.response_options = null;
+            self.cancelDeferred(slot);
+            slot.exchange.waker = null;
             self.finishExchange(slot);
             self.wait.remove(.{ .slot = slot.exchange.id });
             P.close(slot.fd);
@@ -383,6 +408,13 @@ pub fn Server(comptime Waiter: type) type {
                         self.closeSlot(slot);
                     }
                 },
+                .app_wait => {
+                    // Readable can be a pipelined request. Keep it for the
+                    // keep-alive read after the deferred response.
+                    if (ready.flags.contains(.failed) or ready.flags.contains(.hup)) {
+                        self.closeSlot(slot);
+                    }
+                },
             }
         }
 
@@ -425,7 +457,7 @@ pub fn Server(comptime Waiter: type) type {
                 },
                 .request => |request| {
                     if (self.handleRequest(slot, request)) {
-                        slot.state = .write;
+                        if (slot.state != .app_wait) slot.state = .write;
                     }
                     return true;
                 },
@@ -445,6 +477,7 @@ pub fn Server(comptime Waiter: type) type {
             assert(!slot.exchange_active);
             slot.exchange.request = request;
             slot.exchange_active = true;
+            slot.exchange.waker = self.waker();
             self.handler.vtable.handle(self.handler.ptr, &slot.exchange) catch |err| {
                 self.report(err);
                 if (slot.exchange.response_stream) |source| {
@@ -452,7 +485,18 @@ pub fn Server(comptime Waiter: type) type {
                     slot.exchange.response_stream = null;
                     slot.exchange.response_options = null;
                 }
+                self.cancelDeferred(slot);
             };
+            if (slot.exchange.deferred != null) {
+                if (slot.exchange.response_stream != null or
+                    slot.conn.sendSlices().head.len != 0)
+                {
+                    self.cancelDeferred(slot);
+                } else {
+                    slot.state = .app_wait;
+                    return true;
+                }
+            }
             if (slot.exchange.response_stream) |source| {
                 if (!self.startStream(slot, source)) {
                     self.closeSlot(slot);
@@ -639,11 +683,86 @@ pub fn Server(comptime Waiter: type) type {
             }
         }
 
+        fn cancelDeferred(self: *Self, slot: *Slot) void {
+            _ = self;
+            if (slot.exchange.deferred) |deferred| {
+                slot.exchange.deferred = null;
+                deferred.cancel(deferred.context);
+            }
+        }
+
+        fn waker(self: *Self) common.Waker {
+            return .{ .ptr = &self.wake_event, .vtable = &waker_vtable };
+        }
+
+        fn wakeEvent(ptr: *anyopaque) void {
+            const wake_stop: *P.Stop = @ptrCast(@alignCast(ptr));
+            wake_stop.wake();
+        }
+
+        const waker_vtable: common.Waker.VTable = .{ .wake = wakeEvent };
+
+        fn drainWake(self: *Self) void {
+            var buffer: [64]u8 = undefined;
+            while (true) {
+                const n = P.read(self.wake_event.read_fd, &buffer) catch return;
+                if (n == 0) return;
+            }
+        }
+
+        fn resumeDeferred(self: *Self, now: Io.Timestamp) void {
+            _ = now;
+            self.drainWake();
+            for (self.slots) |*slot| {
+                if (slot.state != .app_wait) continue;
+                const deferred = slot.exchange.deferred orelse {
+                    self.closeSlot(slot);
+                    continue;
+                };
+                slot.exchange.deferred = null;
+                const result = deferred.callback(deferred.context, &slot.exchange) catch |err| {
+                    self.handler.vtable.report_error(self.handler.ptr, err);
+                    deferred.cancel(deferred.context);
+                    self.failDeferred(slot);
+                    continue;
+                };
+                if (result == .waiting) {
+                    slot.exchange.deferred = deferred;
+                    continue;
+                }
+
+                if (slot.exchange.response_stream) |source| {
+                    if (!self.startStream(slot, source)) {
+                        self.closeSlot(slot);
+                        continue;
+                    }
+                } else if (slot.conn.sendSlices().head.len == 0) {
+                    self.failDeferred(slot);
+                    continue;
+                }
+                slot.state = .write;
+            }
+        }
+
+        fn failDeferred(self: *Self, slot: *Slot) void {
+            slot.exchange.respond(.{ .status = .internal_server_error }, "") catch {
+                self.closeSlot(slot);
+                return;
+            };
+            self.reviewPolicy(slot, .{
+                .status = .internal_server_error,
+                .reason = .internal_error,
+            });
+            slot.state = .write;
+        }
+
         fn afterKeepAlive(self: *Self, slot: *Slot, event: h1.ServerConn.Event) void {
             switch (event) {
                 .request_head => self.afterKeepAlive(slot, slot.conn.bufferBody()),
                 .request => |request| {
-                    if (self.handleRequest(slot, request)) slot.state = .write;
+                    if (self.handleRequest(slot, request)) {
+                        if (slot.state != .app_wait) slot.state = .write;
+                    }
                 },
                 .need_more => {
                     slot.state = if (slot.conn.sendSlices().head.len != 0) .write else .read;

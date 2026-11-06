@@ -14,6 +14,7 @@ pub const PolicyContext = common.PolicyContext;
 pub const PolicyResponse = common.PolicyResponse;
 
 /// One request/response exchange handed to the application.
+// ast-grep-ignore: public-struct-field-default -- defer support is an engine capability
 pub const Exchange = struct {
     /// The engine slot serving this exchange. Stable for the exchange; the
     /// slot is reused after `complete` returns.
@@ -22,6 +23,10 @@ pub const Exchange = struct {
     request: h1.ServerConn.Request,
     response_stream: ?stream.ResponseStream = null,
     response_options: ?h1.ServerConn.ResponseOptions = null,
+    deferred: ?common.Deferred(Exchange) = null,
+    waker: ?common.Waker = null,
+    /// Set by the readiness engine. The blocking engine has no wake loop.
+    defer_supported: bool = false,
     /// Engine-owned allocator for this exchange. It is valid from handler
     /// entry until `complete` returns. The engine resets it before the slot
     /// serves another request.
@@ -34,7 +39,7 @@ pub const Exchange = struct {
         options: h1.ServerConn.ResponseOptions,
         body: []const u8,
     ) h1.ServerConn.RespondError!void {
-        if (self.response_stream != null) return error.InvalidState;
+        if (self.response_stream != null or self.deferred != null) return error.InvalidState;
         return self.conn.respond(options, body);
     }
 
@@ -45,10 +50,37 @@ pub const Exchange = struct {
         options: h1.ServerConn.ResponseOptions,
         source: stream.ResponseStream,
     ) (h1.ServerConn.RespondError || Allocator.Error)!void {
-        if (self.response_stream != null) return error.InvalidState;
+        if (self.response_stream != null or self.deferred != null) return error.InvalidState;
         if (self.conn.sendSlices().head.len != 0) return error.InvalidState;
         self.response_options = try common.copyResponseOptions(self.arena, options);
         self.response_stream = source;
+    }
+
+    /// Park the exchange until external work completes. The handler returns
+    /// without responding; the engine calls `callback` on its own thread after
+    /// `wake`. The context must live until `complete`. `cancel` runs if the
+    /// client disconnects or the request deadline expires before the response.
+    /// Only readiness engines support this; the blocking engine returns
+    /// `error.Unsupported`.
+    pub fn deferResponse(
+        self: *Exchange,
+        context: *anyopaque,
+        callback: *const fn (
+            context: *anyopaque,
+            exchange: *Exchange,
+        ) anyerror!common.ResumeResult,
+        cancel: *const fn (context: *anyopaque) void,
+    ) error{ Unsupported, InvalidState }!void {
+        if (!self.defer_supported) return error.Unsupported;
+        if (self.response_stream != null or self.deferred != null) return error.InvalidState;
+        if (self.conn.sendSlices().head.len != 0) return error.InvalidState;
+        self.deferred = .{ .context = context, .callback = callback, .cancel = cancel };
+    }
+
+    /// Wake the engine so it resumes a deferred exchange. Safe from another
+    /// thread while the exchange is alive.
+    pub fn wake(self: *Exchange) void {
+        if (self.waker) |waker| waker.wake();
     }
 };
 

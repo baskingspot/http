@@ -278,6 +278,11 @@ example-sse:
 example-sse-poll:
     zig build example-sse-poll
 
+[doc("Run the deferred-handler example on 127.0.0.1:8093")]
+[group("example")]
+example-deferred:
+    zig build example-deferred
+
 [doc("Run the pull-based file transform example: just example-stream README.md")]
 [group("example")]
 example-stream *ARGS:

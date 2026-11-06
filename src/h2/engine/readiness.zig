@@ -127,7 +127,7 @@ pub fn Server(comptime Wait: type, comptime Transport: type) type {
                 initialized += 1;
             }
 
-            var waiter = try Wait.init(config.allocator, config.max_connections + 2);
+            var waiter = try Wait.init(config.allocator, config.max_connections + 3);
             errdefer waiter.deinit();
             try waiter.set(.stop, stop.read_fd, .initOne(.read));
             try waiter.set(.listener, listener.fd, .initOne(.read));
@@ -200,6 +200,7 @@ pub fn Server(comptime Wait: type, comptime Transport: type) type {
                     .listener => {
                         if (event.flags.contains(.readable)) try self.acceptAll(after);
                     },
+                    .wake => {},
                     .slot => |index| self.handleSlot(index, event.flags, after),
                 };
             }
