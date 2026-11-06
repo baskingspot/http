@@ -117,7 +117,7 @@ pub fn main(init: std.process.Init) !void {
     } else {
         const stream = try url.address.connect(io, .{ .mode = .stream });
         defer stream.close(io);
-        var write_buffer: [4 * 1024]u8 = undefined;
+        var write_buffer: [4096]u8 = undefined;
         var stream_writer = stream.writer(io, &write_buffer);
         var stream_reader = stream.reader(io, &.{});
         const protocol: client.Protocol = if (http2) .h2 else .h1;
@@ -204,15 +204,15 @@ fn printResponse(io: Io, response: client.Response, silent: bool) !void {
 
 fn drain(body: http.client.Body, w: *Io.Writer) !void {
     while (true) {
-        const result = body.read() catch |err| switch (err) {
-            error.EndOfStream => break,
-            error.Reset => return error.StreamReset,
-            error.Truncated => return error.TruncatedBody,
-            error.Protocol => return error.ProtocolError,
-            error.LocalCanceled => return error.Canceled,
-            error.LocalCapacity => return error.LocalCapacity,
-            error.LocalOutOfMemory => return error.OutOfMemory,
-            error.LocalUnusable => return error.ConnectionUnusable,
+        const result = body.read() catch |err| return switch (err) {
+            error.EndOfStream => {},
+            error.Reset => error.StreamReset,
+            error.Truncated => error.TruncatedBody,
+            error.Protocol => error.ProtocolError,
+            error.LocalCanceled => error.Canceled,
+            error.LocalCapacity => error.LocalCapacity,
+            error.LocalOutOfMemory => error.OutOfMemory,
+            error.LocalUnusable => error.ConnectionUnusable,
         };
         try w.writeAll(result.data);
     }
