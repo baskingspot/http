@@ -90,63 +90,90 @@ pub const Local = enum {
     unusable,
 };
 
-/// The terminal outcome of one blocking body read.
-pub const BodyRead = union(enum) {
-    /// A borrowed body slice. Never empty. Its lifetime is per connection, not
-    /// per body: the next operation that advances the connection invalidates
-    /// it. Holding it pins the h2 connection-level flow-control window, so a
-    /// caller that keeps bytes across another read must copy them.
+/// A successful body read. The slice is borrowed for the connection
+/// operation and is never empty.
+pub const BodyResult = union(enum) {
     data: []const u8,
-    /// The body is complete.
     eof,
-    /// The peer reset this stream. The code is the RFC 9113 RST_STREAM code;
-    /// REFUSED_STREAM (0x08) is the only reset that guarantees no processing.
-    reset: u32,
-    /// The transport or stream ended before the body was complete. A GOAWAY
-    /// boundary can make this retry-safe; see the connection's `goAway()`.
-    truncated,
-    /// The peer sent a malformed frame or an invalid response. The connection
-    /// is unusable and must be closed.
-    protocol,
-    /// A local failure. See `Local` for whether the connection survives.
-    local: Local,
 };
 
-/// A non-blocking body outcome. Blocking `Body` adapters never return
-/// `would_block`; evented clients use this shape instead of overloading Body.
-pub const BodyStep = union(enum) {
-    data: []const u8,
-    eof,
-    reset: u32,
-    truncated,
-    protocol,
-    local: Local,
-    would_block,
+/// Body failures carry no payload. A reset code or local cause is available
+/// from the Body that returned the error.
+pub const BodyError = error{
+    Truncated,
+    Protocol,
+    Reset,
+    LocalCanceled,
+    LocalCapacity,
+    LocalOutOfMemory,
+    LocalUnusable,
 };
+
+/// A non-blocking body step. `WouldBlock` is an error, not a result variant.
+pub const BodyStep = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        step: *const fn (ptr: *anyopaque) BodyStepError!BodyResult,
+        resetCode: *const fn (ptr: *anyopaque) ?u32,
+        localCause: *const fn (ptr: *anyopaque) ?Local,
+        close: *const fn (ptr: *anyopaque) void,
+    };
+
+    pub fn step(self: BodyStep) BodyStepError!BodyResult {
+        return self.vtable.step(self.ptr);
+    }
+
+    pub fn resetCode(self: BodyStep) ?u32 {
+        return self.vtable.resetCode(self.ptr);
+    }
+
+    pub fn localCause(self: BodyStep) ?Local {
+        return self.vtable.localCause(self.ptr);
+    }
+
+    pub fn close(self: BodyStep) void {
+        self.vtable.close(self.ptr);
+    }
+};
+
+pub const BodyStepError = BodyError || error{WouldBlock};
 
 /// The blocking-client body contract.
 ///
-/// `read` may block, never returns `would_block`, never returns empty data, and
-/// reports completion with `eof`. A step client gets `BodyStep`; the evented
-/// engines deliver exchanges through their own pump. Holding four 16 KiB
-/// slices exhausts the default 65,535-byte h2 connection window.
+/// `read` may block, never returns `error.WouldBlock`, never returns empty
+/// data, and reports completion with `eof`. Holding four 16 KiB slices
+/// exhausts the default 65,535-byte h2 connection window.
 pub const Body = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
     pub const VTable = struct {
-        /// Return the next body bytes or a terminal outcome. The borrowed slice
-        /// is valid until any operation that advances the connection; a caller
-        /// that holds it across another read must copy. Holding an h2 slice
-        /// pins the connection window for every stream.
-        read: *const fn (ptr: *anyopaque) BodyRead,
+        /// Return the next body bytes or `eof`. The borrowed slice is valid
+        /// until any operation that advances the connection; a caller that
+        /// holds it across another read must copy. Holding an h2 slice pins
+        /// the connection window for every stream.
+        read: *const fn (ptr: *anyopaque) BodyError!BodyResult,
+        /// The RST_STREAM code when `read` returned `error.Reset`.
+        resetCode: *const fn (ptr: *anyopaque) ?u32,
+        /// The local cause when `read` returned a `Local*` error.
+        localCause: *const fn (ptr: *anyopaque) ?Local,
         /// Finish the response. Idempotent. Releases unread flow control and
         /// resets an incomplete stream where the protocol supports it.
         close: *const fn (ptr: *anyopaque) void,
     };
 
-    pub fn read(self: Body) BodyRead {
+    pub fn read(self: Body) BodyError!BodyResult {
         return self.vtable.read(self.ptr);
+    }
+
+    pub fn resetCode(self: Body) ?u32 {
+        return self.vtable.resetCode(self.ptr);
+    }
+
+    pub fn localCause(self: Body) ?Local {
+        return self.vtable.localCause(self.ptr);
     }
 
     pub fn close(self: Body) void {

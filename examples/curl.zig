@@ -148,17 +148,18 @@ fn printResponse(io: Io, response: client.Response) !void {
 
 fn drain(body: http.client.Body, w: *Io.Writer) !void {
     while (true) {
-        switch (body.read()) {
+        const result = body.read() catch |err| switch (err) {
+            error.Reset => return error.StreamReset,
+            error.Truncated => return error.TruncatedBody,
+            error.Protocol => return error.ProtocolError,
+            error.LocalCanceled => return error.Canceled,
+            error.LocalCapacity => return error.LocalCapacity,
+            error.LocalOutOfMemory => return error.OutOfMemory,
+            error.LocalUnusable => return error.ConnectionUnusable,
+        };
+        switch (result) {
             .data => |bytes| try w.writeAll(bytes),
             .eof => break,
-            .reset => return error.StreamReset,
-            .truncated => return error.TruncatedBody,
-            .protocol => return error.ProtocolError,
-            .local => |local| return switch (local) {
-                .canceled => error.Canceled,
-                .capacity => error.LocalCapacity,
-                .out_of_memory, .unusable => error.ConnectionUnusable,
-            },
         }
     }
 }

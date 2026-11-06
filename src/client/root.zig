@@ -10,9 +10,11 @@ pub const ResponseHead = common.ResponseHead;
 pub const Body = common.Body;
 pub const Response = common.Response;
 pub const GoAway = common.GoAway;
-pub const BodyRead = common.BodyRead;
+pub const BodyResult = common.BodyResult;
+pub const BodyError = common.BodyError;
 pub const Local = common.Local;
 pub const BodyStep = common.BodyStep;
+pub const BodyStepError = common.BodyStepError;
 pub const Config = common.Config;
 
 test {
