@@ -15,6 +15,7 @@ const Header = @import("../../header.zig").Header;
 const Status = @import("../../status.zig").Status;
 const h1 = @import("../root.zig");
 const common = @import("../../engine/common.zig");
+const stream_mod = @import("../../engine/stream.zig");
 const api = @import("common.zig");
 pub const Exchange = @import("common.zig").Exchange;
 pub const Handler = @import("common.zig").Handler;
@@ -184,6 +185,11 @@ fn handleRequest(
     };
     handler.vtable.handle(handler.ptr, &exchange) catch |err| {
         handler.vtable.report_error(handler.ptr, err);
+        if (exchange.response_stream) |source| {
+            source.stream.close();
+            exchange.response_stream = null;
+            exchange.response_options = null;
+        }
         if (conn.sendSlices().head.len == 0) {
             exchange.respond(.{ .status = .internal_server_error }, "") catch |resp_err| {
                 complete(handler, &exchange, arena, config.common.arena_retain_bytes);
@@ -195,6 +201,17 @@ fn handleRequest(
             });
         }
     };
+
+    if (exchange.response_stream) |source| {
+        writeStreamResponse(writer, &exchange, source) catch |err| {
+            source.stream.close();
+            complete(handler, &exchange, arena, config.common.arena_retain_bytes);
+            return err;
+        };
+        source.stream.close();
+        complete(handler, &exchange, arena, config.common.arena_retain_bytes);
+        return .close;
+    }
 
     const done = writePending(io, conn, writer) catch |err| {
         complete(handler, &exchange, arena, config.common.arena_retain_bytes);
@@ -211,6 +228,52 @@ fn handleRequest(
     }
     complete(handler, &exchange, arena, config.common.arena_retain_bytes);
     return error.NoResponse;
+}
+
+fn writeStreamResponse(
+    writer: *Io.Writer,
+    exchange: *Exchange,
+    source: stream_mod.ResponseStream,
+) !void {
+    const options = exchange.response_options orelse return error.NoResponse;
+    var w: h1.Writer = .init(writer);
+    try w.statusLine(.@"HTTP/1.1", options.status);
+    if (options.content_type) |value| try w.field("Content-Type", value);
+    for (options.headers) |header| try w.field(header.name, header.value);
+    try w.field("Connection", "close");
+    const chunked = source.content_length == null;
+    if (chunked) {
+        try w.chunked();
+    } else {
+        try w.contentLength(source.content_length.?);
+    }
+    try w.endFields();
+    try writer.flush();
+
+    var total: u64 = 0;
+    while (true) {
+        switch (source.stream.next()) {
+            .eof => break,
+            .failed => |err| return err,
+            .data => |bytes| {
+                if (bytes.len == 0) return error.EmptyChunk;
+                total = std.math.add(u64, total, bytes.len) catch return error.BodyTooLong;
+                if (chunked) {
+                    try w.chunk(bytes);
+                } else {
+                    if (total > source.content_length.?) return error.BodyTooLong;
+                    try writer.writeAll(bytes);
+                }
+                try writer.flush();
+            },
+        }
+    }
+    if (chunked) {
+        try w.lastChunk(&.{});
+    } else if (total != source.content_length.?) {
+        return error.BodyTooShort;
+    }
+    try writer.flush();
 }
 
 fn complete(
@@ -313,6 +376,79 @@ const TestHandler = struct {
         try exchange.respond(.{ .status = .ok, .content_type = "text/plain" }, body);
     }
 };
+
+const SliceStream = struct {
+    sent: bool = false,
+    const vtable: stream_mod.ReadStream.VTable = .{ .next = next, .close = close };
+
+    fn next(ptr: *anyopaque) stream_mod.Read {
+        const self: *SliceStream = @ptrCast(@alignCast(ptr));
+        if (self.sent) return .eof;
+        self.sent = true;
+        return .{ .data = "hello\n" };
+    }
+
+    fn close(_: *anyopaque) void {}
+};
+
+const TestStreamHandler = struct {
+    fn handler(_: *TestStreamHandler) Handler {
+        return .{ .ptr = undefined, .vtable = &.{
+            .handle = handle,
+            .complete = Handler.noopComplete,
+            .report_error = Handler.noopReportError,
+            .policy_response = Handler.defaultPolicyResponse,
+        } };
+    }
+
+    fn handle(_: *anyopaque, exchange: *Exchange) anyerror!void {
+        const body = try exchange.arena.create(SliceStream);
+        body.* = .{};
+        try exchange.respondStream(.{
+            .status = .ok,
+            .content_type = "text/plain",
+        }, .{
+            .stream = .{ .ptr = body, .vtable = &SliceStream.vtable },
+            .content_length = null,
+        });
+    }
+};
+
+test "serve a chunked response stream" {
+    const address = try Io.net.IpAddress.parseLiteral("127.0.0.1:0");
+    var listener = try address.listen(testing.io, .{ .mode = .stream, .reuse_address = true });
+    defer listener.deinit(testing.io);
+
+    var client_address = address;
+    client_address.setPort(listener.socket.address.getPort());
+
+    var client: TestClient = .{ .io = testing.io, .address = client_address };
+    const thread = try std.Thread.spawn(.{}, TestClient.run, .{&client});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const conn = try listener.accept(testing.io);
+    var request_buffer: [1024]u8 = undefined;
+    var headers: [16]Header = undefined;
+    var response_head: [256]u8 = undefined;
+    var test_handler: TestStreamHandler = .{};
+    serve(testing.io, conn, test_handler.handler(), .{
+        .allocator = testing.allocator,
+        .request_buffer = &request_buffer,
+        .headers = &headers,
+        .response_head_buffer = &response_head,
+    }) catch |err| {
+        conn.close(testing.io);
+        thread.join();
+        joined = true;
+        return err;
+    };
+    conn.close(testing.io);
+
+    thread.join();
+    joined = true;
+    try testing.expect(client.result == null);
+}
 
 test "serve one blocking connection" {
     const address = try Io.net.IpAddress.parseLiteral("127.0.0.1:0");

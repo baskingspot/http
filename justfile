@@ -224,6 +224,8 @@ example-h2-tls-readiness:
 [group("example")]
 check-example:
     zig build example-bin
+    zig build example-sse-bin
+    zig build example-stream-bin
     zig build example-poll-bin
     zig build example-epoll-bin
     zig build example-kqueue-bin
@@ -265,6 +267,16 @@ curl *ARGS:
 [group("example")]
 example-unified:
     zig build example-unified
+
+[doc("Run the pull-based SSE example on 127.0.0.1:8090")]
+[group("example")]
+example-sse:
+    zig build example-sse
+
+[doc("Run the pull-based file transform example: just example-stream README.md")]
+[group("example")]
+example-stream *ARGS:
+    zig build example-stream -- {{ ARGS }}
 
 [doc("Run the HTTP/1.1 TLS example server on 127.0.0.1:8444")]
 [group("example")]

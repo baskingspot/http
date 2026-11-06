@@ -114,3 +114,5 @@ pub fn resetArena(arena: *std.heap.ArenaAllocator, retain_bytes: usize) void {
 
 /// The negotiated HTTP protocol a request arrived on.
 pub const Protocol = enum { h1, h2 };
+
+pub const stream = @import("stream.zig");

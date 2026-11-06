@@ -112,6 +112,21 @@ The TLS listener offers `h2` and `http/1.1` through ALPN and dispatches the
 blocking engine after the handshake. The cleartext listener reads the HTTP/2
 connection preface; anything else is HTTP/1.1.
 
+## Pull-based response streams
+
+```sh
+just example-sse             # 127.0.0.1:8090, chunked SSE events
+curl -N http://127.0.0.1:8090/
+just example-stream README.md
+curl http://127.0.0.1:8091/ -o /tmp/readme.xor
+```
+
+The handler returns a `http.engine.stream.ReadStream`; the engine writes the
+head, pulls one chunk when it can accept it, and frames the body as chunked
+HTTP/1.1 when the length is unknown. `stream_pipeline.zig` reads a file in
+16 KiB chunks and XORs each chunk before returning it, standing in for a
+compression or cipher transform.
+
 ## Tiny curl
 
 ```sh

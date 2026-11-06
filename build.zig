@@ -297,6 +297,41 @@ pub fn build(b: *std.Build) void {
     b.step("example", "Run the HTTP/1.1 example server")
         .dependOn(&run_example.step);
 
+    // Pull-based response streams: SSE and a file transform pipeline.
+    const sse_mod = b.createModule(.{
+        .root_source_file = b.path("examples/sse_server.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "http", .module = mod }},
+    });
+    const sse = b.addExecutable(.{
+        .name = "http-sse",
+        .root_module = sse_mod,
+    });
+    b.step("example-sse-bin", "Build the SSE example server")
+        .dependOn(&sse.step);
+    const run_sse = b.addRunArtifact(sse);
+    if (b.args) |args| run_sse.addArgs(args);
+    b.step("example-sse", "Run the SSE example server")
+        .dependOn(&run_sse.step);
+
+    const pipeline_mod = b.createModule(.{
+        .root_source_file = b.path("examples/stream_pipeline.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "http", .module = mod }},
+    });
+    const pipeline = b.addExecutable(.{
+        .name = "http-stream-pipeline",
+        .root_module = pipeline_mod,
+    });
+    b.step("example-stream-bin", "Build the file transform pipeline example")
+        .dependOn(&pipeline.step);
+    const run_pipeline = b.addRunArtifact(pipeline);
+    if (b.args) |args| run_pipeline.addArgs(args);
+    b.step("example-stream", "Run the file transform pipeline example")
+        .dependOn(&run_pipeline.step);
+
     // The HTTP/1 client example is driven by the Go interop recipe.
     const interop_client_mod = b.createModule(.{
         .root_source_file = b.path("examples/http1_client.zig"),
