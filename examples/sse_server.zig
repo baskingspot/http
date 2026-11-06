@@ -91,7 +91,10 @@ pub fn main(init: std.process.Init) !void {
             .headers = &headers,
             .response_head_buffer = &response_head,
             .common = .{ .body_bytes = 8 * 1024 },
-        }) catch |err| print("sse: connection: {s}\n", .{@errorName(err)});
+        }) catch |err| switch (err) {
+            error.WriteFailed => {},
+            else => print("sse: connection: {s}\n", .{@errorName(err)}),
+        };
         conn.close(io);
     }
 }
