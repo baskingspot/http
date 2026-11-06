@@ -237,7 +237,7 @@ fn writeStreamResponse(
 ) !void {
     const options = exchange.response_options orelse return error.NoResponse;
     var w: h1.Writer = .init(writer);
-    try w.statusLine(.@"HTTP/1.1", options.status);
+    try w.statusLine(exchange.conn.negotiatedVersion(), options.status);
     if (options.content_type) |value| try w.field("Content-Type", value);
     for (options.headers) |header| try w.field(header.name, header.value);
     try w.field("Connection", "close");

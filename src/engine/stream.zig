@@ -45,7 +45,9 @@ pub const ReadStream = struct {
 
 pub const ResponseStream = struct {
     stream: ReadStream,
-    /// `null` selects chunked on HTTP/1.1 and an unknown length on HTTP/2.
+    /// `null` means an unknown length. HTTP/1 streams the body until close
+    /// and sends `Connection: close`; HTTP/2 sends DATA without a declared
+    /// length.
     content_length: ?u64 = null,
 };
 

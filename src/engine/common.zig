@@ -5,10 +5,13 @@
 //! It does not try to hide streams, framing, or connection ownership.
 
 const std = @import("std");
+const testing = std.testing;
 const Allocator = std.mem.Allocator;
+const math = std.math;
 
 const Header = @import("../header.zig").Header;
 const Status = @import("../status.zig").Status;
+pub const stream = @import("stream.zig");
 
 /// Why the connection machine selected a rejection. Statuses stay the same;
 /// this is the additional information an application needs for its message.
@@ -108,6 +111,45 @@ pub const Config = struct {
     arena_retain_bytes: usize = 16 * 1024,
 };
 
+/// Copy response options and every borrowed field into caller storage. A
+/// streaming handler may build options on its stack; the engine reads them
+/// after `handle` returns.
+pub fn copyResponseOptions(
+    allocator: Allocator,
+    options: ResponseOptions,
+) Allocator.Error!ResponseOptions {
+    var bytes: usize = 0;
+    for (options.headers) |header| {
+        bytes = math.add(usize, bytes, header.name.len) catch return error.OutOfMemory;
+        bytes = math.add(usize, bytes, header.value.len) catch return error.OutOfMemory;
+    }
+    if (options.content_type) |value| {
+        bytes = math.add(usize, bytes, value.len) catch return error.OutOfMemory;
+    }
+    const storage = try allocator.alloc(u8, bytes);
+    const headers = try allocator.alloc(Header, options.headers.len);
+    var offset: usize = 0;
+    for (options.headers, 0..) |header, index| {
+        const name = storage[offset..][0..header.name.len];
+        offset += header.name.len;
+        @memcpy(name, header.name);
+        const value = storage[offset..][0..header.value.len];
+        offset += header.value.len;
+        @memcpy(value, header.value);
+        headers[index] = .{ .name = name, .value = value };
+    }
+    var content_type = options.content_type;
+    if (content_type) |value| {
+        const copy = storage[offset..][0..value.len];
+        @memcpy(copy, value);
+        content_type = copy;
+    }
+    var copied = options;
+    copied.content_type = content_type;
+    copied.headers = headers;
+    return copied;
+}
+
 pub fn resetArena(arena: *std.heap.ArenaAllocator, retain_bytes: usize) void {
     _ = arena.reset(.{ .retain_with_limit = retain_bytes });
 }
@@ -115,4 +157,22 @@ pub fn resetArena(arena: *std.heap.ArenaAllocator, retain_bytes: usize) void {
 /// The negotiated HTTP protocol a request arrived on.
 pub const Protocol = enum { h1, h2 };
 
-pub const stream = @import("stream.zig");
+test "response options copy borrowed headers" {
+    var headers = [_]Header{
+        .{ .name = "X-Test", .value = "value" },
+    };
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    const copied = try copyResponseOptions(arena.allocator(), .{
+        .status = .created,
+        .content_type = "text/plain",
+        .headers = &headers,
+    });
+    headers[0].name = "changed";
+    headers[0].value = "changed";
+    try testing.expectEqualStrings("X-Test", copied.headers[0].name);
+    try testing.expectEqualStrings("value", copied.headers[0].value);
+    try testing.expectEqualStrings("text/plain", copied.content_type.?);
+    try testing.expectEqual(Status.created, copied.status);
+}

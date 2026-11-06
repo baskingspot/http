@@ -546,7 +546,7 @@ pub fn Server(comptime Waiter: type) type {
             const options = slot.exchange.response_options orelse return false;
             var fixed = Io.Writer.fixed(slot.response_head);
             var writer: h1.Writer = .init(&fixed);
-            writer.statusLine(.@"HTTP/1.1", options.status) catch return false;
+            writer.statusLine(slot.conn.negotiatedVersion(), options.status) catch return false;
             if (options.content_type) |value| {
                 writer.field("Content-Type", value) catch return false;
             }

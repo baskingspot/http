@@ -4,7 +4,7 @@
 //!     curl -N http://127.0.0.1:8090/
 //!
 //! The handler returns a stream. The engine pulls one event at a time and
-//! flushes it as a chunked HTTP/1.1 response.
+//! flushes it as a close-delimited HTTP/1.1 response.
 
 const std = @import("std");
 const Io = std.Io;

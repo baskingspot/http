@@ -308,6 +308,12 @@ pub fn start(self: *ServerConn, now: Io.Timestamp) void {
     self.startIdleDeadline(now);
 }
 
+/// The effective request version. A streaming response uses the same version
+/// in its status line as the buffered response path.
+pub fn negotiatedVersion(self: *const ServerConn) h1.Version {
+    return self.version;
+}
+
 /// Where the engine should read. Empty while a response, the application, or
 /// a drain owns the connection.
 pub fn recvBuffer(self: *ServerConn) []u8 {

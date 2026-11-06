@@ -44,11 +44,11 @@ pub const Exchange = struct {
         self: *Exchange,
         options: h1.ServerConn.ResponseOptions,
         source: stream.ResponseStream,
-    ) h1.ServerConn.RespondError!void {
+    ) (h1.ServerConn.RespondError || Allocator.Error)!void {
         if (self.response_stream != null) return error.InvalidState;
         if (self.conn.sendSlices().head.len != 0) return error.InvalidState;
+        self.response_options = try common.copyResponseOptions(self.arena, options);
         self.response_stream = source;
-        self.response_options = options;
     }
 };
 
