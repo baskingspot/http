@@ -252,22 +252,21 @@ fn writeStreamResponse(
 
     var total: u64 = 0;
     while (true) {
-        switch (source.stream.next()) {
-            .eof => break,
-            .pending => return error.StreamPending,
-            .failed => |err| return err,
-            .data => |bytes| {
-                if (bytes.len == 0) return error.EmptyChunk;
-                total = std.math.add(u64, total, bytes.len) catch return error.BodyTooLong;
-                if (chunked) {
-                    try w.chunk(bytes);
-                } else {
-                    if (total > source.content_length.?) return error.BodyTooLong;
-                    try writer.writeAll(bytes);
-                }
-                try writer.flush();
-            },
+        const result = source.stream.next() catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.Pending => return error.StreamPending,
+            else => return err,
+        };
+        const bytes = result.data;
+        if (bytes.len == 0) return error.EmptyChunk;
+        total = std.math.add(u64, total, bytes.len) catch return error.BodyTooLong;
+        if (chunked) {
+            try w.chunk(bytes);
+        } else {
+            if (total > source.content_length.?) return error.BodyTooLong;
+            try writer.writeAll(bytes);
         }
+        try writer.flush();
     }
     if (chunked) {
         try w.lastChunk(&.{});
@@ -382,9 +381,9 @@ const SliceStream = struct {
     sent: bool = false,
     const vtable: stream_mod.ReadStream.VTable = .{ .next = next, .close = close };
 
-    fn next(ptr: *anyopaque) stream_mod.Read {
+    fn next(ptr: *anyopaque) stream_mod.ReadError!stream_mod.ReadResult {
         const self: *SliceStream = @ptrCast(@alignCast(ptr));
-        if (self.sent) return .eof;
+        if (self.sent) return error.EndOfStream;
         self.sent = true;
         return .{ .data = "hello\n" };
     }

@@ -10,6 +10,7 @@
 const std = @import("std");
 const Io = std.Io;
 const print = std.debug.print;
+const Allocator = std.mem.Allocator;
 
 const http = @import("http");
 const stream = http.stream;
@@ -62,8 +63,8 @@ const SseSource = struct {
 
     const vtable: stream.ReadStream.VTable = .{ .next = next, .close = close };
 
-    fn init(allocator: std.mem.Allocator, io: Io) !*SseSource {
-        const self = try allocator.create(SseSource);
+    fn init(gpa: Allocator, io: Io) !*SseSource {
+        const self = try gpa.create(SseSource);
         self.* = .{
             .io = io,
             .queue = undefined,
@@ -84,14 +85,14 @@ const SseSource = struct {
         self.queue.close(io);
     }
 
-    fn next(ptr: *anyopaque) stream.Read {
+    fn next(ptr: *anyopaque) stream.ReadError!stream.ReadResult {
         const self: *SseSource = @ptrCast(@alignCast(ptr));
         var item: [1][]const u8 = undefined;
         const n = self.queue.get(self.io, &item, 0) catch |err| switch (err) {
-            error.Closed => return .eof,
-            error.Canceled => return .{ .failed = err },
+            error.Closed => return error.EndOfStream,
+            error.Canceled => return error.Canceled,
         };
-        if (n == 0) return .pending;
+        if (n == 0) return error.Pending;
         return .{ .data = item[0] };
     }
 

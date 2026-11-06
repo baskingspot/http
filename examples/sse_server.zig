@@ -83,11 +83,11 @@ const SseSource = struct {
         self.queue.close(io);
     }
 
-    fn next(ptr: *anyopaque) stream.Read {
+    fn next(ptr: *anyopaque) stream.ReadError!stream.ReadResult {
         const self: *SseSource = @ptrCast(@alignCast(ptr));
         const item = self.queue.getOne(self.io) catch |err| switch (err) {
-            error.Closed => return .eof,
-            error.Canceled => return .{ .failed = err },
+            error.Closed => return error.EndOfStream,
+            error.Canceled => return error.Canceled,
         };
         return .{ .data = item };
     }

@@ -616,28 +616,26 @@ pub fn Server(comptime Waiter: type) type {
                     continue;
                 }
 
-                switch (source.stream.next()) {
-                    .eof => {
+                const result = source.stream.next() catch |err| switch (err) {
+                    error.EndOfStream => {
                         self.closeSlot(slot);
                         return;
                     },
-                    .pending => {
+                    error.Pending => {
                         slot.state = .stream_wait;
                         return;
                     },
-                    .failed => {
+                    else => {
                         self.closeSlot(slot);
                         return;
                     },
-                    .data => |bytes| {
-                        if (bytes.len == 0) {
-                            self.closeSlot(slot);
-                            return;
-                        }
-                        slot.stream_body = bytes;
-                        slot.stream_body_sent = 0;
-                    },
+                };
+                if (result.data.len == 0) {
+                    self.closeSlot(slot);
+                    return;
                 }
+                slot.stream_body = result.data;
+                slot.stream_body_sent = 0;
             }
         }
 

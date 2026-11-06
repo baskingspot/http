@@ -69,11 +69,11 @@ const FileSource = struct {
         return self;
     }
 
-    fn next(ptr: *anyopaque) stream.Read {
+    fn next(ptr: *anyopaque) stream.ReadError!stream.ReadResult {
         const self: *FileSource = @ptrCast(@alignCast(ptr));
-        const n = self.reader.interface.readSliceShort(self.input) catch |err|
-            return .{ .failed = err };
-        if (n == 0) return .eof;
+        const n = self.reader.interface.readSliceShort(self.input) catch
+            return error.ReadFailed;
+        if (n == 0) return error.EndOfStream;
         for (self.input[0..n], 0..) |byte, index| {
             self.output[index] = byte ^ 0x5a;
         }
