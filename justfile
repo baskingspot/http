@@ -251,7 +251,7 @@ interop:
     server_pid=$!
     trap 'kill "$server_pid" 2>/dev/null || true' EXIT
     for _ in {1..50}; do
-        if curl -fsS http://127.0.0.1:8091/ >/dev/null 2>&1; then
+        if zig build example-curl -- -s http://127.0.0.1:8091/ >/dev/null 2>&1; then
             break
         fi
         sleep 0.1
@@ -303,7 +303,7 @@ interop-tls:
     trap 'pkill -P "$server_pid" 2>/dev/null || true; pkill -x http1-tls 2>/dev/null || true; pkill -f "\\.zig-cache/.*/http1-tls$" 2>/dev/null || true; kill "$server_pid" 2>/dev/null || true' EXIT
     ready=0
     for _ in {1..300}; do
-        if curl -kfsS https://127.0.0.1:8444/ >/dev/null 2>&1; then
+        if zig build example-curl -- -s https://127.0.0.1:8444/ >/dev/null 2>&1; then
             ready=1
             break
         fi

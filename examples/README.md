@@ -4,7 +4,7 @@
 
 ```sh
 just example
-curl -v http://127.0.0.1:8080/
+just curl http://127.0.0.1:8080/
 ```
 
 The server uses `h1.engine.blocking` over `std.Io`. The accept loop owns the
@@ -117,10 +117,10 @@ connection preface; anything else is HTTP/1.1.
 ```sh
 just example-sse             # blocking SSE, 127.0.0.1:8090
 just example-sse-poll        # poll-engine SSE, 127.0.0.1:8092
-curl -N http://127.0.0.1:8090/
-curl -N http://127.0.0.1:8092/
+just curl -s http://127.0.0.1:8090/
+just curl -s http://127.0.0.1:8092/
 just example-stream README.md
-curl http://127.0.0.1:8091/ -o /tmp/readme.xor
+just curl -s http://127.0.0.1:8091/ > /tmp/readme.xor
 ```
 
 The handler returns a `http.stream.ReadStream`; the engine writes the head,
