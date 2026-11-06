@@ -5,6 +5,8 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-06
+
 ### Added
 
 - `http.stream` and `Exchange.respondStream`: pull-based response bodies for

@@ -32,7 +32,7 @@ The [API reference](api/) documents every public symbol.
 ## Install
 
 ```sh
-zig fetch --save https://baskingspot.dev/http/v0.1.0.tar.gz
+zig fetch --save https://baskingspot.dev/http/v0.2.0.tar.gz
 ```
 
 Add the module in `build.zig`:
