@@ -181,7 +181,16 @@ pub const Client = struct {
             error.EndOfStream => 0,
             else => return err,
         };
-        return if (n == 0) self.conn.eof() else self.conn.received(n);
+        if (n != 0) return self.conn.received(n);
+
+        // A buffered reader can fill its own buffer and return 0. That is not
+        // EOF; move those bytes into the connection buffer.
+        const buffered = self.reader.buffered();
+        if (buffered.len == 0) return self.conn.eof();
+        const take = @min(buffered.len, dst.len);
+        @memcpy(dst[0..take], buffered[0..take]);
+        self.reader.toss(take);
+        return self.conn.received(take);
     }
 
     fn bodyRead(ptr: *anyopaque) BodyError!BodyResult {
