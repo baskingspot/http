@@ -263,6 +263,7 @@ fn printRequest(request: client.Request, protocol: client.Protocol) void {
     err.print(">\n", .{});
     if (request.body.len != 0) err.print("{s}", .{request.body});
     err.print("\n", .{});
+    err.flush();
 }
 
 fn printResponse(response: client.Response, silent: bool, verbose: bool) !void {
@@ -274,6 +275,7 @@ fn printResponse(response: client.Response, silent: bool, verbose: bool) !void {
             err.print("< {s}: {s}\n", .{ header.name, header.value });
         }
         err.print("<\n", .{});
+        err.flush();
     } else if (!silent) {
         const writer = out.writer();
         const head = response.head;
