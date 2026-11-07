@@ -54,6 +54,10 @@
             .url = "https://baskingspot.dev/tls/v0.2.1.tar.gz",
             .hash = "tls-0.2.1-nf2MKPHUJQDtLnWHBdB3z08_tzu0kvn5kLzZRtdDhjI-",
         },
+        .cli = .{
+            .url = "https://baskingspot.dev/cli/v0.3.1.tar.gz",
+            .hash = "cli-0.3.1-nGM5m-sVAQB7tupXqokmZpPHajiV5eZPcbUVDRvGgNPb",
+        },
     },
     .paths = .{
         "build.zig",

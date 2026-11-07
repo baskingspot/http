@@ -24,6 +24,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const cli_dep = b.dependency("cli", .{
+        .target = target,
+        .optimize = optimize,
+    });
     const http_tls_mod = b.addModule("http_tls", .{
         .root_source_file = b.path("src/http_tls.zig"),
         .target = target,
@@ -548,6 +552,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "http", .module = mod },
+                .{ .name = "tls", .module = tls_dep.module("tls") },
                 .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
             },
         });
@@ -608,6 +613,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "http", .module = mod },
+                .{ .name = "cli", .module = cli_dep.module("cli") },
+                .{ .name = "tls", .module = tls_dep.module("tls") },
                 .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
             },
         });

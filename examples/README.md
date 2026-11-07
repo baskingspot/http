@@ -103,7 +103,7 @@ The example certificate and scalar are the public test fixture from
 
 ```sh
 just example-unified       # TLS on 8445, cleartext on 8082
-just curl https://127.0.0.1:8445/
+just curl -k https://127.0.0.1:8445/
 just curl --http2 http://127.0.0.1:8082/
 curl http://127.0.0.1:8082/
 ```
@@ -151,14 +151,18 @@ or cipher transform.
 ```sh
 just curl http://127.0.0.1:8080/
 just curl --http2 http://127.0.0.1:8081/
-just curl --http1.1 https://127.0.0.1:8445/
+just curl -k --http1.1 https://127.0.0.1:8445/
 just curl -d hello -X POST http://127.0.0.1:8080/
 just curl -I http://127.0.0.1:8080/
 just curl -s -H 'X-Test: value' http://127.0.0.1:8080/
+just curl -v -k https://127.0.0.1:8445/
+just curl -s https://example.com/
 ```
 
 Headers go to stdout before the body; the body streams. `-s` suppresses the
-headers. Hosts are IP literals. `--http2` is h2c prior knowledge on cleartext
-and forces h2 in ALPN; `--http1.1` forces h1. `-d` sends a static request body,
-`-X` changes the method, `-H` adds a header, and `-I` sends HEAD. HTTPS uses
-`tls_std` with no chain verification because this is a local experiment.
+headers. Hosts can be DNS names or IP literals. HTTPS verifies the system trust
+store by default; `-k` skips verification for the local fixtures. `-v` prints
+the resolved address, ALPN, cipher suite, and retained certificate chain.
+`--http2` is h2c prior knowledge on cleartext and forces h2 in ALPN;
+`--http1.1` forces h1. `-d` sends a static request body, `-X` changes the
+method, `-H` adds a header, and `-I` sends HEAD.

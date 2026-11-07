@@ -258,7 +258,7 @@ interop:
     done
     zig build interop-client
 
-[doc("Run the tiny curl example: just curl [-s] [-I] [-X method] [-d body] [-H header] <url>")]
+[doc("Run the tiny curl example: just curl [-s] [-v] [-k] [-I] [-X method] [-d body] [-H header] <url>")]
 [group("example")]
 curl *ARGS:
     zig build example-curl -- {{ ARGS }}
@@ -308,7 +308,7 @@ interop-tls:
     trap 'pkill -P "$server_pid" 2>/dev/null || true; pkill -x http1-tls 2>/dev/null || true; pkill -f "\\.zig-cache/.*/http1-tls$" 2>/dev/null || true; kill "$server_pid" 2>/dev/null || true' EXIT
     ready=0
     for _ in {1..300}; do
-        if zig build example-curl -- -s https://127.0.0.1:8444/ >/dev/null 2>&1; then
+        if zig build example-curl -- -s -k https://127.0.0.1:8444/ >/dev/null 2>&1; then
             ready=1
             break
         fi
