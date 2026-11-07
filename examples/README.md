@@ -162,7 +162,8 @@ just curl -s https://example.com/
 Headers go to stdout before the body; the body streams. `-s` suppresses the
 headers. Hosts can be DNS names or IP literals. HTTPS verifies the system trust
 store by default; `-k` skips verification for the local fixtures. `-v` prints
-the resolved address, ALPN, cipher suite, and retained certificate chain.
+the resolved address, request headers and body, response status and headers,
+ALPN, cipher suite, and retained certificate chain.
 `--http2` is h2c prior knowledge on cleartext and forces h2 in ALPN;
 `--http1.1` forces h1. `-d` sends a static request body, `-X` changes the
 method, `-H` adds a header, and `-I` sends HEAD.

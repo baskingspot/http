@@ -15,14 +15,24 @@ const Io = std.Io;
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const print = std.debug.print;
+const HostName = Io.net.HostName;
+const IpAddress = Io.net.IpAddress;
 
-const http = @import("http");
 const cli = @import("cli");
+const stdx = @import("stdx");
+const http = @import("http");
+const out = stdx.stdio.out;
+const err = stdx.stdio.err;
 const client = http.client.blocking;
 const tls = @import("tls");
 const tls_std = @import("tls_std");
 
+const TlsClient = tls_std.ClientWith(.{
+    .peer_chain_storage = tls.ClientHandshake.recommended_handshake_storage,
+});
+
 pub fn main(init: std.process.Init) !void {
+    defer stdx.stdio.flush();
     const io = init.io;
     const arena = init.arena.allocator();
 
@@ -94,17 +104,14 @@ pub fn main(init: std.process.Init) !void {
     };
 
     if (verbose) {
-        print("* host {s} resolved to ", .{url.host});
+        err.print("* host {s} resolved to ", .{url.host});
         var address_buffer: [128]u8 = undefined;
         var address_writer: Io.Writer = .fixed(&address_buffer);
         try url.address.format(&address_writer);
-        print("{s}\n", .{address_writer.buffered()});
+        err.print("{s}\n", .{address_writer.buffered()});
     }
 
     if (url.https) {
-        const TlsClient = tls_std.ClientWith(.{
-            .peer_chain_storage = tls.ClientHandshake.recommended_handshake_storage,
-        });
         const stream = try url.address.connect(io, .{ .mode = .stream });
         var conn: TlsClient = undefined;
         try conn.connect(io, stream, .{
@@ -118,13 +125,13 @@ pub fn main(init: std.process.Init) !void {
         }
         const info = conn.info();
         if (verbose) {
-            print("* TLS ALPN {s} cipher {s} certs {d}\n", .{
+            err.print("* TLS ALPN {s} cipher {s} certs {d}\n", .{
                 info.alpn orelse "none",
                 @tagName(info.cipher_suite),
                 info.peer_chain.len,
             });
             for (info.peer_chain, 0..) |cert, cert_index| {
-                print("* TLS cert[{d}] {d} bytes\n", .{ cert_index, cert.len });
+                err.print("* TLS cert[{d}] {d} bytes\n", .{ cert_index, cert.len });
             }
         }
         const alpn = conn.selectedAlpn() orelse "http/1.1";
@@ -134,6 +141,7 @@ pub fn main(init: std.process.Init) !void {
             .h1
         else
             return error.UnsupportedAlpn;
+        if (verbose) printRequest(request, negotiated);
         var http_client: client.Client = undefined;
         try http_client.init(conn.reader(), conn.writer(), .{
             .protocol = negotiated,
@@ -141,7 +149,7 @@ pub fn main(init: std.process.Init) !void {
         });
         defer http_client.deinit();
         const response = try http_client.request(request);
-        try printResponse(io, response, silent);
+        try printResponse(response, silent, verbose);
     } else {
         const stream = try url.address.connect(io, .{ .mode = .stream });
         defer stream.close(io);
@@ -149,7 +157,10 @@ pub fn main(init: std.process.Init) !void {
         var stream_writer = stream.writer(io, &write_buffer);
         var stream_reader = stream.reader(io, &.{});
         const protocol: client.Protocol = if (http2) .h2 else .h1;
-        if (verbose) print("* cleartext HTTP/{s}\n", .{@tagName(protocol)});
+        if (verbose) {
+            err.print("* cleartext HTTP/{s}\n", .{@tagName(protocol)});
+            printRequest(request, protocol);
+        }
         var http_client: client.Client = undefined;
         try http_client.init(&stream_reader.interface, &stream_writer.interface, .{
             .protocol = protocol,
@@ -157,12 +168,12 @@ pub fn main(init: std.process.Init) !void {
         });
         defer http_client.deinit();
         const response = try http_client.request(request);
-        try printResponse(io, response, silent);
+        try printResponse(response, silent, verbose);
     }
 }
 
 fn usage() error{InvalidArguments} {
-    print(
+    err.print(
         "usage: curl [-s] [-v] [-k] [-I] [-X method] [-d body] " ++
             "[-H 'Name: value'] [--http1.1|--http2] <url>\n",
         .{},
@@ -174,7 +185,7 @@ const Url = struct {
     https: bool,
     host: []const u8,
     authority: []const u8,
-    address: Io.net.IpAddress,
+    address: IpAddress,
     target: []const u8,
 };
 
@@ -197,7 +208,7 @@ fn parseUrl(arena: Allocator, io: Io, text: []const u8) !Url {
     const authority_end = mem.findAny(u8, after_scheme, "/?#") orelse after_scheme.len;
     const authority = after_scheme[0..authority_end];
 
-    var host_buffer: [Io.net.HostName.max_len]u8 = undefined;
+    var host_buffer: [HostName.max_len]u8 = undefined;
     const host = (try uri.getHost(&host_buffer)).bytes;
     const literal = if (host.len > 1 and host[0] == '[') host[1 .. host.len - 1] else host;
 
@@ -214,16 +225,16 @@ fn parseUrl(arena: Allocator, io: Io, text: []const u8) !Url {
     };
 }
 
-fn resolve(io: Io, host: []const u8, port: u16) !Io.net.IpAddress {
-    return Io.net.IpAddress.parse(host, port) catch {
-        const host_name = try Io.net.HostName.init(host);
-        var results: [16]Io.net.HostName.LookupResult = undefined;
-        var queue: Io.Queue(Io.net.HostName.LookupResult) = .init(&results);
+fn resolve(io: Io, host: []const u8, port: u16) !IpAddress {
+    return IpAddress.parse(host, port) catch {
+        const host_name: HostName = try .init(host);
+        var results: [16]HostName.LookupResult = undefined;
+        var queue: Io.Queue(HostName.LookupResult) = .init(&results);
         try host_name.lookup(io, &queue, .{ .port = port });
         while (true) {
-            const result = queue.getOne(io) catch |err| switch (err) {
-                error.Closed => return error.UnknownHostName,
-                error.Canceled => return error.Canceled,
+            const result = queue.getOne(io) catch |e| return switch (e) {
+                error.Closed => error.UnknownHostName,
+                error.Canceled => error.Canceled,
             };
             switch (result) {
                 .address => |address| return address,
@@ -233,29 +244,54 @@ fn resolve(io: Io, host: []const u8, port: u16) !Io.net.IpAddress {
     };
 }
 
-fn printResponse(io: Io, response: client.Response, silent: bool) !void {
-    defer response.body.close();
-    var write_buffer: [4096]u8 = undefined;
-    var stdout_writer: Io.File.Writer = .init(.stdout(), io, &write_buffer);
-    var writer = &stdout_writer.interface;
+fn printRequest(request: client.Request, protocol: client.Protocol) void {
+    switch (protocol) {
+        .h1 => {
+            err.print("> {s} {s} HTTP/1.1\n", .{ request.method_token, request.target });
+            err.print("> Host: {s}\n", .{request.authority});
+        },
+        .h2 => {
+            err.print("> :method {s}\n", .{request.method_token});
+            err.print("> :scheme {s}\n", .{request.scheme.token()});
+            err.print("> :authority {s}\n", .{request.authority});
+            err.print("> :path {s}\n", .{request.target});
+        },
+    }
+    for (request.headers) |header| {
+        err.print("> {s}: {s}\n", .{ header.name, header.value });
+    }
+    err.print(">\n", .{});
+    if (request.body.len != 0) err.print("{s}", .{request.body});
+    err.print("\n", .{});
+}
 
-    if (!silent) {
+fn printResponse(response: client.Response, silent: bool, verbose: bool) !void {
+    defer response.body.close();
+    if (verbose) {
+        const head = response.head;
+        err.print("< {s} {d}\n", .{ @tagName(head.protocol), head.status.code() });
+        for (head.headers.items) |header| {
+            err.print("< {s}: {s}\n", .{ header.name, header.value });
+        }
+        err.print("<\n", .{});
+    } else if (!silent) {
+        const writer = out.writer();
         const head = response.head;
         try writer.print("{s} {d}\n", .{ @tagName(head.protocol), head.status.code() });
         for (head.headers.items) |header| {
             try writer.print("{s}: {s}\n", .{ header.name, header.value });
         }
         try writer.writeByte('\n');
-        try writer.flush();
+        out.flush();
     }
 
-    defer writer.flush() catch {};
-    try drain(response.body, writer);
+    try drain(response.body, out.writer());
+    out.flush();
 }
 
 fn drain(body: http.client.Body, w: *Io.Writer) !void {
     while (true) {
-        const result = body.read() catch |err| return switch (err) {
+        const result = body.read() catch |e| return switch (e) {
             error.EndOfStream => {},
             error.Reset => error.StreamReset,
             error.Truncated => error.TruncatedBody,

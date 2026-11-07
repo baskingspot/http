@@ -613,6 +613,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "http", .module = mod },
+                .{ .name = "stdx", .module = stdx.module("stdx") },
                 .{ .name = "cli", .module = cli_dep.module("cli") },
                 .{ .name = "tls", .module = tls_dep.module("tls") },
                 .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
