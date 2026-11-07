@@ -113,6 +113,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (url.https) {
         const stream = try url.address.connect(io, .{ .mode = .stream });
+        noDelay(stream);
         var conn: TlsClient = undefined;
         try conn.connect(io, stream, .{
             .host = if (insecure) null else url.host,
@@ -153,6 +154,7 @@ pub fn main(init: std.process.Init) !void {
     } else {
         const stream = try url.address.connect(io, .{ .mode = .stream });
         defer stream.close(io);
+        noDelay(stream);
         var write_buffer: [4096]u8 = undefined;
         var stream_writer = stream.writer(io, &write_buffer);
         var stream_reader = stream.reader(io, &.{});
@@ -223,6 +225,16 @@ fn parseUrl(arena: Allocator, io: Io, text: []const u8) !Url {
             std.Uri.fmt(&uri, .{ .path = true, .query = true }),
         }),
     };
+}
+
+fn noDelay(stream: Io.net.Stream) void {
+    const one: u32 = 1;
+    std.posix.setsockopt(
+        stream.socket.handle,
+        std.posix.IPPROTO.TCP,
+        std.posix.TCP.NODELAY,
+        mem.asBytes(&one),
+    ) catch return;
 }
 
 fn resolve(io: Io, host: []const u8, port: u16) !IpAddress {

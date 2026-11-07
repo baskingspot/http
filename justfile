@@ -261,7 +261,7 @@ interop:
 [doc("Run the tiny curl example: just curl [-s] [-v] [-k] [-I] [-X method] [-d body] [-H header] <url>")]
 [group("example")]
 curl *ARGS:
-    zig build example-curl -- {{ ARGS }}
+    zig build example-curl -Doptimize=ReleaseFast -- {{ ARGS }}
 
 [doc("Run TLS 8445 and cleartext 8082, both serving HTTP/1.1 and HTTP/2")]
 [group("example")]
