@@ -151,16 +151,19 @@ pub const Connection = struct {
         session_options.role = .client;
         session_options.max_streams = options.max_streams;
 
+        var session = try Session.init(options.allocator, session_options);
+        errdefer session.deinit(options.allocator);
+        const slots = try options.allocator.alloc(Slot, options.max_streams);
+        errdefer options.allocator.free(slots);
+
         self.* = .{
             .allocator = options.allocator,
-            .session = try Session.init(options.allocator, session_options),
-            .slots = try options.allocator.alloc(Slot, options.max_streams),
+            .session = session,
+            .slots = slots,
             .max_header_bytes = options.max_header_bytes,
             .max_headers = options.max_headers,
             .preface_remaining = frame.preface.len,
         };
-        errdefer self.session.deinit(self.allocator);
-        errdefer self.allocator.free(self.slots);
         for (self.slots) |*slot| slot.* = .{ .arena = .init(options.allocator) };
     }
 
@@ -284,6 +287,7 @@ pub const Connection = struct {
         self.reclaim();
 
         if (self.closedEvent()) |event| return event;
+        if (self.poisoned) return error.ConnectionClosed;
 
         while (true) {
             const event = try self.session.nextEvent(self.allocator) orelse return null;
