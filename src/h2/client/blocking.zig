@@ -417,7 +417,9 @@ pub const Client = struct {
                         self.connection_poisoned = true;
                         return error.Protocol;
                     }
-                    self.pending_flow = data.flow_len;
+                    // Padding was already returned by Session.onData; only the
+                    // application bytes are still charged to the windows.
+                    self.pending_flow = @intCast(data.bytes.len);
                     if (data.end_stream) {
                         self.remote_end = true;
                         self.pending_body = &.{};

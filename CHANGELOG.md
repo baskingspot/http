@@ -5,6 +5,14 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `h2.client.connection.Connection`: a step-shaped, multiplexed HTTP/2 client
+  with writable request DATA, `DataLease` response reads, response trailers,
+  per-stream flow-control backpressure, and GOAWAY boundary handling.
+- `h2.Session.releaseConnection` and `releaseStream`: independent receive
+  window credits for streaming servers.
+
 ## [0.2.0] - 2026-11-06
 
 ### Added

@@ -1309,9 +1309,29 @@ pub const Session = struct {
         try self.appendFrame(allocator, .ping, 0, 0, payload);
     }
 
-    /// Return consumed DATA bytes to the flow-control windows and send the two
-    /// WINDOW_UPDATE frames. A closed stream only gets the connection update.
-    pub fn release(
+    /// Return consumed DATA bytes to the connection window and send a
+    /// connection-level WINDOW_UPDATE. A streaming server can release this
+    /// independently of the stream credit so one paused stream does not stall
+    /// every stream on the connection.
+    pub fn releaseConnection(
+        self: *Session,
+        allocator: Allocator,
+        count: u32,
+    ) Error!void {
+        if (count == 0) return;
+        if (count > 0x7fff_ffff) return error.FlowControlError;
+        const inc: u31 = @intCast(count);
+
+        try self.out.ensure(allocator, 13);
+        self.conn_recv.increase(inc) catch return error.FlowControlError;
+        var payload: [4]u8 = undefined;
+        mem.writeInt(u32, &payload, @as(u32, inc), .big);
+        try self.appendFrame(allocator, .window_update, 0, 0, &payload);
+    }
+
+    /// Return consumed DATA bytes to one stream window. A closed or missing
+    /// stream only gets the connection credit through releaseConnection.
+    pub fn releaseStream(
         self: *Session,
         allocator: Allocator,
         id: u31,
@@ -1321,18 +1341,38 @@ pub const Session = struct {
         if (count > 0x7fff_ffff) return error.FlowControlError;
         const inc: u31 = @intCast(count);
 
-        try self.out.ensure(allocator, 26);
-        self.conn_recv.increase(inc) catch return error.FlowControlError;
+        const state = self.streams.getPtr(id) orelse return;
+        if (state.state == .closed) return;
+        try self.out.ensure(allocator, 13);
+        state.recv.increase(inc) catch return error.FlowControlError;
         var payload: [4]u8 = undefined;
         mem.writeInt(u32, &payload, @as(u32, inc), .big);
-        try self.appendFrame(allocator, .window_update, 0, 0, &payload);
+        try self.appendFrame(allocator, .window_update, 0, id, &payload);
+    }
 
-        if (self.streams.getPtr(id)) |state| {
-            if (state.state != .closed) {
-                state.recv.increase(inc) catch return error.FlowControlError;
-                try self.appendFrame(allocator, .window_update, 0, id, &payload);
-            }
-        }
+    /// Return consumed DATA bytes to both windows and send the two
+    /// WINDOW_UPDATE frames. A closed stream only gets the connection update.
+    pub fn release(
+        self: *Session,
+        allocator: Allocator,
+        id: u31,
+        count: u32,
+    ) Error!void {
+        if (count == 0) return;
+        if (count > 0x7fff_ffff) return error.FlowControlError;
+        try self.out.ensure(allocator, 26);
+        try self.releaseConnection(allocator, count);
+        try self.releaseStream(allocator, id, count);
+    }
+
+    /// Current send window for one stream, or null if it is unknown.
+    pub fn sendWindow(self: *const Session, id: u31) ?i64 {
+        const state = self.streams.getPtr(id) orelse return null;
+        return state.send.available;
+    }
+
+    pub fn connectionSendWindow(self: *const Session) i64 {
+        return self.conn_send.available;
     }
 
     fn checkBudget(self: *Session, n: usize) Error!void {
