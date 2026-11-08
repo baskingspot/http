@@ -18,7 +18,11 @@ pub const Event = union(enum) {
     handshake_complete,
     /// Borrowed plaintext. The transport keeps it pinned until `consume`.
     application_data: []const u8,
-    /// The peer ended its side of the transport. Flush pending output, then
-    /// close the slot.
+    /// The peer ended its side of the transport and will send nothing more.
+    /// This is not the end of the socket: after a TLS close_notify our sending
+    /// direction can stay open (RFC 8446 6.1), so flush pending output and
+    /// call `canWrite` before closing the slot. The transport keeps reporting
+    /// `closed` once the peer has closed, so a driver must decide from
+    /// `canWrite` rather than waiting for another kind of event.
     closed,
 };
