@@ -189,6 +189,7 @@ pub const Tick = union(enum) {
 pub const RespondError = h1.Writer.Error || error{
     InvalidState,
     InvalidStatus,
+    InvalidResponse,
     ResponseHeadTooLarge,
 };
 
@@ -487,6 +488,7 @@ pub fn beginStream(
     body_length: ?u64,
 ) RespondError!StreamMode {
     if (self.phase != .app) return error.InvalidState;
+    if (options.trailers.len != 0) return error.InvalidResponse;
     if (options.status.class()) |class| {
         if (class == .informational) return error.InvalidStatus;
     }
@@ -985,7 +987,11 @@ fn queueResponse(
     options: ResponseOptions,
     body: []const u8,
     kind: ResponseKind,
-) h1.Writer.Error!void {
+) RespondError!void {
+    // h1 has no chunked trailer support. Dropping a trailer section would
+    // send a response that silently lost its own status, which is worse than
+    // refusing it.
+    if (options.trailers.len != 0) return error.InvalidResponse;
     self.body_allowed = statusAllowsBody(options.status);
     var io: Io.Writer = .fixed(self.response_buffer);
     var w: h1.Writer = .init(&io);
@@ -2008,4 +2014,20 @@ test "an interim response never coalesces with its next response" {
     };
     try testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", t.conn.sendSlices().head);
     try testing.expectEqual(.read, std.meta.activeTag(try t.drain()));
+}
+
+test "a trailer section is refused, not silently dropped" {
+    var t: TestConn = undefined;
+    t.init(.{});
+
+    _ = try expectRequest(try t.feed("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
+    // Dropping these would send a response that lost its own status.
+    try testing.expectError(error.InvalidResponse, t.conn.respond(.{
+        .status = .ok,
+        .trailers = &.{.{ .name = "grpc-status", .value = "0" }},
+    }, ""));
+    try testing.expectError(error.InvalidResponse, t.conn.beginStream(.{
+        .status = .ok,
+        .trailers = &.{.{ .name = "grpc-status", .value = "0" }},
+    }, null));
 }

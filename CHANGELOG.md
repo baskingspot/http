@@ -17,6 +17,12 @@ All notable changes to http are recorded here. The format follows
 - `h2.client.connection.Connection`: a step-shaped, multiplexed HTTP/2 client
   with writable request DATA, `DataLease` response reads, response trailers,
   per-stream flow-control backpressure, and GOAWAY boundary handling.
+  `h2.client` also exports `Event`, `Close`, `Request`, and `Options`, so a
+  caller can name the event union and dispatch per stream.
+- `h2.engine.ResponseOptions.trailers`: a borrowed trailing header section,
+  sent as its own HEADERS block after the body. This is how HTTP/2 carries a
+  gRPC status. The h1 engines reject a non-empty list with
+  `error.InvalidResponse` instead of dropping it.
 - `h2.Session.releaseConnection` and `releaseStream`: independent receive
   window credits for streaming servers.
 

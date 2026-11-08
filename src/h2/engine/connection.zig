@@ -53,6 +53,7 @@ const Slot = struct {
     request_complete: bool = false,
     handler_called: bool = false,
     headers_sent: bool = false,
+    trailers_sent: bool = false,
     body_offset: usize = 0,
     body_deadline: ?Io.Timestamp = null,
     exchange: Exchange = undefined,
@@ -180,6 +181,7 @@ pub const Connection = struct {
                 slot.request_complete = request.end_stream;
                 slot.handler_called = false;
                 slot.headers_sent = false;
+                slot.trailers_sent = false;
                 slot.body_offset = 0;
                 slot.body_deadline = null;
                 self.head_deadline = null;
@@ -368,7 +370,9 @@ pub const Connection = struct {
             };
 
             if (!slot.headers_sent) {
-                const end = reply.body.len == 0;
+                // END_STREAM on the head only when nothing follows it. A
+                // trailer section needs the stream left open.
+                const end = reply.body.len == 0 and reply.options.trailers.len == 0;
                 self.session.submitResponse(
                     self.allocator,
                     slot.stream_id,
@@ -396,7 +400,7 @@ pub const Connection = struct {
                     self.allocator,
                     slot.stream_id,
                     reply.body[slot.body_offset..],
-                    true,
+                    reply.options.trailers.len == 0,
                 ) catch |err| switch (err) {
                     error.UnknownStream, error.StreamClosed => {
                         self.finishSlot(slot, true);
@@ -411,6 +415,22 @@ pub const Connection = struct {
             }
 
             if (slot.body_offset == reply.body.len) {
+                if (!slot.trailers_sent and reply.options.trailers.len != 0) {
+                    self.session.submitTrailers(
+                        self.allocator,
+                        slot.stream_id,
+                        reply.options.trailers,
+                    ) catch |err| switch (err) {
+                        error.WouldBlock => continue,
+                        error.UnknownStream, error.StreamClosed => {
+                            self.finishSlot(slot, true);
+                            progressed = true;
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    slot.trailers_sent = true;
+                }
                 self.finishSlot(slot, true);
                 progressed = true;
             }
@@ -433,6 +453,7 @@ pub const Connection = struct {
         slot.request_complete = false;
         slot.handler_called = false;
         slot.headers_sent = false;
+        slot.trailers_sent = false;
         slot.body_offset = 0;
         slot.body_deadline = null;
         slot.exchange = undefined;

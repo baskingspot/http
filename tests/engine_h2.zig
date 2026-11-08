@@ -14,6 +14,8 @@ const Exchange = http.h2.engine.Exchange;
 
 const TestApp = struct {
     body: []const u8 = "hello",
+    /// A trailing header section, which is how a gRPC server returns status.
+    trailers: []const http.Header = &.{},
     seen: usize = 0,
 
     fn handler(self: *TestApp) Handler {
@@ -31,6 +33,7 @@ const TestApp = struct {
         try exchange.respond(.{
             .status = .ok,
             .content_type = "text/plain",
+            .trailers = self.trailers,
         }, self.body);
     }
 
@@ -73,8 +76,12 @@ const Harness = struct {
     thread: std.Thread,
 
     fn init(self: *Harness) !void {
+        try self.initWith(.{});
+    }
+
+    fn initWith(self: *Harness, app: TestApp) !void {
         self.io = testing.io;
-        self.app = .{};
+        self.app = app;
         const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
         self.listener = try address.listen(self.io, .{
             .mode = .stream,
@@ -194,4 +201,63 @@ test "the blocking engine serves a request over a socket" {
 
     try testing.expect(response_seen);
     try testing.expectEqual(@as(usize, 1), harness.app.seen);
+}
+
+test "the blocking engine sends a trailer section after the body" {
+    var harness: Harness = undefined;
+    try harness.initWith(.{
+        .trailers = &.{.{ .name = "grpc-status", .value = "0" }},
+    });
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+    const r = &reader.interface;
+    const w = &writer.interface;
+
+    var session = try http.h2.Session.init(testing.allocator, .{
+        .role = .client,
+        .max_streams = 4,
+    });
+    defer session.deinit(testing.allocator);
+
+    try flush(&session, w);
+    try handshake(&session, r, w);
+
+    _ = try session.submitRequest(testing.allocator, &request_fields, true);
+    try flush(&session, w);
+
+    // The body must not carry END_STREAM: the trailer section follows it.
+    var response_seen = false;
+    var data_seen = false;
+    var trailers_seen = false;
+    while (!trailers_seen) {
+        const event = try nextEvent(&session, r) orelse return error.EndOfStream;
+        switch (event) {
+            .response => |response| {
+                try testing.expectEqual(@as(u16, 200), response.head.status.code());
+                try testing.expect(!response.end_stream);
+                response_seen = true;
+            },
+            .data => |data| {
+                try testing.expectEqualStrings("hello", data.bytes);
+                try testing.expect(!data.end_stream);
+                data_seen = true;
+            },
+            .trailers => |trailers| {
+                try testing.expectEqualStrings("0", trailers.headers.get("grpc-status").?);
+                trailers_seen = true;
+            },
+            .settings => try flush(&session, w),
+            .connection_error => return error.ConnectionError,
+            else => {},
+        }
+    }
+
+    try testing.expect(response_seen);
+    try testing.expect(data_seen);
 }

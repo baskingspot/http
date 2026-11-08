@@ -45,6 +45,11 @@ pub const ResponseOptions = struct {
     close: bool = false,
     /// Extra regular fields. The engine adds framing and protocol fields.
     headers: []const Header = &.{},
+    /// The trailing header section, sent as its own HEADERS block after the
+    /// body. Borrowed for the response lifetime, and only on HTTP/2: h1 has no
+    /// chunked trailer support, so its engines reject a non-empty list rather
+    /// than drop it.
+    trailers: []const Header = &.{},
 };
 
 /// The context for a machine rejection. The head may not exist yet.
@@ -136,30 +141,49 @@ pub fn copyResponseOptions(
         bytes = math.add(usize, bytes, header.name.len) catch return error.OutOfMemory;
         bytes = math.add(usize, bytes, header.value.len) catch return error.OutOfMemory;
     }
+    for (options.trailers) |header| {
+        bytes = math.add(usize, bytes, header.name.len) catch return error.OutOfMemory;
+        bytes = math.add(usize, bytes, header.value.len) catch return error.OutOfMemory;
+    }
     if (options.content_type) |value| {
         bytes = math.add(usize, bytes, value.len) catch return error.OutOfMemory;
     }
     const storage = try allocator.alloc(u8, bytes);
-    const headers = try allocator.alloc(Header, options.headers.len);
     var offset: usize = 0;
-    for (options.headers, 0..) |header, index| {
-        const name = storage[offset..][0..header.name.len];
-        offset += header.name.len;
-        @memcpy(name, header.name);
-        const value = storage[offset..][0..header.value.len];
-        offset += header.value.len;
-        @memcpy(value, header.value);
-        headers[index] = .{ .name = name, .value = value };
-    }
     var content_type = options.content_type;
     if (content_type) |value| {
         const copy = storage[offset..][0..value.len];
+        offset += value.len;
         @memcpy(copy, value);
         content_type = copy;
     }
+    const headers = try copyFields(allocator, options.headers, storage, &offset);
+    const trailers = try copyFields(allocator, options.trailers, storage, &offset);
+
     var copied = options;
     copied.content_type = content_type;
     copied.headers = headers;
+    copied.trailers = trailers;
+    return copied;
+}
+
+/// Copy one field list into `storage` at `offset`, advancing it.
+fn copyFields(
+    allocator: Allocator,
+    fields: []const Header,
+    storage: []u8,
+    offset: *usize,
+) Allocator.Error![]const Header {
+    const copied = try allocator.alloc(Header, fields.len);
+    for (fields, 0..) |header, index| {
+        const name = storage[offset.*..][0..header.name.len];
+        offset.* += header.name.len;
+        @memcpy(name, header.name);
+        const value = storage[offset.*..][0..header.value.len];
+        offset.* += header.value.len;
+        @memcpy(value, header.value);
+        copied[index] = .{ .name = name, .value = value };
+    }
     return copied;
 }
 

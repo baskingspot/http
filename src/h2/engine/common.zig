@@ -45,7 +45,9 @@ pub const Exchange = struct {
 
     /// Record the response. The engine sends the HEADERS and pumps `body` under
     /// flow control. The body must stay valid until `complete` returns. The
-    /// extra headers are borrowed for the same lifetime.
+    /// extra headers and the trailer section are borrowed for the same
+    /// lifetime. A non-empty `trailers` list is sent as its own HEADERS block
+    /// after the body, which is how HTTP/2 carries a gRPC status.
     pub fn respond(
         self: *Exchange,
         options: ResponseOptions,
@@ -62,6 +64,13 @@ pub const Exchange = struct {
             .content_length = body.len,
             .headers = options.headers,
         }) catch return error.InvalidResponse;
+        _ = head.trailers(.{ .items = options.trailers }) catch return error.InvalidResponse;
+        for (options.trailers) |field| {
+            // RFC 9110 6.5.1: these fields do not belong in a trailer section.
+            if (std.ascii.eqlIgnoreCase(field.name, "content-length")) {
+                return error.InvalidResponse;
+            }
+        }
         self.response = .{ .options = options, .body = body };
     }
 };
