@@ -271,7 +271,10 @@ pub const Connection = struct {
         const slot = self.findSlot(id, generation) orelse return error.StreamClosed;
         try self.session.submitReset(self.allocator, id, code);
         slot.local_end = true;
-        slot.close_reason = .{ .reset = compat.enumToInt(code) };
+        // Our own reset is a local cause, never `.reset`. The wire code we
+        // chose is not the peer's story, and a caller that reads it back as a
+        // peer reset cannot tell its own CANCEL from a server fault.
+        slot.close_reason = .{ .local = .canceled };
     }
 
     pub fn trailers(self: *Connection, id: u31, generation: u32) Headers {
@@ -527,6 +530,16 @@ fn nextServerEvent(server: *Session) !SessionEvent {
     return (try server.nextEvent(testing.allocator)) orelse return error.NoEvent;
 }
 
+/// The next request the server sees, skipping anything queued before it.
+fn nextRequestId(server: *Session) !u31 {
+    while (true) {
+        switch (try nextServerEvent(server)) {
+            .request => |value| return value.stream_id,
+            else => {},
+        }
+    }
+}
+
 test "a bidi stream carries request and response DATA and trailers" {
     var client: Connection = undefined;
     try client.init(.{
@@ -652,4 +665,166 @@ test "a bidi stream carries request and response DATA and trailers" {
     }
     try testing.expect(trailers_seen);
     try testing.expectEqualStrings("0", stream.trailers().get("grpc-status").?);
+}
+
+test "a gRPC trailers-only response arrives as a head with END_STREAM" {
+    var client: Connection = undefined;
+    try client.init(.{
+        .allocator = testing.allocator,
+        .max_streams = 4,
+    });
+    defer client.deinit();
+
+    var server = try Session.init(testing.allocator, .{
+        .role = .server,
+        .max_streams = 4,
+    });
+    defer server.deinit(testing.allocator);
+
+    try transferServer(&server, &client);
+    try transferConnection(&client, &server);
+    while (true) {
+        const event = try nextServerEvent(&server);
+        if (event == .request) return error.UnexpectedRequest;
+        if (event == .settings) {
+            try transferServer(&server, &client);
+            break;
+        }
+    }
+    _ = try client.poll();
+
+    // A unary gRPC call: one message, then END_STREAM on the request.
+    const stream = try client.open(.{
+        .method_token = "POST",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/service/Method",
+        .headers = &.{
+            .{ .name = "content-type", .value = "application/grpc+proto" },
+            .{ .name = "te", .value = "trailers" },
+        },
+    }, true);
+
+    try transferConnection(&client, &server);
+    const request = try nextServerEvent(&server);
+    const id = switch (request) {
+        .request => |value| value.stream_id,
+        else => return error.ExpectedRequest,
+    };
+    try testing.expectEqual(stream.id, id);
+
+    // Trailers-only: one HEADERS with :status, content-type, and grpc-status,
+    // then END_STREAM. No DATA and no separate trailers block.
+    try server.submitResponse(testing.allocator, id, .{
+        .status = .ok,
+        .content_type = "application/grpc+proto",
+        .headers = &.{.{ .name = "grpc-status", .value = "0" }},
+    }, true);
+    try transferServer(&server, &client);
+
+    var head_seen = false;
+    var closed_seen = false;
+    while (!closed_seen) {
+        const event = try client.poll() orelse return error.NoEvent;
+        switch (event) {
+            .head => |value| {
+                try testing.expectEqual(id, value.stream);
+                try testing.expectEqual(@as(u16, 200), value.head.status.code());
+                // The status rides in the head, and unrecognised regular
+                // fields survive verbatim.
+                try testing.expectEqualStrings("0", value.head.headers.get("grpc-status").?);
+                try testing.expectEqualStrings(
+                    "application/grpc+proto",
+                    value.head.headers.get("content-type").?,
+                );
+                try testing.expect(value.end_stream);
+                head_seen = true;
+            },
+            .trailers => return error.UnexpectedTrailers,
+            .closed => |value| {
+                try testing.expectEqual(id, value.stream);
+                try testing.expect(value.reason == .end_stream);
+                closed_seen = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(head_seen);
+    try testing.expectEqual(@as(usize, 0), stream.trailers().items.len);
+}
+
+test "a local cancel and a peer reset are distinguishable" {
+    var client: Connection = undefined;
+    try client.init(.{
+        .allocator = testing.allocator,
+        .max_streams = 4,
+    });
+    defer client.deinit();
+
+    var server = try Session.init(testing.allocator, .{
+        .role = .server,
+        .max_streams = 4,
+    });
+    defer server.deinit(testing.allocator);
+
+    try transferServer(&server, &client);
+    try transferConnection(&client, &server);
+    while (true) {
+        const event = try nextServerEvent(&server);
+        if (event == .request) return error.UnexpectedRequest;
+        if (event == .settings) {
+            try transferServer(&server, &client);
+            break;
+        }
+    }
+    _ = try client.poll();
+
+    const request: Request = .{
+        .method_token = "POST",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/service/Method",
+        .headers = &.{
+            .{ .name = "content-type", .value = "application/grpc+proto" },
+            .{ .name = "te", .value = "trailers" },
+        },
+    };
+
+    // Our own cancel reads back as a local cause, never as a peer reset.
+    const first = try client.open(request, false);
+    try transferConnection(&client, &server);
+    const first_id = try nextRequestId(&server);
+    try testing.expectEqual(first.id, first_id);
+    try first.cancel(.cancel);
+
+    const local = try client.poll() orelse return error.NoEvent;
+    switch (local) {
+        .closed => |value| {
+            try testing.expectEqual(first.id, value.stream);
+            try testing.expect(value.reason == .local);
+            try testing.expectEqual(shared.Local.canceled, value.reason.local);
+        },
+        else => return error.ExpectedClosed,
+    }
+
+    // A peer reset carries the wire code, so REFUSED_STREAM stays retriable.
+    _ = try client.poll();
+    const second = try client.open(request, false);
+    try transferConnection(&client, &server);
+    // The server also sees our RST_STREAM, so skip to its next request.
+    const second_id = try nextRequestId(&server);
+    try testing.expectEqual(second.id, second_id);
+
+    try server.submitReset(testing.allocator, second_id, .refused_stream);
+    try transferServer(&server, &client);
+
+    const peer = try client.poll() orelse return error.NoEvent;
+    switch (peer) {
+        .closed => |value| {
+            try testing.expectEqual(second_id, value.stream);
+            try testing.expect(value.reason == .reset);
+            try testing.expectEqual(@as(u32, 0x7), value.reason.reset);
+        },
+        else => return error.ExpectedClosed,
+    }
 }
