@@ -7,6 +7,11 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `http_tls.client.Connection`: a blocking plaintext connection over TLS. Takes
+  a socket and PEM bytes, hands back `reader()`, `writer()`, `setDeadline`, and
+  `expired()`. The connection owns the deadline because an `Io.Reader` cannot
+  report one, and because polling the socket under TLS gives the next reader a
+  raw record rather than plaintext.
 - `h2.client.Connection.connectionErrorCode`: the frame error code behind a
   connection error. Streams closed by one report `.local.unusable`, which
   previously arrived with no way to tell what failed the connection.

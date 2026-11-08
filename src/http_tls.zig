@@ -19,6 +19,9 @@ const tls_epoll_impl = @import("h2/engine/tls_epoll.zig");
 const tls_kqueue_impl = @import("h2/engine/tls_kqueue.zig");
 const tls_client_impl = @import("h2/engine/transport/tls_client.zig");
 
+/// A blocking plaintext connection over TLS: reader, writer, one deadline.
+pub const client = @import("http_tls/client.zig");
+
 /// A trust store, as `tls.certificate.Policy` expects one.
 pub const Bundle = std.crypto.Certificate.Bundle;
 
@@ -74,6 +77,7 @@ pub const h2 = struct {
 
 test {
     _ = h2;
+    _ = client;
     _ = anchors;
     _ = tls_client_impl;
     _ = @import("h2/engine/transport/tls.zig");
