@@ -21,6 +21,13 @@
 //!    writer tracks an offset and never moves on with bytes still queued.
 //! 4. Flush before every blocking read. During the handshake the peer is
 //!    waiting on our ClientHello and will not answer until it arrives.
+//! 5. `endInput` is not how a wait ends. It means the transport saw EOF and
+//!    surfaces as `error.UnexpectedEof`; a deadline stops driving and releases
+//!    the slot, nothing more.
+//!
+//! There is no plaintext copy here. The transport keeps the delivered slice
+//! pinned until it is consumed, and a partial consume keeps the tail, so the
+//! reader hands over what fits and consumes exactly that much.
 
 const std = @import("std");
 const Io = std.Io;
@@ -38,8 +45,6 @@ const Platform = switch (builtin.os.tag) {
     else => http.h2.engine.wait_poll.Wait.Platform,
 };
 
-const read_capacity = 16 * 1024;
-
 pub const Error = error{
     /// The handshake finished without the ALPN protocol this client requires.
     WrongAlpn,
@@ -56,12 +61,6 @@ pub const Connection = struct {
     bundle: http_tls.Bundle = undefined,
     input: Io.Reader = undefined,
     output: Io.Writer = undefined,
-    read_buffer: [read_capacity]u8 = undefined,
-    /// Plaintext the last `application_data` handed over and this reader has not
-    /// returned yet. It stays pinned in that slice, so it is copied here.
-    pending: [4 * read_capacity]u8 = undefined,
-    pending_len: usize = 0,
-    pending_off: usize = 0,
     /// Absolute monotonic nanoseconds for the next socket wait.
     deadline_ns: ?i96 = null,
     /// Set when a wait ended because the deadline passed. `Io.Reader.Error` has
@@ -177,17 +176,16 @@ pub const Connection = struct {
                 },
                 .need_output => self.slot.send(Platform) catch return error.HandshakeClosed,
                 .progress => {},
-                .application_data => |bytes| {
-                    // Plaintext that arrives before `handshake_complete` is
-                    // already HTTP/2: the server's SETTINGS routinely lands in
-                    // the same flight as its Finished. Dropping it misaligns the
-                    // stream and the session rejects the next frame as
-                    // FRAME_SIZE_ERROR, so it is stashed for the first read.
-                    const room = self.pending.len - self.pending_len;
-                    if (bytes.len > room) return error.HandshakeClosed;
-                    @memcpy(self.pending[self.pending_len..][0..bytes.len], bytes);
-                    self.pending_len += bytes.len;
-                    self.slot.consume(@intCast(bytes.len));
+                .application_data => {
+                    // Plaintext can arrive before the completion event: the
+                    // server's SETTINGS routinely shares a flight with its
+                    // Finished, and it is already HTTP/2. Dropping it misaligns
+                    // the frame stream. The slice stays pinned until consumed,
+                    // so the handshake simply ends here and the first read
+                    // collects it.
+                    const alpn = self.slot.selectedAlpn() orelse return error.HandshakeClosed;
+                    if (!std.mem.eql(u8, alpn, self.required_alpn)) return error.WrongAlpn;
+                    return;
                 },
                 .closed => return error.HandshakeClosed,
             }
@@ -264,29 +262,22 @@ pub const Connection = struct {
     }
 
     /// Return plaintext to the caller, stepping the transport as needed.
+    ///
+    /// The transport is the buffer. `application_data` stays pinned until it is
+    /// consumed, and a partial consume keeps the tail: the next `next()` hands
+    /// back exactly the remainder. So this consumes only what it handed over and
+    /// copies nothing.
     fn fill(self: *Connection, iovecs: [][]u8) Io.Reader.Error!usize {
-        if (self.pending_off < self.pending_len) return self.handPending(iovecs);
-
         while (true) {
             switch (self.slot.next() catch return error.ReadFailed) {
                 .application_data => |bytes| {
-                    // Copy out at once: the slice is pinned only until consume.
                     const copied = copyInto(iovecs, bytes);
-                    if (copied < bytes.len) {
-                        const rest = bytes[copied..];
-                        // Dropping a byte here misaligns the frame stream and
-                        // fails the connection as FRAME_SIZE_ERROR, so a
-                        // remainder that does not fit is a bug, not backpressure.
-                        if (rest.len > self.pending.len) return error.ReadFailed;
-                        @memcpy(self.pending[0..rest.len], rest);
-                        self.pending_len = rest.len;
-                        self.pending_off = 0;
-                    }
-                    self.slot.consume(@intCast(bytes.len));
+                    self.slot.consume(@intCast(copied));
                     return copied;
                 },
                 .need_input => {
-                    // Rule 3: send before any blocking read.
+                    // Flush first: during the handshake the peer is waiting on
+                    // our ClientHello and will not answer until it arrives.
                     self.slot.send(Platform) catch return error.ReadFailed;
                     if (!(self.readSocket() catch return error.ReadFailed)) return 0;
                 },
@@ -295,17 +286,6 @@ pub const Connection = struct {
                 .closed => return 0,
             }
         }
-    }
-
-    fn handPending(self: *Connection, iovecs: [][]u8) usize {
-        const rest = self.pending[self.pending_off..self.pending_len];
-        const copied = copyInto(iovecs, rest);
-        self.pending_off += copied;
-        if (self.pending_off == self.pending_len) {
-            self.pending_off = 0;
-            self.pending_len = 0;
-        }
-        return copied;
     }
 
     /// Read the socket once into the transport's own buffer and commit it.

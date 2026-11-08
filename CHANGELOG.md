@@ -11,7 +11,9 @@ All notable changes to http are recorded here. The format follows
   a socket and PEM bytes, hands back `reader()`, `writer()`, `setDeadline`, and
   `expired()`. The connection owns the deadline because an `Io.Reader` cannot
   report one, and because polling the socket under TLS gives the next reader a
-  raw record rather than plaintext.
+  raw record rather than plaintext. It keeps no plaintext copy: the transport
+  pins the delivered slice, a partial consume keeps the tail, and the reader
+  consumes exactly what it hands over.
 - `h2.client.Connection.connectionErrorCode`: the frame error code behind a
   connection error. Streams closed by one report `.local.unusable`, which
   previously arrived with no way to tell what failed the connection.
