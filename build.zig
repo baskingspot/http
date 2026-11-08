@@ -129,6 +129,29 @@ pub fn build(b: *std.Build) void {
     passthruArgs(b, run_tls_consumer);
     test_step.dependOn(&run_tls_consumer.step);
 
+    // The blocking TLS connection owns a socket, so its test needs a listener
+    // and a server transport on the other end.
+    const tls_conn_mod = b.addModule("http-tls-connection", .{
+        .root_source_file = b.path("tests/tls_connection.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "http", .module = mod },
+            .{ .name = "http_tls", .module = http_tls_mod },
+            .{ .name = "tls", .module = tls_dep.module("tls") },
+            .{ .name = "tls_nonblocking", .module = tls_dep.module("tls_nonblocking") },
+        },
+    });
+    tls_conn_mod.link_libc = true;
+    tls_conn_mod.linkSystemLibrary("crypto", .{});
+    const tls_conn_tests = b.addTest(.{
+        .root_module = tls_conn_mod,
+        .test_runner = test_runner,
+    });
+    const run_tls_conn = b.addRunArtifact(tls_conn_tests);
+    passthruArgs(b, run_tls_conn);
+    test_step.dependOn(&run_tls_conn.step);
+
     // The interop fixture reads a txtar archive with testingx at compile time,
     // so it is a second test artifact with its own module. `http` itself never
     // imports testingx, and `tests/` is outside the package tarball.

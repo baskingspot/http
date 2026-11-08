@@ -7,6 +7,10 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `tests/tls_connection.zig`: a loopback test for `http_tls.client.Connection`.
+  A listener thread drives `tls_nonblocking.Server` through a handshake and
+  echoes plaintext; the client side is the connection under test. Covers a
+  round trip and a passed deadline.
 - `tests/tls_consumer.zig`: a consumer of the `http_tls` module by name, built
   as its own artifact. It pins that the module compiles when something other
   than itself imports it, which a file inside the module importing
@@ -17,7 +21,9 @@ All notable changes to http are recorded here. The format follows
   report one, and because polling the socket under TLS gives the next reader a
   raw record rather than plaintext. It keeps no plaintext copy: the transport
   pins the delivered slice, a partial consume keeps the tail, and the reader
-  consumes exactly what it hands over.
+  consumes exactly what it hands over. `ca_pem` is optional and
+  `insecure_no_chain_anchor` mirrors the transport, so a caller can express "no
+  verification" the way `tls` itself allows.
 - `h2.client.Connection.connectionErrorCode`: the frame error code behind a
   connection error. Streams closed by one report `.local.unusable`, which
   previously arrived with no way to tell what failed the connection.

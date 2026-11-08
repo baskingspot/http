@@ -60,6 +60,7 @@ pub const Connection = struct {
     socket: Io.net.Stream,
     slot: Transport.Slot = undefined,
     bundle: anchors_mod.Bundle = undefined,
+    opened_bundle: bool = false,
     input: Io.Reader = undefined,
     output: Io.Writer = undefined,
     /// Absolute monotonic nanoseconds for the next socket wait.
@@ -74,8 +75,13 @@ pub const Connection = struct {
     // ast-grep-ignore: public-struct-field-default -- options bag; alpn defaults to h2
     pub const Options = struct {
         /// PEM certificate blocks, as handed by a caller that already holds
-        /// them. At least one anchor must load.
-        ca_pem: []const u8,
+        /// them. At least one anchor must load, or `error.NoTrustAnchors`.
+        /// Null trusts nothing unless `insecure_no_chain_anchor` is set.
+        ca_pem: ?[]const u8 = null,
+        /// Test/demo opt-out from chain verification. Never set in production.
+        /// It has no effect while `ca_pem` is set, because the anchor path runs
+        /// first; a caller that wants it must leave `ca_pem` null.
+        insecure_no_chain_anchor: bool = false,
         /// ASCII DNS name for SNI and the DNS-ID check. The caller owns the
         /// bytes and must keep them alive for the connection's lifetime.
         host_name: []const u8,
@@ -100,15 +106,20 @@ pub const Connection = struct {
             .required_alpn = options.alpn,
         };
 
-        self.bundle = try anchors_mod.build(allocator, options.ca_pem, options.now_sec);
-        errdefer self.bundle.deinit(allocator);
+        var ca: ?*const anchors_mod.Bundle = null;
+        if (options.ca_pem) |pem| {
+            self.bundle = try anchors_mod.build(allocator, pem, options.now_sec);
+            self.opened_bundle = true;
+            ca = &self.bundle;
+        }
 
         self.slot = try Transport.init(
             allocator,
             io,
             socket.socket.handle,
             .{
-                .ca = &self.bundle,
+                .ca = ca,
+                .insecure_no_chain_anchor = options.insecure_no_chain_anchor,
                 .host_name = options.host_name,
                 .now_sec = options.now_sec,
                 .alpn = options.alpn,
@@ -149,7 +160,7 @@ pub const Connection = struct {
             self.open = false;
             self.slot.deinit();
         }
-        self.bundle.deinit(self.allocator);
+        if (self.opened_bundle) self.bundle.deinit(self.allocator);
         self.* = undefined;
     }
 
