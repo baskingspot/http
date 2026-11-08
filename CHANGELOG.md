@@ -19,6 +19,9 @@ All notable changes to http are recorded here. The format follows
   per-stream flow-control backpressure, and GOAWAY boundary handling.
   `h2.client` also exports `Event`, `Close`, `Request`, and `Options`, so a
   caller can name the event union and dispatch per stream.
+  `Connection.wantsInput` tells a hand-driven loop whether a socket read can
+  make progress, which prevents a read that blocks after the last stream
+  closes.
 - `h2.engine.ResponseOptions.trailers`: a borrowed trailing header section,
   sent as its own HEADERS block after the body. This is how HTTP/2 carries a
   gRPC status. The h1 engines reject a non-empty list with

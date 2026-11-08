@@ -195,6 +195,22 @@ pub const Connection = struct {
         return self.session.hasPendingOutput();
     }
 
+    /// True when the connection still needs peer bytes to make progress.
+    ///
+    /// A driver reads its socket only while this holds. `poll` returning null
+    /// means "no event queued", which is not the same thing and never was: once
+    /// the last stream closes, the queue stays empty forever and a read blocks
+    /// until the peer hangs up. During the handshake it holds because the
+    /// server SETTINGS has not arrived yet.
+    pub fn wantsInput(self: *const Connection) bool {
+        if (self.poisoned or self.goaway != null) return false;
+        if (!self.session.settings_received) return true;
+        for (self.slots) |*slot| {
+            if (slot.used and slot.close_reason == null) return true;
+        }
+        return false;
+    }
+
     pub fn canOpen(self: *const Connection) bool {
         return !self.poisoned and self.goaway == null and self.freeSlot() != null;
     }
@@ -767,6 +783,9 @@ test "a local cancel and a peer reset are distinguishable" {
     });
     defer server.deinit(testing.allocator);
 
+    // Before the server SETTINGS arrives the driver must keep reading.
+    try testing.expect(client.wantsInput());
+
     try transferServer(&server, &client);
     try transferConnection(&client, &server);
     while (true) {
@@ -827,4 +846,8 @@ test "a local cancel and a peer reset are distinguishable" {
         },
         else => return error.ExpectedClosed,
     }
+
+    // The last stream is done, so the driver must not read again. A read here
+    // blocks until the peer hangs up, which for a live server is never.
+    try testing.expect(!client.wantsInput());
 }
