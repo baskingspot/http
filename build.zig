@@ -83,6 +83,30 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // `http_tls` links libcrypto, so its tests are a separate artifact: the
+    // h2c `http` module must never link a crypto library. The root is the TLS
+    // transport, which pins the mapping from a TLS step to a transport event
+    // without needing a handshake.
+    const http_tls_tests_mod = b.addModule("http-tls-tests", .{
+        .root_source_file = b.path("src/h2/engine/transport/tls.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "http", .module = mod },
+            .{ .name = "tls", .module = tls_dep.module("tls") },
+            .{ .name = "tls_nonblocking", .module = tls_dep.module("tls_nonblocking") },
+        },
+    });
+    http_tls_tests_mod.link_libc = true;
+    http_tls_tests_mod.linkSystemLibrary("crypto", .{});
+    const http_tls_tests = b.addTest(.{
+        .root_module = http_tls_tests_mod,
+        .test_runner = test_runner,
+    });
+    const run_http_tls_tests = b.addRunArtifact(http_tls_tests);
+    passthruArgs(b, run_http_tls_tests);
+    test_step.dependOn(&run_http_tls_tests.step);
+
     // The interop fixture reads a txtar archive with testingx at compile time,
     // so it is a second test artifact with its own module. `http` itself never
     // imports testingx, and `tests/` is outside the package tarball.

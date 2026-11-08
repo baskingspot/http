@@ -15,6 +15,10 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `http_tls` now runs its own unit tests under `zig build test`, as a separate
+  artifact because it links libcrypto. The TLS transport's mapping is pinned:
+  a peer `close_notify` is `Event.closed`, a transport EOF is
+  `error.UnexpectedEof`, and a peer alert is never masked by a drain.
 - `http_tls` TLS transport `peerAlert`: after `next` returns `error.PeerAlert`,
   the slot reports the peer's alert level and description. A fatal handshake
   alert is no longer an unnamed error. The alert is unavailable once the

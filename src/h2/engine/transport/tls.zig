@@ -133,39 +133,21 @@ pub const Transport = struct {
         }
 
         pub fn next(self: *SlotImpl) anyerror!Event {
-            const event = self.server.next() catch |err| switch (err) {
-                error.Closed => return .closed,
-                // A fatal alert from the peer. Capture the level and
-                // description here: `lastPeerAlert` returns null once the
-                // transport reaches `.closed`, and a peer alert discards
-                // output, so there is nothing to drain first.
-                error.PeerAlert => {
-                    if (self.peer_alert == null) {
-                        self.peer_alert = self.server.lastPeerAlert();
-                    }
-                    return err;
-                },
-                else => {
-                    // A local fatal error prepared an alert. Drain it before
-                    // the slot closes; the retry returns the original error.
-                    if (self.server.sendBuffer().len != 0) return .need_output;
-                    return err;
-                },
-            };
-            return switch (event) {
-                .need_input => .need_input,
-                .need_output => .need_output,
-                .progress => .progress,
-                .handshake_complete => blk: {
-                    const alpn = self.server.selectedAlpn() orelse return error.NoAlpn;
-                    if (!std.mem.eql(u8, alpn, self.required_alpn)) return error.WrongAlpn;
-                    break :blk .handshake_complete;
-                },
-                .application_data => |bytes| .{ .application_data = bytes },
-                .early_data => error.EarlyDataUnsupported,
-                .key_update => .progress,
-                .close_notify, .closed => .closed,
-            };
+            const outcome = self.server.next();
+            // Latch before mapping: the handshake drops the alert once the
+            // transport reaches `.closed`, and a peer alert discards output,
+            // so there is nothing to drain first.
+            if (outcome) |_| {} else |err| {
+                if (err == error.PeerAlert and self.peer_alert == null) {
+                    self.peer_alert = self.server.lastPeerAlert();
+                }
+            }
+            return mapOutcome(
+                outcome,
+                self.server.sendBuffer().len != 0,
+                self.server.selectedAlpn(),
+                self.required_alpn,
+            );
         }
 
         pub fn consume(self: *SlotImpl, n: usize) void {
@@ -221,3 +203,99 @@ pub const Transport = struct {
         }
     };
 };
+
+/// The policy from one `tls_nonblocking` step to one `transport.Event`.
+///
+/// Pure over its inputs so the mapping can be pinned without a handshake.
+/// `Slot.next` supplies the live values: whether wire output is queued, the
+/// selected ALPN, and the protocol this transport requires.
+pub fn mapOutcome(
+    outcome: anyerror!TlsServer.Event,
+    has_output: bool,
+    selected_alpn: ?[]const u8,
+    required_alpn: []const u8,
+) anyerror!Event {
+    const event = outcome catch |err| switch (err) {
+        // The peer half-closed, or the transport is done. Not an error.
+        error.Closed => return .closed,
+        // A peer alert discards output, so it is never masked by a drain.
+        error.PeerAlert => return err,
+        else => {
+            // A local fatal error may have prepared an alert. Drain it before
+            // the slot closes; the retry returns the original error.
+            if (has_output) return .need_output;
+            return err;
+        },
+    };
+    return switch (event) {
+        .need_input => .need_input,
+        .need_output => .need_output,
+        .progress => .progress,
+        .handshake_complete => blk: {
+            const alpn = selected_alpn orelse return error.NoAlpn;
+            if (!std.mem.eql(u8, alpn, required_alpn)) return error.WrongAlpn;
+            break :blk .handshake_complete;
+        },
+        .application_data => |bytes| .{ .application_data = bytes },
+        .early_data => error.EarlyDataUnsupported,
+        .key_update => .progress,
+        // close_notify ends the peer's sending direction. The socket is not
+        // over: `canWrite` decides whether ours is still open.
+        .close_notify, .closed => .closed,
+    };
+}
+
+const testing = std.testing;
+
+fn expectEvent(expected: std.meta.Tag(Event), outcome: anyerror!TlsServer.Event) !void {
+    const actual = try mapOutcome(outcome, false, "h2", "h2");
+    try testing.expectEqual(expected, std.meta.activeTag(actual));
+}
+
+test "a peer close is an event, a truncation is an error" {
+    // close_notify and a full close both mean the peer sends nothing more.
+    try expectEvent(.closed, .close_notify);
+    try expectEvent(.closed, .closed);
+    try expectEvent(.closed, error.Closed);
+
+    // EOF without close_notify is a truncation and must never read as a close.
+    try testing.expectError(
+        error.UnexpectedEof,
+        mapOutcome(error.UnexpectedEof, false, "h2", "h2"),
+    );
+}
+
+test "a peer alert is never masked by a drain" {
+    try testing.expectError(error.PeerAlert, mapOutcome(error.PeerAlert, false, "h2", "h2"));
+    try testing.expectError(error.PeerAlert, mapOutcome(error.PeerAlert, true, "h2", "h2"));
+    // A local fatal error drains its prepared alert first, then reports.
+    try testing.expectEqual(
+        Event.need_output,
+        try mapOutcome(error.UnexpectedMessage, true, "h2", "h2"),
+    );
+    try testing.expectError(
+        error.UnexpectedMessage,
+        mapOutcome(error.UnexpectedMessage, false, "h2", "h2"),
+    );
+}
+
+test "the handshake requires the configured ALPN" {
+    try expectEvent(.handshake_complete, .handshake_complete);
+    try testing.expectError(error.NoAlpn, mapOutcome(.handshake_complete, false, null, "h2"));
+    try testing.expectError(
+        error.WrongAlpn,
+        mapOutcome(.handshake_complete, false, "http/1.1", "h2"),
+    );
+}
+
+test "every arm maps to exactly one outcome" {
+    try testing.expectError(
+        error.EarlyDataUnsupported,
+        mapOutcome(.{ .early_data = "" }, false, "h2", "h2"),
+    );
+    try expectEvent(.progress, .{ .key_update = .update_not_requested });
+    try expectEvent(.need_input, .need_input);
+    try expectEvent(.need_output, .need_output);
+    try expectEvent(.progress, .progress);
+    try expectEvent(.application_data, .{ .application_data = "x" });
+}
