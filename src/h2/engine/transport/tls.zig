@@ -60,6 +60,10 @@ pub const Transport = struct {
         fd: fd_t,
         required_alpn: []const u8,
         allocator: Allocator,
+        /// The peer's fatal alert, latched the moment `next` sees it. The
+        /// handshake drops it once the transport reaches `.closed`, so a
+        /// consumer must not wait for a later `next` to read it.
+        peer_alert: ?tls.alert.Alert,
 
         pub fn init(
             allocator: Allocator,
@@ -97,6 +101,7 @@ pub const Transport = struct {
             self.fd = fd;
             self.required_alpn = options.alpn;
             self.allocator = allocator;
+            self.peer_alert = null;
             return self;
         }
 
@@ -130,6 +135,16 @@ pub const Transport = struct {
         pub fn next(self: *SlotImpl) anyerror!Event {
             const event = self.server.next() catch |err| switch (err) {
                 error.Closed => return .closed,
+                // A fatal alert from the peer. Capture the level and
+                // description here: `lastPeerAlert` returns null once the
+                // transport reaches `.closed`, and a peer alert discards
+                // output, so there is nothing to drain first.
+                error.PeerAlert => {
+                    if (self.peer_alert == null) {
+                        self.peer_alert = self.server.lastPeerAlert();
+                    }
+                    return err;
+                },
                 else => {
                     // A local fatal error prepared an alert. Drain it before
                     // the slot closes; the retry returns the original error.
@@ -195,6 +210,14 @@ pub const Transport = struct {
 
         pub fn selectedAlpn(self: *const SlotImpl) ?[]const u8 {
             return self.server.selectedAlpn();
+        }
+
+        /// The peer's fatal alert after `next` returned `error.PeerAlert`.
+        /// Distinguishes a handshake failure from a clean close: `alert.level`
+        /// and `alert.description` name the cause, where the error alone does
+        /// not. Null when the peer closed cleanly or no alert arrived.
+        pub fn peerAlert(self: *const SlotImpl) ?tls.alert.Alert {
+            return self.peer_alert;
         }
     };
 };

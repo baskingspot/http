@@ -15,6 +15,10 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `http_tls` TLS transport `peerAlert`: after `next` returns `error.PeerAlert`,
+  the slot reports the peer's alert level and description. A fatal handshake
+  alert is no longer an unnamed error. The alert is unavailable once the
+  transport reaches `.closed`, so the transport latches it when it arrives.
 - Dual-toolchain support: the tree builds and tests on Zig 0.16 and 0.17.
   `nix develop` selects 0.17 and `nix develop .#zig-old` selects 0.16. CI runs
   both lanes, including the blocking TLS examples and conformance cells.
