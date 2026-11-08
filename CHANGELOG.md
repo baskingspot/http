@@ -15,10 +15,10 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
-- `http_tls.h2.transport.tls_client`: the contract for the h2-over-TLS client
-  byte transport, exported so a driver can be written against it. Not
-  implemented: `init` returns `error.ClientNotBuilt` until `tls_nonblocking`
-  ships a client.
+- `http_tls.h2.transport.tls_client`: the h2-over-TLS client byte transport.
+  Same `transport.Event` union as the h2c and TLS server transports, with the
+  binary-frame rules documented. A client/server handshake, application data,
+  and close_notify are tested over pumpable buffers with no socket.
 - `http_tls.anchors.build`: build a trust store from PEM bytes the caller
   already holds, with `now_sec` supplied. Returns `error.NoTrustAnchors` when
   nothing usable loaded, and discards a partial set rather than handing back a
