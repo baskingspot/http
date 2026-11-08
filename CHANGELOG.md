@@ -7,6 +7,9 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
+- `http_tls.anchors.build` rejects structurally invalid DER with
+  `error.InvalidCertificateDer` instead of handing bytes to a parser that reads
+  past them. tls pin moves to a commit that validates the DER structure first.
 - `h2.engine.Exchange.respond` copies the response options into the exchange
   arena before sending them. A header or trailer list built on the handler's
   stack is now safe; the engine sends it after `handle` returns. `RespondError`

@@ -137,6 +137,20 @@ test "anchors.build refuses a partial or malformed block" {
         anchors.build(testing.allocator, bad_base64, fixture_now_sec),
     );
 
+    // Structurally invalid DER is rejected before std's parser descends into
+    // it. Without this guard the 5-byte block below panics in the certificate
+    // parser, and it is structurally valid at the top level: a SEQUENCE
+    // holding one INTEGER.
+    const bad_der =
+        pem_fixture ++
+        "-----BEGIN CERTIFICATE-----\n" ++
+        "MAMCAQE=\n" ++
+        "-----END CERTIFICATE-----\n";
+    try testing.expectError(
+        error.InvalidCertificateDer,
+        anchors.build(testing.allocator, bad_der, fixture_now_sec),
+    );
+
     // A missing END marker is an error, not an empty store.
     const truncated = pem_fixture[0 .. pem_fixture.len - 30];
     try testing.expectError(
