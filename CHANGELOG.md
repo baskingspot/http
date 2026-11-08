@@ -7,6 +7,10 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `tests/tls_consumer.zig`: a consumer of the `http_tls` module by name, built
+  as its own artifact. It pins that the module compiles when something other
+  than itself imports it, which a file inside the module importing
+  `@import("http_tls")` does not.
 - `http_tls.client.Connection`: a blocking plaintext connection over TLS. Takes
   a socket and PEM bytes, hands back `reader()`, `writer()`, `setDeadline`, and
   `expired()`. The connection owns the deadline because an `Io.Reader` cannot
