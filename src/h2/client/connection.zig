@@ -180,6 +180,15 @@ pub const Connection = struct {
         self.* = undefined;
     }
 
+    /// Feed inbound bytes. Returns how many were accepted, which may be fewer
+    /// than `bytes.len`: the session buffers into a fixed input window, and a
+    /// short count is backpressure, not an error.
+    ///
+    /// The remainder is **not** retained. A caller that ignores the return
+    /// value silently drops bytes mid-frame; the next header parse then reads a
+    /// length out of the middle of a frame and the connection fails with
+    /// `frame_size_error`. Loop until every byte is accepted, and only then
+    /// release the plaintext it came from.
     pub fn receive(self: *Connection, bytes: []const u8) usize {
         return self.session.receive(bytes);
     }
@@ -863,6 +872,34 @@ test "a local cancel and a peer reset are distinguishable" {
     // The last stream is done, so the driver must not read again. A read here
     // blocks until the peer hangs up, which for a live server is never.
     try testing.expect(!client.wantsInput());
+}
+
+test "receive reports a short accept, it does not buffer the tail" {
+    var client: Connection = undefined;
+    try client.init(.{
+        .allocator = testing.allocator,
+        .max_streams = 4,
+    });
+    defer client.deinit();
+
+    // Fill the session's input window. Bytes are only buffered here; nothing
+    // is parsed until `poll`.
+    const chunk: [4096]u8 = @splat(0);
+    var fed: usize = 0;
+    var short_at: ?usize = null;
+    while (fed < 65536) {
+        const taken = client.receive(&chunk);
+        if (taken < chunk.len) {
+            short_at = fed;
+            try testing.expect(taken == 0 or taken < chunk.len);
+            break;
+        }
+        fed += taken;
+    }
+    try testing.expect(short_at != null);
+
+    // A full window accepts nothing more, and the bytes are gone, not queued.
+    try testing.expectEqual(@as(usize, 0), client.receive(&chunk));
 }
 
 test "a connection error keeps its frame error code" {
