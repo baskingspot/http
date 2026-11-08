@@ -27,11 +27,10 @@ const err = stdx.stdio.err;
 const client = http.client.blocking;
 const tls = @import("tls");
 const tls_std = @import("tls_std");
-const has_tls_std = builtin.zig_version.minor == 16;
 
-const TlsClient = if (has_tls_std) tls_std.ClientWith(.{
+const TlsClient = tls_std.ClientWith(.{
     .peer_chain_storage = tls.ClientHandshake.recommended_handshake_storage,
-}) else struct {};
+});
 
 pub fn main(init: std.process.Init) !void {
     defer stdx.stdio.flush();
@@ -114,7 +113,6 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (url.https) {
-        if (!has_tls_std) return error.TlsUnsupported;
         const stream = try url.address.connect(io, .{ .mode = .stream });
         noDelay(stream);
         var conn: TlsClient = undefined;

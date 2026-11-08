@@ -50,12 +50,11 @@
             .url = "https://baskingspot.dev/stdx/v0.3.0.tar.gz",
             .hash = "stdx-0.3.0-CcWego4nDwC5PxPd4F-nlcOWXxAVCZ6MDI5f3YNVNSO7",
         },
-        // tls#174: one tree for Zig 0.16 and 0.17. The blocking tls_std
-        // integration still needs 0.16; the readiness path uses
-        // tls_nonblocking and builds on both.
+        // tls#174 and 6b4d864: the core and all portable integrations build
+        // on Zig 0.16 and 0.17 from one tree.
         .tls = .{
-            .url = "git+https://github.com/baskingspot/tls#2210b2b3bc2a263a5a3d4500190e966454d320ae",
-            .hash = "tls-0.2.1-nf2MKC-OKAB8M3HJ6FxVt2Xctv_oQfbDUXzhWPi8ufMq",
+            .url = "git+https://github.com/baskingspot/tls#305ad33c78d9820f0390629de3820b9a6b45235e",
+            .hash = "tls-0.2.1-nf2MKC3jKAC44sXQPrxNK2rxQMOedp4N_Bdxq9NYv0GI",
         },
         .cli = .{
             .url = "https://baskingspot.dev/cli/v0.3.1.tar.gz",

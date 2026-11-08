@@ -9,8 +9,7 @@ All notable changes to http are recorded here. The format follows
 
 - Dual-toolchain support: the tree builds and tests on Zig 0.16 and 0.17.
   `nix develop` selects 0.17 and `nix develop .#zig-old` selects 0.16. CI runs
-  both lanes. The blocking `tls_std` examples remain 0.16-only because that
-  TLS integration has no 0.17 transport yet.
+  both lanes, including the blocking TLS examples and conformance cells.
 - h1 streaming responses: an unknown `ResponseStream.content_length` now uses
   chunked framing on HTTP/1.1. The terminal chunk returns the connection to
   keep-alive. HTTP/1.0 keeps the close-delimited path. HEAD, 204, and 304 send

@@ -472,9 +472,7 @@ pub fn build(b: *std.Build) void {
         "example-h2-tls",
         "Run the HTTP/2 TLS example server",
     );
-    if ((target.result.os.tag == .linux or target.result.os.tag == .macos) and
-        builtin.zig_version.minor == 16)
-    {
+    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
         const h2_tls_mod = b.createModule(.{
             .root_source_file = b.path("examples/http2_tls.zig"),
             .target = target,
@@ -516,9 +514,7 @@ pub fn build(b: *std.Build) void {
         "example-h1-tls-client",
         "Run the HTTP/1.1 TLS example client",
     );
-    if ((target.result.os.tag == .linux or target.result.os.tag == .macos) and
-        builtin.zig_version.minor == 16)
-    {
+    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
         const h1_tls_mod = b.createModule(.{
             .root_source_file = b.path("examples/http1_tls.zig"),
             .target = target,
@@ -573,9 +569,7 @@ pub fn build(b: *std.Build) void {
         "example-unified",
         "Run the HTTP/1.1 and HTTP/2 TLS example server",
     );
-    if ((target.result.os.tag == .linux or target.result.os.tag == .macos) and
-        builtin.zig_version.minor == 16)
-    {
+    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
         const unified_mod = b.createModule(.{
             .root_source_file = b.path("examples/http_unified_server.zig"),
             .target = target,
