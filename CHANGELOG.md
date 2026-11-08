@@ -15,6 +15,10 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `http_tls.anchors.build`: build a trust store from PEM bytes the caller
+  already holds, with `now_sec` supplied. Returns `error.NoTrustAnchors` when
+  nothing usable loaded, and discards a partial set rather than handing back a
+  store that fails later as a chain error. The caller owns the bundle.
 - `http_tls` now runs its own unit tests under `zig build test`, as a separate
   artifact because it links libcrypto. The TLS transport's mapping is pinned:
   a peer `close_notify` is `Event.closed`, a transport EOF is

@@ -84,11 +84,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
 
     // `http_tls` links libcrypto, so its tests are a separate artifact: the
-    // h2c `http` module must never link a crypto library. The root is the TLS
-    // transport, which pins the mapping from a TLS step to a transport event
-    // without needing a handshake.
+    // h2c `http` module must never link a crypto library. Rooted at the module
+    // so both the trust-anchor builder and the transport mapping are pinned.
     const http_tls_tests_mod = b.addModule("http-tls-tests", .{
-        .root_source_file = b.path("src/h2/engine/transport/tls.zig"),
+        .root_source_file = b.path("src/http_tls.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{

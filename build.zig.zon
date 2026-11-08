@@ -53,8 +53,8 @@
         // tls#174 and 6b4d864: the core and all portable integrations build
         // on Zig 0.16 and 0.17 from one tree.
         .tls = .{
-            .url = "git+https://github.com/baskingspot/tls#305ad33c78d9820f0390629de3820b9a6b45235e",
-            .hash = "tls-0.2.1-nf2MKC3jKAC44sXQPrxNK2rxQMOedp4N_Bdxq9NYv0GI",
+            .url = "git+https://github.com/baskingspot/tls#2e003ced7e950f637722fcd401ab6c24b6b01e99",
+            .hash = "tls-0.2.1-nf2MKJYJKQCnmWmutqse-DY1dqWBZwB3oJxDp6UkJqDf",
         },
         .cli = .{
             .url = "https://baskingspot.dev/cli/v0.3.1.tar.gz",
