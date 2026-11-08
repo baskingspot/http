@@ -10,7 +10,8 @@ All notable changes to http are recorded here. The format follows
 - `tests/tls_connection.zig`: a loopback test for `http_tls.client.Connection`.
   A listener thread drives `tls_nonblocking.Server` through a handshake and
   echoes plaintext; the client side is the connection under test. Covers a
-  round trip and a passed deadline.
+  round trip and a passed deadline, against a generated test CA whose leaf it
+  verifies, so chain verification is exercised end to end.
 - `tests/tls_consumer.zig`: a consumer of the `http_tls` module by name, built
   as its own artifact. It pins that the module compiles when something other
   than itself imports it, which a file inside the module importing

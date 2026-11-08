@@ -26,17 +26,28 @@ const Connection = http_tls.client.Connection;
 /// 2027-01-01T00:00:00Z, inside the fixtures' validity window.
 const now_sec: i64 = 1_798_761_600;
 
-const leaf_b64 =
-    "MIIByzCCAXKgAwIBAgIUbmarzBd+vWR/mRLY6OMXZSPvVQQwCgYIKoZIzj0EAwIwGzEZMBcGA1UEAwwQ" ++
-    "enRscy5zZXJ2ZXIudGVzdDAeFw0yNjA2MDEwMTA3MzFaFw0zNjA1MjkwMTA3MzFaMBsxGTAXBgNVBAMM" ++
-    "EHp0bHMuc2VydmVyLnRlc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATKaYKPBZrI1VlFanyJm97M" ++
-    "16XUgwbBJkpHVern9TQuuQmG35VDsVMFA0FvUT6cigFaiHvB6NSZWczKYURvdTIlo4GTMIGQMB0GA1Ud" ++
-    "DgQWBBQVmks0H0iMK08RcQYrOzH1jLnV0jAfBgNVHSMEGDAWgBQVmks0H0iMK08RcQYrOzH1jLnV0jAM" ++
-    "BgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDATAbBgNVHREEFDAS" ++
-    "ghB6dGxzLnNlcnZlci50ZXN0MAoGCCqGSM49BAMCA0cAMEQCIE7rvZ4pcB7M69DXnXztJ3RKJzHRMZg/" ++
-    "jvjL7Ad2t9wZAiB7s3wziFsMpfnXGN05V/q29wgFLilNG8YQX6ssYxwWog==";
+const ca_b64 =
+    "MIIBoTCCAUegAwIBAgIUYElwU9zW7k8K0l+/pLW0cooLRu4wCgYIKoZIzj0EAwIwHjEcMBoG" ++
+    "A1UEAwwTYmFza2luZ3Nwb3QgdGVzdCBDQTAeFw0yNjExMDgyMTI5MTJaFw0zNjExMDUyMTI5" ++
+    "MTJaMB4xHDAaBgNVBAMME2Jhc2tpbmdzcG90IHRlc3QgQ0EwWTATBgcqhkjOPQIBBggqhkjO" ++
+    "PQMBBwNCAAQ0i5xrrCogTXE8NieIB6Q7I6nEDRlhFy9+cBAdvE1N2bear/26RFwRfy85TCQQ" ++
+    "1pfy7joeEJ7OMs6S5HqmLZMfo2MwYTAdBgNVHQ4EFgQUXklNCmBTwvBUBxWWUG+P3HMlic0w" ++
+    "HwYDVR0jBBgwFoAUXklNCmBTwvBUBxWWUG+P3HMlic0wDwYDVR0TAQH/BAUwAwEB/zAOBgNV" ++
+    "HQ8BAf8EBAMCAQYwCgYIKoZIzj0EAwIDSAAwRQIgGhkKrs3Ti7XbyHnHAbXeGoxoBEavp5ye" ++
+    "DfHcnzBQxGUCIQDMLiQu6kV+FqRNS/inwPosu4qRRJe8Po7dHxEsMkDXhQ==";
 
-const leaf_scalar_b64 = "139HGdxmRe2N5F69cAY4IgK8B4ybwx0hgPE0siIOaeY=";
+const leaf_b64 =
+    "MIIB0DCCAXWgAwIBAgIUEDqD3Y5azscjzRoDRLEJpxijgyswCgYIKoZIzj0EAwIwHjEcMBoG" ++
+    "A1UEAwwTYmFza2luZ3Nwb3QgdGVzdCBDQTAeFw0yNjExMDgyMTI5MTJaFw0zNjExMDUyMTI5" ++
+    "MTJaMBsxGTAXBgNVBAMMEHp0bHMuc2VydmVyLnRlc3QwWTATBgcqhkjOPQIBBggqhkjOPQMB" ++
+    "BwNCAARRbBYdrnrz6oaIU2defGKr1Trlm1NL6+qqa+mmSG3AOiQoFD4BZtorlv1FBKDwgXZT" ++
+    "MNwzzEoU7QNmBOUbhuRto4GTMIGQMBsGA1UdEQQUMBKCEHp0bHMuc2VydmVyLnRlc3QwDAYD" ++
+    "VR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwHQYDVR0O" ++
+    "BBYEFP9OTNiyuMqZKCiKd4UydrqVCmfcMB8GA1UdIwQYMBaAFF5JTQpgU8LwVAcVllBvj9xz" ++
+    "JYnNMAoGCCqGSM49BAMCA0kAMEYCIQCtVJEtDQDDtmk6t6p5ahEhI7iA1Mipc7uY9z7DAd8B" ++
+    "5QIhAIBubxJiTeZbKG6jZxYpzFEvdksUhZRqUS6RzKkI7AVz";
+
+const leaf_scalar_b64 = "CH5wDP96TpNJK4U/29zPZbad1B24GBkqcNqakuC0e1g=";
 
 /// The `comptime P` syscall backend the transports take. The listener thread
 /// drives the server transport over the accepted stream's fd.
@@ -51,6 +62,14 @@ fn derAlloc(allocator: std.mem.Allocator, b64: []const u8) ![]u8 {
     errdefer allocator.free(der);
     try std.base64.standard.Decoder.decode(der, b64);
     return der;
+}
+
+fn pemAlloc(allocator: std.mem.Allocator, b64: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n",
+        .{b64},
+    );
 }
 
 const ServerThread = struct {
@@ -179,6 +198,8 @@ test "the blocking connection reads and writes plaintext over TLS" {
 
     const leaf_der = try derAlloc(allocator, leaf_b64);
     defer allocator.free(leaf_der);
+    const ca_pem = try pemAlloc(allocator, ca_b64);
+    defer allocator.free(ca_pem);
 
     var harness: Harness = undefined;
     try harness.init(allocator, leaf_der);
@@ -189,8 +210,7 @@ test "the blocking connection reads and writes plaintext over TLS" {
 
     var conn: Connection = undefined;
     try conn.init(allocator, harness.io, socket, .{
-        .ca_pem = null,
-        .insecure_no_chain_anchor = true,
+        .ca_pem = ca_pem,
         .host_name = "ztls.server.test",
         .now_sec = now_sec,
         .alpn = "h2",
@@ -221,6 +241,8 @@ test "a passed deadline ends the wait and reports itself" {
 
     const leaf_der = try derAlloc(allocator, leaf_b64);
     defer allocator.free(leaf_der);
+    const ca_pem = try pemAlloc(allocator, ca_b64);
+    defer allocator.free(ca_pem);
 
     var harness: Harness = undefined;
     try harness.init(allocator, leaf_der);
@@ -231,8 +253,7 @@ test "a passed deadline ends the wait and reports itself" {
 
     var conn: Connection = undefined;
     try conn.init(allocator, harness.io, socket, .{
-        .ca_pem = null,
-        .insecure_no_chain_anchor = true,
+        .ca_pem = ca_pem,
         .host_name = "ztls.server.test",
         .now_sec = now_sec,
         .alpn = "h2",
