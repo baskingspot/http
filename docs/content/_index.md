@@ -42,7 +42,7 @@ const http = b.dependency("http", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("http", http.module("http"));
 ```
 
-`http` builds with Zig 0.16 only. The package also exports a second module,
+`http` builds with Zig 0.16 and 0.17. The package also exports a second module,
 `http_tls`, for the TLS readiness engines; the `http` module itself imports no
 TLS and links no crypto library.
 

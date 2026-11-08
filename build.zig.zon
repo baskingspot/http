@@ -42,17 +42,20 @@
         // The reference parser for the benchmark rows. Lazy and dev-only:
         // a consumer never fetches it, and the package itself does not use it.
         .hparse = .{
-            .url = "https://github.com/nikneym/hparse/archive/4fb3d836e804eab0469bb128f521ad00b1085731.tar.gz",
-            .hash = "hparse-0.2.0-IukW0s67AADCDZ7ROogFU5EJAVLyI8aiR0LPNvZd88OK",
+            .url = "git+https://github.com/baskingspot/hparse#b5f26b59c5d4b4077afcade668b5bc9694ee0d61",
+            .hash = "hparse-0.2.0-IukW0v66AAB71PIs0XSNyZD8lw_pUPSJ8EqZG62y42u6",
             .lazy = true,
         },
         .stdx = .{
             .url = "https://baskingspot.dev/stdx/v0.3.0.tar.gz",
             .hash = "stdx-0.3.0-CcWego4nDwC5PxPd4F-nlcOWXxAVCZ6MDI5f3YNVNSO7",
         },
+        // tls#174: one tree for Zig 0.16 and 0.17. The blocking tls_std
+        // integration still needs 0.16; the readiness path uses
+        // tls_nonblocking and builds on both.
         .tls = .{
-            .url = "https://baskingspot.dev/tls/v0.2.1.tar.gz",
-            .hash = "tls-0.2.1-nf2MKPHUJQDtLnWHBdB3z08_tzu0kvn5kLzZRtdDhjI-",
+            .url = "git+https://github.com/baskingspot/tls#2210b2b3bc2a263a5a3d4500190e966454d320ae",
+            .hash = "tls-0.2.1-nf2MKC-OKAB8M3HJ6FxVt2Xctv_oQfbDUXzhWPi8ufMq",
         },
         .cli = .{
             .url = "https://baskingspot.dev/cli/v0.3.1.tar.gz",

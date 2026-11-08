@@ -12,6 +12,7 @@
 //! the caller. Headers and trailers are snapshots in the stream arena.
 
 const std = @import("std");
+const compat = @import("../../compat.zig");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 
@@ -270,7 +271,7 @@ pub const Connection = struct {
         const slot = self.findSlot(id, generation) orelse return error.StreamClosed;
         try self.session.submitReset(self.allocator, id, code);
         slot.local_end = true;
-        slot.close_reason = .{ .reset = @intFromEnum(code) };
+        slot.close_reason = .{ .reset = compat.enumToInt(code) };
     }
 
     pub fn trailers(self: *Connection, id: u31, generation: u32) Headers {
@@ -355,13 +356,13 @@ pub const Connection = struct {
                 .reset => |reset| {
                     const slot = self.slotById(reset.stream_id) orelse
                         return error.UnexpectedStream;
-                    slot.close_reason = .{ .reset = @intFromEnum(reset.code) };
+                    slot.close_reason = .{ .reset = compat.enumToInt(reset.code) };
                     return self.takeClosed(slot, slot.close_reason.?);
                 },
                 .goaway => |goaway| {
                     self.goaway = .{
                         .last_stream_id = goaway.last_stream_id,
-                        .code = @intFromEnum(goaway.code),
+                        .code = compat.enumToInt(goaway.code),
                     };
                     for (self.slots) |*slot| {
                         if (!slot.used or slot.id <= goaway.last_stream_id) continue;

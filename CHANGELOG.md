@@ -7,6 +7,10 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- Dual-toolchain support: the tree builds and tests on Zig 0.16 and 0.17.
+  `nix develop` selects 0.17 and `nix develop .#zig-old` selects 0.16. CI runs
+  both lanes. The blocking `tls_std` examples remain 0.16-only because that
+  TLS integration has no 0.17 transport yet.
 - `h2.client.connection.Connection`: a step-shaped, multiplexed HTTP/2 client
   with writable request DATA, `DataLease` response reads, response trailers,
   per-stream flow-control backpressure, and GOAWAY boundary handling.

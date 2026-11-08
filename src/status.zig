@@ -12,6 +12,7 @@
 const std = @import("std");
 const testing = std.testing;
 const assert = std.debug.assert;
+const compat = @import("compat.zig");
 
 pub const Status = enum(u10) {
     @"continue" = 100, // RFC 9110 §15.2.1
@@ -106,20 +107,20 @@ pub const Status = enum(u10) {
     }
 
     pub fn code(self: Status) u16 {
-        return @intFromEnum(self);
+        return compat.enumToInt(self);
     }
 
     /// The status with this number, or null when it cannot be three digits.
     /// A three-digit code the enum does not name returns a value, not null.
     pub fn parse(value: u16) ?Status {
         if (value > 999) return null;
-        return @as(Status, @enumFromInt(@as(u10, @intCast(value))));
+        return compat.enumFromInt(Status, @intCast(value));
     }
 
     /// The class of the code, or null when the value is outside 100..599
     /// (RFC 9110 §15).
     pub fn class(self: Status) ?Class {
-        return switch (@intFromEnum(self)) {
+        return switch (compat.enumToInt(self)) {
             100...199 => .informational,
             200...299 => .success,
             300...399 => .redirect,
@@ -211,8 +212,8 @@ pub const Status = enum(u10) {
 };
 
 test "every named status round-trips through code and parse" {
-    inline for (std.meta.fields(Status)) |field| {
-        const status: Status = @field(Status, field.name);
+    inline for (0..comptime compat.enumFieldCount(Status)) |index| {
+        const status = comptime compat.enumFieldValue(Status, index);
         try testing.expectEqual(status, Status.parse(status.code()).?);
     }
 }

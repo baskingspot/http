@@ -1,5 +1,7 @@
 # Linux and macOS are both gates. macOS runs the kqueue suite.
 jobs:
   - recipe: ci
+  - recipe: check
+    shell: zig-old
   - recipe: ci
     runners: [macos-26]

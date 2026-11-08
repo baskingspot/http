@@ -14,6 +14,7 @@
 //! `preface`; nothing here touches TLS.
 
 const std = @import("std");
+const compat = @import("../compat.zig");
 const testing = std.testing;
 const assert = std.debug.assert;
 const mem = std.mem;
@@ -121,7 +122,7 @@ pub fn parseHeader(buf: []const u8) Error!Header {
     if (buf.len < 9) return error.Incomplete;
     return .{
         .length = mem.readInt(u24, buf[0..3], .big),
-        .type = @enumFromInt(buf[3]),
+        .type = compat.enumFromInt(FrameType, buf[3]),
         .flags = buf[4],
         .stream_id = @intCast(mem.readInt(u32, buf[5..9], .big) & 0x7fff_ffff),
     };
@@ -129,7 +130,7 @@ pub fn parseHeader(buf: []const u8) Error!Header {
 
 pub fn encodeHeader(out: *[9]u8, header: Header) void {
     mem.writeInt(u24, out[0..3], header.length, .big);
-    out[3] = @intFromEnum(header.type);
+    out[3] = compat.enumToInt(header.type);
     out[4] = header.flags;
     mem.writeInt(u32, out[5..9], header.stream_id, .big);
 }
@@ -197,7 +198,7 @@ pub const SettingsIterator = struct {
         const entry = self.payload[self.pos..][0..6];
         self.pos += 6;
         return .{
-            .id = @enumFromInt(mem.readInt(u16, entry[0..2], .big)),
+            .id = compat.enumFromInt(SettingId, mem.readInt(u16, entry[0..2], .big)),
             .value = mem.readInt(u32, entry[2..6], .big),
         };
     }
@@ -273,8 +274,9 @@ pub fn body(header: Header, payload: []const u8) Error!Body {
 
         .rst_stream => {
             if (payload.len != 4) return error.InvalidLength;
+            const raw_code = mem.readInt(u32, payload[0..4], .big);
             return .{ .rst_stream = .{
-                .error_code = @enumFromInt(mem.readInt(u32, payload[0..4], .big)),
+                .error_code = compat.enumFromInt(ErrorCode, raw_code),
             } };
         },
 
@@ -304,9 +306,10 @@ pub fn body(header: Header, payload: []const u8) Error!Body {
 
         .goaway => {
             if (payload.len < 8) return error.InvalidLength;
+            const raw_code = mem.readInt(u32, payload[4..8], .big);
             return .{ .goaway = .{
                 .last_stream_id = readStreamId(payload[0..4]),
-                .error_code = @enumFromInt(mem.readInt(u32, payload[4..8], .big)),
+                .error_code = compat.enumFromInt(ErrorCode, raw_code),
                 .debug = payload[8..],
             } };
         },
@@ -369,7 +372,7 @@ pub const Writer = struct {
         @memset(self.buf[self.start..][0..9], 0);
         self.pos += 9;
 
-        self.buf[self.start + 3] = @intFromEnum(frame_type);
+        self.buf[self.start + 3] = compat.enumToInt(frame_type);
         self.buf[self.start + 4] = frame_flags;
         mem.writeInt(u32, self.buf[self.start + 5 ..][0..4], stream_id, .big);
     }
@@ -533,9 +536,14 @@ test "PING, GOAWAY, and PUSH_PROMISE" {
 }
 
 test "unknown frame types keep their payload" {
-    const header: Header = .{ .length = 3, .flags = 0, .type = @enumFromInt(0x42), .stream_id = 0 };
+    const header: Header = .{
+        .length = 3,
+        .flags = 0,
+        .type = compat.enumFromInt(FrameType, 0x42),
+        .stream_id = 0,
+    };
     const parsed = try body(header, "xyz");
-    try testing.expectEqual(@as(u8, 0x42), @intFromEnum(parsed.unknown.type));
+    try testing.expectEqual(@as(u8, 0x42), compat.enumToInt(parsed.unknown.type));
     try testing.expectEqualStrings("xyz", parsed.unknown.payload);
 }
 
@@ -548,7 +556,7 @@ test "Writer: build frames and parse them back" {
     writer.end();
 
     try writer.begin(.settings, 0, 0);
-    try writer.int(u16, @intFromEnum(SettingId.header_table_size));
+    try writer.int(u16, compat.enumToInt(SettingId.header_table_size));
     try writer.int(u32, 4096);
     writer.end();
 

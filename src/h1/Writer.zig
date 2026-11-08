@@ -11,6 +11,7 @@
 //! static or validated elsewhere.
 
 const std = @import("std");
+const compat = @import("../compat.zig");
 const testing = std.testing;
 const Io = std.Io;
 
@@ -242,7 +243,7 @@ test "status line: unnamed code and explicit reason" {
     var buffer: [64]u8 = undefined;
     var io: Io.Writer = .fixed(&buffer);
     var w: Writer = .init(&io);
-    const unnamed: Status = @enumFromInt(599);
+    const unnamed: Status = compat.enumFromInt(Status, 599);
     try w.statusLine(.@"HTTP/1.1", unnamed);
     try testing.expectEqualStrings("HTTP/1.1 599 \r\n", io.buffered());
 

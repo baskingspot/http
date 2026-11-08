@@ -74,7 +74,7 @@ exe.root_module.addImport("http", http.module("http"));
 
 `std.http` keeps its name, so `http` sits beside it in the same file. The
 package also exports `http_tls`, a second module for the TLS readiness engines;
-import it only when the server terminates TLS. `http` builds with Zig 0.16 only.
+import it only when the server terminates TLS. `http` builds with Zig 0.16 and 0.17.
 
 ## Documentation
 

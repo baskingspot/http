@@ -8,7 +8,7 @@ Pure HTTP field-value parsers: content negotiation, ranges, entity tags, dates, 
 
 ## Environment
 
-Zig 0.16 only. The flake is the tool contract, from `baskingspot/nix`: `nix develop` provides Zig, `ziglint`, and the base tools, and nothing comes from the system PATH. The justfile is the command interface: `just test`, `just lint`, `just ci`. Run `just fmt` before you commit.
+Zig 0.16 and 0.17. The flake is the tool contract, from `baskingspot/nix`: `nix develop` is 0.17, `nix develop .#zig-old` is 0.16, and neither takes Zig from the system PATH. `ziglint`, `gopls`, `h2spec`, `nghttp2`, OpenSSL, and `pkg-config` come from the same shells. The justfile is the command interface: `just check` runs the suite in the current shell, `just test` and `just lint` do one thing, and `just ci` is the full gate. Run `just fmt` before you commit. Blocking `tls_std` examples build on 0.16 only; the readiness TLS path and the core library build on both.
 
 ## Design
 

@@ -12,6 +12,7 @@
 //! `std.heap.FixedBufferAllocator`; the pools reuse records and chunks.
 
 const std = @import("std");
+const compat = @import("../compat.zig");
 const testing = std.testing;
 const assert = std.debug.assert;
 const mem = std.mem;
@@ -827,7 +828,7 @@ pub const Session = struct {
                 self.streams.count() >= self.options.max_streams)
             {
                 try self.appendFrame(allocator, .rst_stream, 0, id, &.{
-                    0, 0, 0, @intFromEnum(frame.ErrorCode.refused_stream),
+                    0, 0, 0, @intCast(compat.enumToInt(frame.ErrorCode.refused_stream)),
                 });
                 self.rememberClosed(id, true);
                 return null;
@@ -1204,7 +1205,7 @@ pub const Session = struct {
         const state = self.streams.getPtr(id) orelse return error.UnknownStream;
         _ = stream.transition(state.state, .local, .reset) catch return error.StreamClosed;
         var payload: [4]u8 = undefined;
-        mem.writeInt(u32, &payload, @intFromEnum(code), .big);
+        mem.writeInt(u32, &payload, compat.enumToInt(code), .big);
         try self.appendFrame(allocator, .rst_stream, 0, id, &payload);
         _ = self.removeStream(id, true);
     }
@@ -1272,7 +1273,7 @@ pub const Session = struct {
         defer allocator.free(payload);
         for (entries, 0..) |entry, index| {
             const at = index * 6;
-            mem.writeInt(u16, payload[at..][0..2], @intFromEnum(entry.id), .big);
+            mem.writeInt(u16, payload[at..][0..2], compat.enumToInt(entry.id), .big);
             mem.writeInt(u32, payload[at + 2 ..][0..4], entry.value, .big);
         }
         if (9 + payload.len > self.frame_buf.len) return error.SettingsTooLarge;
@@ -1299,7 +1300,7 @@ pub const Session = struct {
         if (self.goaway_sent) return;
         var payload: [8]u8 = undefined;
         mem.writeInt(u32, payload[0..4], self.ids.last_remote, .big);
-        mem.writeInt(u32, payload[4..8], @intFromEnum(code), .big);
+        mem.writeInt(u32, payload[4..8], compat.enumToInt(code), .big);
         try self.appendFrame(allocator, .goaway, 0, 0, &payload);
         self.goaway_sent = true;
     }
@@ -1468,7 +1469,7 @@ pub const Session = struct {
     ) Error!?Event {
         const existed = self.streams.contains(id);
         var payload: [4]u8 = undefined;
-        mem.writeInt(u32, &payload, @intFromEnum(code), .big);
+        mem.writeInt(u32, &payload, compat.enumToInt(code), .big);
         try self.appendFrame(allocator, .rst_stream, 0, id, &payload);
         if (!existed) return null;
         _ = self.removeStream(id, true);
@@ -1479,7 +1480,7 @@ pub const Session = struct {
         if (!self.goaway_sent) {
             var payload: [8]u8 = undefined;
             mem.writeInt(u32, payload[0..4], self.ids.last_remote, .big);
-            mem.writeInt(u32, payload[4..8], @intFromEnum(code), .big);
+            mem.writeInt(u32, payload[4..8], compat.enumToInt(code), .big);
             try self.appendFrame(allocator, .goaway, 0, 0, &payload);
             self.goaway_sent = true;
         }
@@ -1537,7 +1538,7 @@ pub const Session = struct {
 };
 
 fn putSetting(buf: []u8, n: *usize, id: frame.SettingId, value: u32) void {
-    mem.writeInt(u16, buf[n.*..][0..2], @intFromEnum(id), .big);
+    mem.writeInt(u16, buf[n.*..][0..2], compat.enumToInt(id), .big);
     mem.writeInt(u32, buf[n.* + 2 ..][0..4], value, .big);
     n.* += 6;
 }
@@ -2125,7 +2126,7 @@ test "a SETTINGS update is visible to the application" {
     var raw: [16]u8 = undefined;
     var writer = frame.Writer.init(&raw);
     try writer.begin(.settings, 0, 0);
-    try writer.int(u16, @intFromEnum(frame.SettingId.initial_window_size));
+    try writer.int(u16, compat.enumToInt(frame.SettingId.initial_window_size));
     try writer.int(u32, 100);
     writer.end();
     _ = server.receive(writer.written());
@@ -2384,8 +2385,8 @@ test "sendFrame drains one contiguous request header run" {
         const frame_type = frame_buf[3];
         const flags = frame_buf[4];
         try testing.expect(
-            frame_type == @intFromEnum(frame.FrameType.headers) or
-                frame_type == @intFromEnum(frame.FrameType.continuation),
+            frame_type == compat.enumToInt(frame.FrameType.headers) or
+                frame_type == compat.enumToInt(frame.FrameType.continuation),
         );
         try testing.expectEqual(
             run.stream_id,

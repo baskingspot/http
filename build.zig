@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -63,10 +64,10 @@ pub fn build(b: *std.Build) void {
     const testingx_dep = b.lazyDependency("testingx", .{ .target = target });
     // The reference parser for the benchmark comparison. Dev-only and lazy:
     // it never enters a consumer's fetch path.
-    const hparse_dep = b.lazyDependency(
-        "hparse",
-        .{ .target = target, .optimize = bench_optimize },
-    );
+    const hparse_dep = if (builtin.zig_version.minor == 16)
+        b.lazyDependency("hparse", .{ .target = target, .optimize = bench_optimize })
+    else
+        null;
     const test_runner: ?std.Build.Step.Compile.TestRunner = if (testingx_dep) |dep|
         .{ .path = dep.path("src/runner.zig"), .mode = .simple }
     else
@@ -77,8 +78,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = test_runner,
     });
     const run_tests = b.addRunArtifact(tests);
-    run_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
-    if (b.args) |args| run_tests.addArgs(args);
+    passthruArgs(b, run_tests);
 
     const test_step = b.step("test", "Run the unit tests");
     test_step.dependOn(&run_tests.step);
@@ -101,8 +101,7 @@ pub fn build(b: *std.Build) void {
             .test_runner = test_runner,
         });
         const run_interop = b.addRunArtifact(interop_tests);
-        run_interop.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
-        if (b.args) |args| run_interop.addArgs(args);
+        passthruArgs(b, run_interop);
         test_step.dependOn(&run_interop.step);
     }
 
@@ -119,8 +118,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = test_runner,
     });
     const run_corpus = b.addRunArtifact(corpus_tests);
-    run_corpus.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
-    if (b.args) |args| run_corpus.addArgs(args);
+    passthruArgs(b, run_corpus);
     test_step.dependOn(&run_corpus.step);
 
     // The blocking engine over real loopback sockets. The tests live outside
@@ -136,8 +134,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = test_runner,
     });
     const run_engine_tests = b.addRunArtifact(engine_tests);
-    run_engine_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
-    if (b.args) |args| run_engine_tests.addArgs(args);
+    passthruArgs(b, run_engine_tests);
     test_step.dependOn(&run_engine_tests.step);
 
     // The blocking HTTP/2 engine over a real loopback socket.
@@ -152,8 +149,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = test_runner,
     });
     const run_h2_engine_tests = b.addRunArtifact(h2_engine_tests);
-    run_h2_engine_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
-    if (b.args) |args| run_h2_engine_tests.addArgs(args);
+    passthruArgs(b, run_h2_engine_tests);
     test_step.dependOn(&run_h2_engine_tests.step);
 
     // The readiness HTTP/2 engine runs the same socket test on poll, epoll,
@@ -175,8 +171,7 @@ pub fn build(b: *std.Build) void {
             .test_runner = test_runner,
         });
         const run_readiness_tests = b.addRunArtifact(readiness_tests);
-        run_readiness_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
-        if (b.args) |args| run_readiness_tests.addArgs(args);
+        passthruArgs(b, run_readiness_tests);
         test_step.dependOn(&run_readiness_tests.step);
 
         if (target.result.os.tag == .linux) {
@@ -196,8 +191,7 @@ pub fn build(b: *std.Build) void {
                 .test_runner = test_runner,
             });
             const run_epoll_tests = b.addRunArtifact(epoll_tests);
-            run_epoll_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
-            if (b.args) |args| run_epoll_tests.addArgs(args);
+            passthruArgs(b, run_epoll_tests);
             test_step.dependOn(&run_epoll_tests.step);
         }
     }
@@ -222,8 +216,7 @@ pub fn build(b: *std.Build) void {
             .test_runner = test_runner,
         });
         const run_poll_tests = b.addRunArtifact(poll_tests);
-        run_poll_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
-        if (b.args) |args| run_poll_tests.addArgs(args);
+        passthruArgs(b, run_poll_tests);
         test_step.dependOn(&run_poll_tests.step);
 
         const epoll_options = b.addOptions();
@@ -243,8 +236,7 @@ pub fn build(b: *std.Build) void {
             .test_runner = test_runner,
         });
         const run_epoll_tests = b.addRunArtifact(epoll_tests);
-        run_epoll_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
-        if (b.args) |args| run_epoll_tests.addArgs(args);
+        passthruArgs(b, run_epoll_tests);
         test_step.dependOn(&run_epoll_tests.step);
     }
 
@@ -268,8 +260,7 @@ pub fn build(b: *std.Build) void {
             .test_runner = test_runner,
         });
         const run_kqueue_tests = b.addRunArtifact(kqueue_tests);
-        run_kqueue_tests.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
-        if (b.args) |args| run_kqueue_tests.addArgs(args);
+        passthruArgs(b, run_kqueue_tests);
         test_step.dependOn(&run_kqueue_tests.step);
     }
 
@@ -297,7 +288,7 @@ pub fn build(b: *std.Build) void {
         .dependOn(&example.step);
 
     const run_example = b.addRunArtifact(example);
-    if (b.args) |args| run_example.addArgs(args);
+    passthruArgs(b, run_example);
     b.step("example", "Run the HTTP/1.1 example server")
         .dependOn(&run_example.step);
 
@@ -315,7 +306,7 @@ pub fn build(b: *std.Build) void {
     b.step("example-sse-bin", "Build the SSE example server")
         .dependOn(&sse.step);
     const run_sse = b.addRunArtifact(sse);
-    if (b.args) |args| run_sse.addArgs(args);
+    passthruArgs(b, run_sse);
     b.step("example-sse", "Run the SSE example server")
         .dependOn(&run_sse.step);
 
@@ -332,7 +323,7 @@ pub fn build(b: *std.Build) void {
     b.step("example-deferred-bin", "Build the deferred-handler example server")
         .dependOn(&deferred.step);
     const run_deferred = b.addRunArtifact(deferred);
-    if (b.args) |args| run_deferred.addArgs(args);
+    passthruArgs(b, run_deferred);
     b.step("example-deferred", "Run the deferred-handler example server")
         .dependOn(&run_deferred.step);
 
@@ -349,7 +340,7 @@ pub fn build(b: *std.Build) void {
     b.step("example-sse-poll-bin", "Build the poll-based SSE example server")
         .dependOn(&sse_poll.step);
     const run_sse_poll = b.addRunArtifact(sse_poll);
-    if (b.args) |args| run_sse_poll.addArgs(args);
+    passthruArgs(b, run_sse_poll);
     b.step("example-sse-poll", "Run the poll-based SSE example server")
         .dependOn(&run_sse_poll.step);
 
@@ -366,7 +357,7 @@ pub fn build(b: *std.Build) void {
     b.step("example-stream-bin", "Build the file transform pipeline example")
         .dependOn(&pipeline.step);
     const run_pipeline = b.addRunArtifact(pipeline);
-    if (b.args) |args| run_pipeline.addArgs(args);
+    passthruArgs(b, run_pipeline);
     b.step("example-stream", "Run the file transform pipeline example")
         .dependOn(&run_pipeline.step);
 
@@ -385,7 +376,7 @@ pub fn build(b: *std.Build) void {
         .dependOn(&interop_client.step);
 
     const run_interop_client = b.addRunArtifact(interop_client);
-    if (b.args) |args| run_interop_client.addArgs(args);
+    passthruArgs(b, run_interop_client);
     b.step("interop-client", "Run the HTTP/1 client against the Go interop server")
         .dependOn(&run_interop_client.step);
 
@@ -404,7 +395,7 @@ pub fn build(b: *std.Build) void {
         .dependOn(&h2_example.step);
 
     const run_h2_example = b.addRunArtifact(h2_example);
-    if (b.args) |args| run_h2_example.addArgs(args);
+    passthruArgs(b, run_h2_example);
     b.step("example-h2", "Run the HTTP/2 h2c example server")
         .dependOn(&run_h2_example.step);
 
@@ -433,7 +424,7 @@ pub fn build(b: *std.Build) void {
         h2_readiness_example_bin.dependOn(&h2_readiness.step);
 
         const run_h2_readiness = b.addRunArtifact(h2_readiness);
-        if (b.args) |args| run_h2_readiness.addArgs(args);
+        passthruArgs(b, run_h2_readiness);
         h2_readiness_example_run.dependOn(&run_h2_readiness.step);
     }
 
@@ -467,7 +458,7 @@ pub fn build(b: *std.Build) void {
         h2_tls_readiness_example_bin.dependOn(&h2_tls_readiness.step);
 
         const run_h2_tls_readiness = b.addRunArtifact(h2_tls_readiness);
-        if (b.args) |args| run_h2_tls_readiness.addArgs(args);
+        passthruArgs(b, run_h2_tls_readiness);
         h2_tls_readiness_example_run.dependOn(&run_h2_tls_readiness.step);
     }
 
@@ -481,7 +472,9 @@ pub fn build(b: *std.Build) void {
         "example-h2-tls",
         "Run the HTTP/2 TLS example server",
     );
-    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+    if ((target.result.os.tag == .linux or target.result.os.tag == .macos) and
+        builtin.zig_version.minor == 16)
+    {
         const h2_tls_mod = b.createModule(.{
             .root_source_file = b.path("examples/http2_tls.zig"),
             .target = target,
@@ -501,7 +494,7 @@ pub fn build(b: *std.Build) void {
         h2_tls_example_bin.dependOn(&h2_tls.step);
 
         const run_h2_tls = b.addRunArtifact(h2_tls);
-        if (b.args) |args| run_h2_tls.addArgs(args);
+        passthruArgs(b, run_h2_tls);
         h2_tls_example_run.dependOn(&run_h2_tls.step);
     }
 
@@ -523,7 +516,9 @@ pub fn build(b: *std.Build) void {
         "example-h1-tls-client",
         "Run the HTTP/1.1 TLS example client",
     );
-    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+    if ((target.result.os.tag == .linux or target.result.os.tag == .macos) and
+        builtin.zig_version.minor == 16)
+    {
         const h1_tls_mod = b.createModule(.{
             .root_source_file = b.path("examples/http1_tls.zig"),
             .target = target,
@@ -543,7 +538,7 @@ pub fn build(b: *std.Build) void {
         h1_tls_example_bin.dependOn(&h1_tls.step);
 
         const run_h1_tls = b.addRunArtifact(h1_tls);
-        if (b.args) |args| run_h1_tls.addArgs(args);
+        passthruArgs(b, run_h1_tls);
         h1_tls_example_run.dependOn(&run_h1_tls.step);
 
         const h1_tls_client_mod = b.createModule(.{
@@ -565,7 +560,7 @@ pub fn build(b: *std.Build) void {
         h1_tls_client_bin.dependOn(&h1_tls_client.step);
 
         const run_h1_tls_client = b.addRunArtifact(h1_tls_client);
-        if (b.args) |args| run_h1_tls_client.addArgs(args);
+        passthruArgs(b, run_h1_tls_client);
         h1_tls_client_run.dependOn(&run_h1_tls_client.step);
     }
 
@@ -578,7 +573,9 @@ pub fn build(b: *std.Build) void {
         "example-unified",
         "Run the HTTP/1.1 and HTTP/2 TLS example server",
     );
-    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+    if ((target.result.os.tag == .linux or target.result.os.tag == .macos) and
+        builtin.zig_version.minor == 16)
+    {
         const unified_mod = b.createModule(.{
             .root_source_file = b.path("examples/http_unified_server.zig"),
             .target = target,
@@ -598,7 +595,7 @@ pub fn build(b: *std.Build) void {
         unified_example_bin.dependOn(&unified.step);
 
         const run_unified = b.addRunArtifact(unified);
-        if (b.args) |args| run_unified.addArgs(args);
+        passthruArgs(b, run_unified);
         unified_example_run.dependOn(&run_unified.step);
     }
 
@@ -628,7 +625,7 @@ pub fn build(b: *std.Build) void {
         curl_example_bin.dependOn(&curl.step);
 
         const run_curl = b.addRunArtifact(curl);
-        if (b.args) |args| run_curl.addArgs(args);
+        passthruArgs(b, run_curl);
         curl_example_run.dependOn(&run_curl.step);
     }
 
@@ -650,7 +647,7 @@ pub fn build(b: *std.Build) void {
         poll_example_bin.dependOn(&poll.step);
 
         const run_poll = b.addRunArtifact(poll);
-        if (b.args) |args| run_poll.addArgs(args);
+        passthruArgs(b, run_poll);
         poll_example_run.dependOn(&run_poll.step);
     }
 
@@ -678,7 +675,7 @@ pub fn build(b: *std.Build) void {
         epoll_example_bin.dependOn(&epoll.step);
 
         const run_epoll = b.addRunArtifact(epoll);
-        if (b.args) |args| run_epoll.addArgs(args);
+        passthruArgs(b, run_epoll);
         epoll_example_run.dependOn(&run_epoll.step);
     }
 
@@ -706,7 +703,7 @@ pub fn build(b: *std.Build) void {
         kqueue_example_bin.dependOn(&kqueue.step);
 
         const run_kqueue = b.addRunArtifact(kqueue);
-        if (b.args) |args| run_kqueue.addArgs(args);
+        passthruArgs(b, run_kqueue);
         kqueue_example_run.dependOn(&run_kqueue.step);
     }
 
@@ -728,7 +725,7 @@ pub fn build(b: *std.Build) void {
         uring_bin.dependOn(&uring.step);
 
         const run_uring = b.addRunArtifact(uring);
-        if (b.args) |args| run_uring.addArgs(args);
+        passthruArgs(b, run_uring);
         uring_run.dependOn(&run_uring.step);
     }
 
@@ -746,9 +743,19 @@ pub fn build(b: *std.Build) void {
                 },
                 .target = target,
             });
-            if (b.args) |args| run_bench.addArgs(args);
+            passthruArgs(b, run_bench);
 
             b.step("bench", "Run benchmarks").dependOn(&run_bench.step);
         }
+    }
+}
+
+/// `b.args` (removed in Zig 0.17) and `Run.addPassthruArgs` are the same
+/// feature on either side of the split. Probe the build API, not the version.
+fn passthruArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
+        run.addPassthruArgs();
+    } else if (b.args) |args| {
+        run.addArgs(args);
     }
 }

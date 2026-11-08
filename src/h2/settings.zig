@@ -9,6 +9,7 @@
 //! flow-control layer applies the delta to every open stream (§6.9.2).
 
 const std = @import("std");
+const compat = @import("../compat.zig");
 const testing = std.testing;
 const mem = std.mem;
 
@@ -92,7 +93,7 @@ test "defaults are the RFC 9113 §6.5.2 values" {
 
 fn applyOne(values: *Values, role: Role, id: frame.SettingId, value: u32) Error!void {
     var payload: [6]u8 = undefined;
-    mem.writeInt(u16, payload[0..2], @intFromEnum(id), .big);
+    mem.writeInt(u16, payload[0..2], compat.enumToInt(id), .big);
     mem.writeInt(u32, payload[2..6], value, .big);
     try apply(values, role, .{ .ack = false, .payload = &payload });
 }

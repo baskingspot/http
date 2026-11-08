@@ -11,6 +11,7 @@
 //! address, ALPN, cipher suite, and retained certificate chain.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const mem = std.mem;
 const Allocator = mem.Allocator;
@@ -26,10 +27,11 @@ const err = stdx.stdio.err;
 const client = http.client.blocking;
 const tls = @import("tls");
 const tls_std = @import("tls_std");
+const has_tls_std = builtin.zig_version.minor == 16;
 
-const TlsClient = tls_std.ClientWith(.{
+const TlsClient = if (has_tls_std) tls_std.ClientWith(.{
     .peer_chain_storage = tls.ClientHandshake.recommended_handshake_storage,
-});
+}) else struct {};
 
 pub fn main(init: std.process.Init) !void {
     defer stdx.stdio.flush();
@@ -112,6 +114,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (url.https) {
+        if (!has_tls_std) return error.TlsUnsupported;
         const stream = try url.address.connect(io, .{ .mode = .stream });
         noDelay(stream);
         var conn: TlsClient = undefined;
@@ -211,7 +214,11 @@ fn parseUrl(arena: Allocator, io: Io, text: []const u8) !Url {
     const authority = after_scheme[0..authority_end];
 
     var host_buffer: [HostName.max_len]u8 = undefined;
-    const host = (try uri.getHost(&host_buffer)).bytes;
+    // 0.17 moved std.Uri.getHost to Io.net.HostName.fromUri.
+    const host = if (builtin.zig_version.minor == 16)
+        (try uri.getHost(&host_buffer)).bytes
+    else
+        (try HostName.fromUri(uri, &host_buffer)).bytes;
     const literal = if (host.len > 1 and host[0] == '[') host[1 .. host.len - 1] else host;
 
     const port: u16 = uri.port orelse if (https) 443 else 80;

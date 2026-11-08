@@ -9,6 +9,7 @@
 //! contract; `h1.client.streaming` implements the same contract.
 
 const std = @import("std");
+const compat = @import("../../compat.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
@@ -248,7 +249,7 @@ pub const Client = struct {
                 .goaway => |goaway| {
                     self.goaway = .{
                         .last_stream_id = goaway.last_stream_id,
-                        .code = @intFromEnum(goaway.code),
+                        .code = compat.enumToInt(goaway.code),
                     };
                     if (id > goaway.last_stream_id) {
                         self.connection_poisoned = true;
@@ -323,7 +324,7 @@ pub const Client = struct {
                 .goaway => |goaway| {
                     self.goaway = .{
                         .last_stream_id = goaway.last_stream_id,
-                        .code = @intFromEnum(goaway.code),
+                        .code = compat.enumToInt(goaway.code),
                     };
                     if (id > goaway.last_stream_id) {
                         self.connection_poisoned = true;
@@ -468,7 +469,7 @@ pub const Client = struct {
                 .goaway => |goaway| {
                     self.goaway = .{
                         .last_stream_id = goaway.last_stream_id,
-                        .code = @intFromEnum(goaway.code),
+                        .code = compat.enumToInt(goaway.code),
                     };
                     if (self.stream_id > goaway.last_stream_id) {
                         self.connection_poisoned = true;
@@ -485,7 +486,7 @@ pub const Client = struct {
                         self.body_eof = true;
                         return error.EndOfStream;
                     }
-                    self.body_reset_code = @intFromEnum(reset.code);
+                    self.body_reset_code = compat.enumToInt(reset.code);
                     return error.Reset;
                 },
                 .request => {

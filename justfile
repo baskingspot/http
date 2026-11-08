@@ -10,6 +10,10 @@ default:
 test:
     zig build test --summary all
 
+[doc("Per-Zig-version gate; run in both dev shells")]
+[group("ci")]
+check: test
+
 [doc("Regenerate the HPACK interop fixture from golang.org/x/net/http2/hpack")]
 [group("test")]
 fixture:
@@ -303,6 +307,10 @@ example-h1-tls-client:
 interop-tls:
     #!/usr/bin/env bash
     set -euo pipefail
+    case "$(zig version)" in
+        0.16.*) ;;
+        *) echo "interop-tls: skipped on Zig $(zig version); tls_std is 0.16-only" >&2; exit 0 ;;
+    esac
     zig build example-h1-tls >/tmp/http1-tls.log 2>&1 &
     server_pid=$!
     trap 'pkill -P "$server_pid" 2>/dev/null || true; pkill -x http1-tls 2>/dev/null || true; pkill -f "\\.zig-cache/.*/http1-tls$" 2>/dev/null || true; kill "$server_pid" 2>/dev/null || true' EXIT
@@ -323,8 +331,13 @@ interop-tls:
 [doc("Build and start the readiness example, run h2spec strict, and stop it")]
 [group("test")]
 conformance-ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
     just conformance-run-readiness -S -o 2
-    just conformance-run-tls -S -o 2
+    case "$(zig version)" in
+        0.16.*) just conformance-run-tls -S -o 2 ;;
+        *) echo "conformance-ci: skipped blocking tls_std on Zig $(zig version)" >&2 ;;
+    esac
     just conformance-run-tls-readiness -S -o 2
 
 [doc("Everything CI runs")]

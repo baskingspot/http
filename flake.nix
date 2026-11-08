@@ -20,6 +20,7 @@
         base
         docs
         zig."0.16"
+        zig."0.17"
       ];
 
       perSystem =
@@ -29,29 +30,40 @@
           system,
           ...
         }:
+        let
+          # Project-specific tools. Go builds `tools/hpack-interop`, which
+          # regenerates the HPACK interop fixture. `fromGoMod` takes the
+          # toolchain from the module's go.mod, not from nixpkgs.
+          project = [
+            (inputs.mattware.packages.${system}.go-bin.fromGoMod ./tools/hpack-interop/go.mod)
+            pkgs.gopls
+            pkgs.h2spec
+            pkgs.nghttp2
+            pkgs.openssl.dev
+            pkgs.openssl.out
+            pkgs.pkg-config
+            # ziglint with the target std's doc comments, so the deprecation
+            # rule checks the oldest API surface this repo supports.
+            config.packages."ziglint-0-16"
+          ];
+        in
         {
           devShells.default = pkgs.mkShell {
             inputsFrom = [
               config.devShells.base
               config.devShells.docs
+              config.devShells."zig-0-17"
+            ];
+            packages = project;
+          };
+
+          devShells.zig-old = pkgs.mkShell {
+            inputsFrom = [
+              config.devShells.base
+              config.devShells.docs
               config.devShells."zig-0-16"
             ];
-
-            # Project-specific tools. Go builds `tools/hpack-interop`, which
-            # regenerates the HPACK interop fixture. `fromGoMod` takes the
-            # toolchain from the module's go.mod, not from nixpkgs.
-            packages = [
-              (inputs.mattware.packages.${system}.go-bin.fromGoMod ./tools/hpack-interop/go.mod)
-              pkgs.gopls
-              pkgs.h2spec
-              pkgs.nghttp2
-              pkgs.openssl.dev
-              pkgs.openssl.out
-              pkgs.pkg-config
-              # ziglint with the target std's doc comments, so the deprecation
-              # rule checks the oldest API surface this repo supports.
-              config.packages."ziglint-0-16"
-            ];
+            packages = project;
           };
         };
     };

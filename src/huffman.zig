@@ -15,6 +15,7 @@ const assert = std.debug.assert;
 const mem = std.mem;
 
 const Cursor = @import("Cursor.zig");
+const compat = @import("compat.zig");
 
 pub const Error = error{
     /// Not a code, an encoded EOS symbol, or padding that is not EOS's prefix.
@@ -303,7 +304,7 @@ const Root = packed struct(u14) {
 /// The first eight bits of the code stream, for every value. A short code
 /// fills every index that shares its prefix; a longer code leaves `len` zero.
 const root: [256]Root = blk: {
-    var entries = [_]Root{.{ .symbol = 0, .len = 0 }} ** 256;
+    var entries = compat.filled(Root, 256, .{ .symbol = 0, .len = 0 });
     for (table, 0..) |code, symbol| {
         if (code.len > 8) continue;
         const shift: u5 = 8 - code.len;
@@ -320,15 +321,15 @@ const root: [256]Root = blk: {
 
 /// How many symbols have each code length.
 const length_count: [31]u32 = blk: {
-    var counts = [_]u32{0} ** 31;
+    var counts = compat.filled(u32, 31, 0);
     for (table) |code| counts[code.len] += 1;
     break :blk counts;
 };
 
 /// The lowest code value of each length, which is where a rank starts.
 const length_first: [31]u32 = blk: {
-    var first = [_]u32{0} ** 31;
-    var seen = [_]bool{false} ** 31;
+    var first = compat.filled(u32, 31, 0);
+    var seen = compat.filled(bool, 31, false);
     for (table) |code| {
         const len: usize = code.len;
         if (!seen[len] or code.bits < first[len]) {
@@ -341,7 +342,7 @@ const length_first: [31]u32 = blk: {
 
 /// Where each length's symbols start in `canonical`.
 const length_base: [31]u32 = blk: {
-    var base = [_]u32{0} ** 31;
+    var base = compat.filled(u32, 31, 0);
     var next: u32 = 0;
     for (0..31) |len| {
         base[len] = next;
@@ -353,7 +354,7 @@ const length_base: [31]u32 = blk: {
 /// Symbols ordered by code length, then by code value.
 const canonical: [257]u9 = blk: {
     var symbols: [257]u9 = undefined;
-    var placed = [_]bool{false} ** 257;
+    var placed = compat.filled(bool, 257, false);
     for (table, 0..) |code, symbol| {
         const len: usize = code.len;
         const rank = code.bits - length_first[len];
@@ -555,7 +556,7 @@ test "the codes RFC 7541 Appendix C pins" {
 
 test "the code is canonical, prefix-free, and complete" {
     // Canonical: equal lengths hold consecutive code values.
-    var seen = [_]bool{false} ** 257;
+    var seen = compat.filled(bool, 257, false);
     for (1..31) |len| {
         const count = length_count[len];
         if (count == 0) continue;

@@ -29,6 +29,7 @@
 //! that the gate returns `error.Incomplete` until the terminator arrives.
 
 const std = @import("std");
+const compat = @import("../compat.zig");
 const testing = std.testing;
 const assert = std.debug.assert;
 const mem = std.mem;
@@ -538,7 +539,7 @@ fn parseStatus(cursor: *Cursor) Error!Status {
     const tens = try expectDigit(cursor);
     const ones = try expectDigit(cursor);
     const value = @as(u16, hundreds) * 100 + @as(u16, tens) * 10 + ones;
-    return @as(Status, @enumFromInt(@as(u10, @intCast(value))));
+    return compat.enumFromInt(Status, @intCast(value));
 }
 
 /// RFC 9112 §4: `reason-phrase = 1*( HTAB / SP / VCHAR / obs-text )`, made

@@ -3,6 +3,7 @@
 //! silently move the other.
 
 const testingx = @import("testingx");
+const compat = @import("../src/compat.zig");
 const hparse = @import("hparse");
 
 const typical =
@@ -94,7 +95,7 @@ pub fn benchmarkResponseHparse(b: *testingx.B) !void {
     b.keepAlive(&headers);
 }
 
-const long_value = "a" ** 1024;
+const long_value = compat.repeatString("a", 1024);
 const long_request = "GET / HTTP/1.1\r\nX-Long: " ++ long_value ++ "\r\n\r\n";
 
 pub fn benchmarkRequestLongValueHparse(b: *testingx.B) !void {

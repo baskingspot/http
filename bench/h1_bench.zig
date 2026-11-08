@@ -2,6 +2,7 @@
 //! response head.
 
 const testingx = @import("testingx");
+const compat = @import("../src/compat.zig");
 const http = @import("http");
 
 const h1 = http.h1;
@@ -78,11 +79,11 @@ pub fn benchmarkResponse(b: *testingx.B) !void {
     b.keepAlive(&storage);
 }
 
-const long_value = "a" ** 1024;
+const long_value = compat.repeatString("a", 1024);
 const long_request = "GET / HTTP/1.1\r\nX-Long: " ++ long_value ++ "\r\n\r\n";
 
 // No final empty line: the completeness gate scans and returns Incomplete.
-const incomplete_request = "GET / HTTP/1.1\r\n" ++ ("X-Filler: value\r\n" ** 400);
+const incomplete_request = "GET / HTTP/1.1\r\n" ++ compat.repeatString("X-Filler: value\r\n", 400);
 
 pub fn benchmarkRequestLongValue(b: *testingx.B) !void {
     const buf: []const u8 = long_request;

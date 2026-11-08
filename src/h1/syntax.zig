@@ -28,7 +28,7 @@ pub fn isTargetByte(byte: u8) bool {
 
 fn makeSet(comptime predicate: fn (u8) bool) std.StaticBitSet(256) {
     @setEvalBranchQuota(10_000);
-    var set: std.StaticBitSet(256) = .initEmpty();
+    var set: std.StaticBitSet(256) = .empty;
     for (0..256) |index| {
         if (predicate(@intCast(index))) set.set(index);
     }
