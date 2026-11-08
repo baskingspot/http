@@ -46,9 +46,9 @@ pub const ResponseOptions = struct {
     /// Extra regular fields. The engine adds framing and protocol fields.
     headers: []const Header = &.{},
     /// The trailing header section, sent as its own HEADERS block after the
-    /// body. Borrowed for the response lifetime, and only on HTTP/2: h1 has no
-    /// chunked trailer support, so its engines reject a non-empty list rather
-    /// than drop it.
+    /// body. Both engines copy the list before sending it, so it may point at
+    /// handler stack storage. HTTP/2 supports it; h1 has no chunked trailer
+    /// support, so its engines reject a non-empty list rather than drop it.
     trailers: []const Header = &.{},
 };
 

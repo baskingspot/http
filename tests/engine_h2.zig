@@ -16,6 +16,9 @@ const TestApp = struct {
     body: []const u8 = "hello",
     /// A trailing header section, which is how a gRPC server returns status.
     trailers: []const http.Header = &.{},
+    /// Build the trailer section on the handler's own stack and scribble over
+    /// it after `respond`, to prove the engine copied it.
+    stack_trailers: bool = false,
     seen: usize = 0,
 
     fn handler(self: *TestApp) Handler {
@@ -30,6 +33,27 @@ const TestApp = struct {
     fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
         const self: *TestApp = @ptrCast(@alignCast(ptr));
         self.seen += 1;
+        if (self.stack_trailers) {
+            var name_storage: [32]u8 = undefined;
+            var value_storage: [32]u8 = undefined;
+            @memcpy(name_storage[0..11], "grpc-status");
+            @memcpy(value_storage[0..1], "0");
+            var fields = [_]http.Header{.{
+                .name = name_storage[0..11],
+                .value = value_storage[0..1],
+            }};
+            try exchange.respond(.{
+                .status = .ok,
+                .content_type = "text/plain",
+                .trailers = &fields,
+            }, self.body);
+            // The engine sends the trailers after this frame is gone. It must
+            // have copied them, or the peer sees this garbage.
+            @memset(&name_storage, 'X');
+            @memset(&value_storage, 'Y');
+            @memset(std.mem.asBytes(&fields), 'Z');
+            return;
+        }
         try exchange.respond(.{
             .status = .ok,
             .content_type = "text/plain",
@@ -260,4 +284,45 @@ test "the blocking engine sends a trailer section after the body" {
 
     try testing.expect(response_seen);
     try testing.expect(data_seen);
+}
+
+test "the engine copies a stack-built trailer section" {
+    var harness: Harness = undefined;
+    try harness.initWith(.{ .stack_trailers = true });
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+    const r = &reader.interface;
+    const w = &writer.interface;
+
+    var session = try http.h2.Session.init(testing.allocator, .{
+        .role = .client,
+        .max_streams = 4,
+    });
+    defer session.deinit(testing.allocator);
+
+    try flush(&session, w);
+    try handshake(&session, r, w);
+
+    _ = try session.submitRequest(testing.allocator, &request_fields, true);
+    try flush(&session, w);
+
+    var trailers_seen = false;
+    while (!trailers_seen) {
+        const event = try nextEvent(&session, r) orelse return error.EndOfStream;
+        switch (event) {
+            .trailers => |trailers| {
+                try testing.expectEqualStrings("0", trailers.headers.get("grpc-status").?);
+                trailers_seen = true;
+            },
+            .settings => try flush(&session, w),
+            .connection_error => return error.ConnectionError,
+            else => {},
+        }
+    }
 }

@@ -41,13 +41,16 @@ pub const Exchange = struct {
     pub const RespondError = error{
         AlreadyResponded,
         InvalidResponse,
+        OutOfMemory,
     };
 
     /// Record the response. The engine sends the HEADERS and pumps `body` under
-    /// flow control. The body must stay valid until `complete` returns. The
-    /// extra headers and the trailer section are borrowed for the same
-    /// lifetime. A non-empty `trailers` list is sent as its own HEADERS block
-    /// after the body, which is how HTTP/2 carries a gRPC status.
+    /// flow control. A non-empty `trailers` list is sent as its own HEADERS
+    /// block after the body, which is how HTTP/2 carries a gRPC status.
+    ///
+    /// The options are copied into the exchange arena, so a stack-built header
+    /// or trailer list is safe: the engine sends them after `handle` returns.
+    /// The body is not copied. It must stay valid until `complete` returns.
     pub fn respond(
         self: *Exchange,
         options: ResponseOptions,
@@ -71,7 +74,11 @@ pub const Exchange = struct {
                 return error.InvalidResponse;
             }
         }
-        self.response = .{ .options = options, .body = body };
+        // The head and trailers are sent from `pumpAll`, after `handle` has
+        // returned and its frame is gone. Copy them; the body stays borrowed
+        // by design, since it is pumped under flow control.
+        const owned = try common.copyResponseOptions(self.arena, options);
+        self.response = .{ .options = owned, .body = body };
     }
 };
 
