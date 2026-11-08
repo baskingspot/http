@@ -33,7 +33,8 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const http = @import("http");
-const http_tls = @import("http_tls");
+const anchors_mod = @import("anchors.zig");
+const http_tls = @import("../http_tls.zig");
 
 const Transport = http_tls.h2.transport.tls_client.Transport;
 const builtin = @import("builtin");
@@ -58,7 +59,7 @@ pub const Connection = struct {
     allocator: Allocator,
     socket: Io.net.Stream,
     slot: Transport.Slot = undefined,
-    bundle: http_tls.Bundle = undefined,
+    bundle: anchors_mod.Bundle = undefined,
     input: Io.Reader = undefined,
     output: Io.Writer = undefined,
     /// Absolute monotonic nanoseconds for the next socket wait.
@@ -99,7 +100,7 @@ pub const Connection = struct {
             .required_alpn = options.alpn,
         };
 
-        self.bundle = try http_tls.anchors.build(allocator, options.ca_pem, options.now_sec);
+        self.bundle = try anchors_mod.build(allocator, options.ca_pem, options.now_sec);
         errdefer self.bundle.deinit(allocator);
 
         self.slot = try Transport.init(
@@ -139,6 +140,10 @@ pub const Connection = struct {
         try self.handshake();
     }
 
+    /// Release TLS state and the trust store. The socket is **not** closed:
+    /// the caller opened it and the caller closes it. A caller that assumes
+    /// otherwise either leaks it or double-closes, and `Io` panics on the
+    /// second close rather than returning an error.
     pub fn deinit(self: *Connection) void {
         if (self.open) {
             self.open = false;
