@@ -158,29 +158,34 @@ pub const Transport = struct {
             self.client.received(n);
         }
 
-        /// Destination for a caller-owned socket read. Empty means
-        /// backpressure, not transport EOF: plaintext must be consumed before
-        /// input storage moves. Only a zero-length read from the socket is EOF,
-        /// followed by `endInput`.
-        pub fn receiveBuffer(self: *SlotImpl) []u8 {
+        /// Destination for a caller-owned socket read. This is **ciphertext**
+        /// staging, not plaintext: the TLS layer decrypts out of it. On the h2c
+        /// transport the same-looking buffer holds plaintext, and handing
+        /// ciphertext to an HTTP/2 parser produces a plausible frame length and
+        /// a `FRAME_SIZE_ERROR` that points nowhere near the real fault. Use
+        /// `next` and `consume` for plaintext.
+        ///
+        /// Empty means the transport still owes output, not that the peer
+        /// closed. Only a zero-length socket read is EOF, then `wireEndInput`.
+        pub fn wireBuffer(self: *SlotImpl) []u8 {
             return self.client.receiveBuffer();
         }
 
-        pub fn received(self: *SlotImpl, n: usize) void {
+        pub fn wireReceived(self: *SlotImpl, n: usize) void {
             self.client.received(n);
         }
 
-        pub fn endInput(self: *SlotImpl) void {
+        pub fn wireEndInput(self: *SlotImpl) void {
             self.client.endInput();
         }
 
-        /// Wire bytes ready for a caller-owned socket write. The slice stays
-        /// valid until `sent`, `deinit`, or a fatal peer alert.
-        pub fn sendBuffer(self: *const SlotImpl) []const u8 {
+        /// Ciphertext ready for a caller-owned socket write, not plaintext. The
+        /// slice stays valid until `wireSent`, `deinit`, or a fatal peer alert.
+        pub fn wireSendBuffer(self: *const SlotImpl) []const u8 {
             return self.client.sendBuffer();
         }
 
-        pub fn sent(self: *SlotImpl, n: usize) void {
+        pub fn wireSent(self: *SlotImpl, n: usize) void {
             self.client.sent(n);
         }
 
@@ -440,8 +445,8 @@ test "a client and server complete a handshake over pumpable buffers" {
 
     var rounds: usize = 0;
     while ((!client.canWrite() or !server.isConnected()) and rounds < 400) : (rounds += 1) {
-        pump(client, &server);
-        pump(&server, client);
+        pumpClientOut(client, &server);
+        pumpServerOut(&server, client);
         try step(client);
         try step(&server);
     }
@@ -459,7 +464,7 @@ test "a client and server complete a handshake over pumpable buffers" {
     var received_len: usize = 0;
     rounds = 0;
     while (received_len < 5 and rounds < 100) : (rounds += 1) {
-        pump(client, &server);
+        pumpClientOut(client, &server);
         switch (try server.next()) {
             .application_data => |bytes| {
                 @memcpy(received[received_len..][0..bytes.len], bytes);
@@ -478,7 +483,7 @@ test "a client and server complete a handshake over pumpable buffers" {
     rounds = 0;
     var peer_closed = false;
     while (!peer_closed and rounds < 100) : (rounds += 1) {
-        pump(client, &server);
+        pumpClientOut(client, &server);
         switch (try server.next()) {
             .close_notify, .closed => peer_closed = true,
             else => {},
@@ -487,9 +492,11 @@ test "a client and server complete a handshake over pumpable buffers" {
     try testing.expect(peer_closed);
 }
 
-/// Move every pending wire byte from `from`'s output into `to`'s input.
-fn pump(from: anytype, to: anytype) void {
-    const wire = from.sendBuffer();
+/// Move pending ciphertext from the client transport into the peer's staging
+/// buffer. Both sides expose the wire buffer under different names because one
+/// is our slot and the other is the `tls_nonblocking` handle.
+fn pumpClientOut(from: anytype, to: anytype) void {
+    const wire = from.wireSendBuffer();
     if (wire.len == 0) return;
     var copied: usize = 0;
     while (copied < wire.len) {
@@ -498,6 +505,22 @@ fn pump(from: anytype, to: anytype) void {
         const n = @min(dest.len, wire.len - copied);
         @memcpy(dest[0..n], wire[copied..][0..n]);
         to.received(n);
+        copied += n;
+    }
+    from.wireSent(copied);
+}
+
+/// The same in the other direction.
+fn pumpServerOut(from: anytype, to: anytype) void {
+    const wire = from.sendBuffer();
+    if (wire.len == 0) return;
+    var copied: usize = 0;
+    while (copied < wire.len) {
+        const dest = to.wireBuffer();
+        if (dest.len == 0) break;
+        const n = @min(dest.len, wire.len - copied);
+        @memcpy(dest[0..n], wire[copied..][0..n]);
+        to.wireReceived(n);
         copied += n;
     }
     from.sent(copied);
