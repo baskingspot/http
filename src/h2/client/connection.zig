@@ -145,6 +145,11 @@ pub const Connection = struct {
     preface_remaining: usize,
     goaway: ?shared.GoAway = null,
     poisoned: bool = false,
+    /// The frame error code behind a connection error, kept because `poll`
+    /// otherwise reports only `error.ConnectionClosed`. A stream closed as
+    /// `.local.unusable` means this happened, and the code is the difference
+    /// between "the peer sent a bad frame" and "we did".
+    connection_error_code: ?frame.ErrorCode = null,
 
     pub fn init(self: *Connection, options: Options) !void {
         if (options.max_streams == 0) return error.NoStreams;
@@ -221,6 +226,13 @@ pub const Connection = struct {
 
     pub fn isPoisoned(self: *const Connection) bool {
         return self.poisoned;
+    }
+
+    /// The frame error code the session reported when it failed the
+    /// connection. Null until then. Everything still open when this is set was
+    /// closed as `.local.unusable`, which is not the caller's cancel.
+    pub fn connectionErrorCode(self: *const Connection) ?frame.ErrorCode {
+        return self.connection_error_code;
     }
 
     pub fn open(self: *Connection, request: Request, end_stream: bool) !Stream {
@@ -389,8 +401,9 @@ pub const Connection = struct {
                     }
                     return .{ .goaway = self.goaway.? };
                 },
-                .connection_error => {
+                .connection_error => |err| {
                     self.poisoned = true;
+                    self.connection_error_code = err.code;
                     for (self.slots) |*slot| {
                         if (slot.used and slot.close_reason == null) {
                             slot.close_reason = .{ .local = .unusable };
@@ -850,4 +863,32 @@ test "a local cancel and a peer reset are distinguishable" {
     // The last stream is done, so the driver must not read again. A read here
     // blocks until the peer hangs up, which for a live server is never.
     try testing.expect(!client.wantsInput());
+}
+
+test "a connection error keeps its frame error code" {
+    var client: Connection = undefined;
+    try client.init(.{
+        .allocator = testing.allocator,
+        .max_streams = 4,
+    });
+    defer client.deinit();
+
+    // A WINDOW_UPDATE whose payload is five bytes, not four. The session must
+    // fail the connection, and the code must survive `poll`.
+    const malformed = [_]u8{
+        0, 0, 5, // length
+        0x8, // WINDOW_UPDATE
+        0, // flags
+        0, 0, 0, 0, // stream 0
+        1, 2, 3, 4,
+        5,
+    };
+    _ = client.receive(&malformed);
+    try testing.expectError(error.ConnectionClosed, client.poll());
+
+    try testing.expect(client.isPoisoned());
+    try testing.expectEqual(
+        frame.ErrorCode.frame_size_error,
+        client.connectionErrorCode().?,
+    );
 }
