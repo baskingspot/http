@@ -163,6 +163,18 @@ pub const Done = union(enum) {
     close_after_drain,
 };
 
+/// Framing chosen for a pull-based response body.
+pub const StreamMode = enum {
+    /// No body: HEAD, 204, or 304. The engine sends the head and completes.
+    none,
+    /// Content-Length framing; the engine must send exactly this many bytes.
+    length,
+    /// HTTP/1.1 Transfer-Encoding: chunked, including the terminal chunk.
+    chunked,
+    /// Close-delimited body, used for HTTP/1.0 without a length.
+    close,
+};
+
 /// The action for an expired poll deadline.
 pub const Tick = union(enum) {
     /// No deadline has expired.
@@ -249,6 +261,7 @@ response_head_len: usize,
 response_head_sent: usize,
 response_body_sent: usize,
 response_kind: ResponseKind,
+stream_mode: ?StreamMode,
 
 // Keep the storage at i64 nanoseconds. The public calls still take
 // Io.Timestamp; an embedding pool must not inherit 16-byte alignment.
@@ -292,6 +305,7 @@ pub fn init(config: Config) ServerConn {
         .response_head_sent = 0,
         .response_body_sent = 0,
         .response_kind = .none,
+        .stream_mode = null,
 
         .last_now = 0,
         .phase_deadline = null,
@@ -462,6 +476,75 @@ pub fn respond(
     return self.respondInner(options, body, false);
 }
 
+/// Queue the head of a pull-based response body. The engine sends the head
+/// with `sendSlices` and `sent`, writes body bytes according to the returned
+/// framing, then calls `finishStream`. A `null` length is chunked on HTTP/1.1
+/// and close-delimited on HTTP/1.0. HEAD, 204, and 304 return `.none`; they
+/// must not pull the source.
+pub fn beginStream(
+    self: *ServerConn,
+    options: ResponseOptions,
+    body_length: ?u64,
+) RespondError!StreamMode {
+    if (self.phase != .app) return error.InvalidState;
+    if (options.status.class()) |class| {
+        if (class == .informational) return error.InvalidStatus;
+    }
+
+    self.body_allowed = statusAllowsBody(options.status);
+    const unread = self.unreadBody();
+    if (options.close or unread) {
+        self.keep_alive = false;
+        self.drain_close = unread;
+    }
+
+    const mode: StreamMode = if (!self.sendBody())
+        .none
+    else if (body_length != null)
+        .length
+    else if (self.version == .@"HTTP/1.1")
+        .chunked
+    else blk: {
+        self.keep_alive = false;
+        self.drain_close = unread;
+        break :blk .close;
+    };
+
+    var io: Io.Writer = .fixed(self.response_buffer);
+    var w: h1.Writer = .init(&io);
+    w.statusLine(self.version, options.status) catch |err| switch (err) {
+        error.WriteFailed => return error.ResponseHeadTooLarge,
+        else => return err,
+    };
+    if (options.content_type) |content_type| try w.field("Content-Type", content_type);
+    if (self.body_allowed) {
+        if (body_length) |length| {
+            try w.contentLength(length);
+        } else if (mode == .chunked) {
+            try w.chunked();
+        }
+    }
+    if (!self.keep_alive) {
+        try w.field("Connection", "close");
+    } else if (self.version == .@"HTTP/1.0") {
+        try w.field("Connection", "keep-alive");
+    }
+    for (options.headers) |header| try w.field(header.name, header.value);
+    try w.endFields();
+
+    self.response_head_len = io.buffered().len;
+    self.response = "";
+    self.response_head_sent = 0;
+    self.response_body_sent = 0;
+    self.response_kind = .final;
+    self.stream_mode = mode;
+    self.phase = .response;
+    // Streaming write deadlines are a separate policy; a non-null deadline
+    // here would wake the readiness loop without a stream-timeout path.
+    self.phase_deadline = null;
+    return mode;
+}
+
 /// Queue a 101 response after a request head, then hand the stream to the
 /// application. After `sent` returns `.switched`, HTTP is finished. Bytes
 /// already read past the head remain available through `remainingInput`.
@@ -516,7 +599,12 @@ pub fn reviewRejection(self: *ServerConn, replacement: PolicyResponse) RespondEr
 pub fn sendSlices(self: *const ServerConn) Slices {
     if (self.phase != .response) return .{ .head = "", .body = "" };
     var head = self.response_buffer[self.response_head_sent..self.response_head_len];
-    var body = if (self.sendBody()) self.response[self.response_body_sent..] else "";
+    var body = if (self.stream_mode != null)
+        ""
+    else if (self.sendBody())
+        self.response[self.response_body_sent..]
+    else
+        "";
     if (self.write_chunk_bytes != 0) {
         head = head[0..@min(head.len, self.write_chunk_bytes)];
     }
@@ -536,8 +624,18 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
     const head_remaining = self.response_head_len - self.response_head_sent;
     const body_remaining = if (self.sendBody()) self.response.len - self.response_body_sent else 0;
     assert(n <= head_remaining + body_remaining);
-    self.phase_deadline = addDeadline(now, self.limits.write_timeout);
 
+    if (self.stream_mode != null) {
+        assert(n <= head_remaining);
+        if (n < head_remaining) {
+            self.response_head_sent += n;
+            return .more;
+        }
+        self.response_head_sent = self.response_head_len;
+        return .more;
+    }
+
+    self.phase_deadline = addDeadline(now, self.limits.write_timeout);
     if (n < head_remaining) {
         self.response_head_sent += n;
         return .more;
@@ -562,6 +660,14 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
         return .read;
     }
 
+    return self.finishFinal(now);
+}
+
+/// Complete a final response whose head and body are fully sent. Streaming
+/// responses call this from `finishStream`; buffered responses reach it from
+/// `sent`.
+fn finishFinal(self: *ServerConn, now: Io.Timestamp) Done {
+    self.stream_mode = null;
     if (self.switch_protocols) {
         self.switch_protocols = false;
         self.phase = .switched;
@@ -610,6 +716,17 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
     self.idle = true;
     self.startIdleDeadline(now);
     return .keep_alive;
+}
+
+/// Complete a streaming response after the engine sent the full head and body.
+/// The chunked terminal chunk, if any, is the engine's last write; this call
+/// only returns the connection to keep-alive or closes it.
+pub fn finishStream(self: *ServerConn, now: Io.Timestamp) Done {
+    assert(self.phase == .response);
+    assert(self.stream_mode != null);
+    assert(self.response_head_sent == self.response_head_len);
+    self.last_now = @intCast(now.nanoseconds);
+    return self.finishFinal(now);
 }
 
 /// Bytes already read past the request that produced the 101. The stream
@@ -906,6 +1023,7 @@ fn queueResponse(
     self.response_head_sent = 0;
     self.response_body_sent = 0;
     self.response_kind = kind;
+    self.stream_mode = null;
     self.phase_deadline = addDeadline(.fromNanoseconds(self.last_now), self.limits.write_timeout);
 }
 
@@ -921,6 +1039,7 @@ fn queueContinue(self: *ServerConn) h1.Writer.Error!void {
     self.response_head_sent = 0;
     self.response_body_sent = 0;
     self.response_kind = .interim;
+    self.stream_mode = null;
     self.phase = .response;
     self.phase_deadline = addDeadline(.fromNanoseconds(self.last_now), self.limits.write_timeout);
 }

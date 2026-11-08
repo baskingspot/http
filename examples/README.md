@@ -137,8 +137,9 @@ just curl -s http://127.0.0.1:8091/ > /tmp/readme.xor
 ```
 
 The handler returns a `http.stream.ReadStream`; the engine writes the head,
-pulls one chunk when it can accept it, and frames an unknown length as a
-close-delimited HTTP/1.1 response with `Connection: close`. The SSE examples feed the stream through an `Io.Queue` pipe and start the
+pulls one chunk when it can accept it, and frames an unknown length as chunked
+on HTTP/1.1. The terminal chunk returns the connection to keep-alive; HTTP/1.0
+uses a close-delimited body. The SSE examples feed the stream through an `Io.Queue` pipe and start the
 producer with `Io.async`, so closing the queue wakes the producer with
 `error.Closed`. `sse_poll.zig` uses `h1.engine.poll`; its source returns
 `pending` when the queue is empty, and the engine checks the queue again

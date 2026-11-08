@@ -11,6 +11,10 @@ All notable changes to http are recorded here. The format follows
   `nix develop` selects 0.17 and `nix develop .#zig-old` selects 0.16. CI runs
   both lanes. The blocking `tls_std` examples remain 0.16-only because that
   TLS integration has no 0.17 transport yet.
+- h1 streaming responses: an unknown `ResponseStream.content_length` now uses
+  chunked framing on HTTP/1.1. The terminal chunk returns the connection to
+  keep-alive. HTTP/1.0 keeps the close-delimited path. HEAD, 204, and 304 send
+  the head without pulling the source, and a known length is enforced exactly.
 - `h2.client.connection.Connection`: a step-shaped, multiplexed HTTP/2 client
   with writable request DATA, `DataLease` response reads, response trailers,
   per-stream flow-control backpressure, and GOAWAY boundary handling.

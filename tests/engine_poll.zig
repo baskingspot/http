@@ -17,9 +17,29 @@ else if (options.epoll)
 else
     h1.engine.poll;
 
+const ChunkStream = struct {
+    chunks: []const []const u8,
+    index: usize = 0,
+    pulls: *usize,
+
+    const vtable: http.stream.ReadStream.VTable = .{ .next = next, .close = close };
+
+    fn next(ptr: *anyopaque) http.stream.ReadError!http.stream.ReadResult {
+        const self: *ChunkStream = @ptrCast(@alignCast(ptr));
+        self.pulls.* += 1;
+        if (self.index >= self.chunks.len) return error.EndOfStream;
+        const chunk = self.chunks[self.index];
+        self.index += 1;
+        return .{ .data = chunk };
+    }
+
+    fn close(_: *anyopaque) void {}
+};
+
 const TestApp = struct {
     complete_count: usize = 0,
     last_reason: ?h1.ServerConn.RejectReason = null,
+    pulls: usize = 0,
     io: Io = testing.io,
 
     fn handler(self: *TestApp) engine.Handler {
@@ -31,8 +51,74 @@ const TestApp = struct {
         } };
     }
 
-    fn handle(_: *anyopaque, exchange: *engine.Exchange) anyerror!void {
+    fn handle(ptr: *anyopaque, exchange: *engine.Exchange) anyerror!void {
+        const self: *TestApp = @ptrCast(@alignCast(ptr));
         const target = exchange.request.head.target;
+        if (mem.eql(u8, target, "/stream") or
+            mem.eql(u8, target, "/stream-head"))
+        {
+            const source = try exchange.arena.create(ChunkStream);
+            source.* = .{
+                .chunks = &.{ "one\n", "two\n" },
+                .pulls = &self.pulls,
+            };
+            try exchange.respondStream(.{
+                .status = .ok,
+                .content_type = "text/plain",
+            }, .{
+                .stream = .{ .ptr = source, .vtable = &ChunkStream.vtable },
+                .content_length = null,
+            });
+            return;
+        }
+        if (mem.eql(u8, target, "/stream-204") or
+            mem.eql(u8, target, "/stream-304"))
+        {
+            const source = try exchange.arena.create(ChunkStream);
+            source.* = .{
+                .chunks = &.{ "ignored\n", "also ignored\n" },
+                .pulls = &self.pulls,
+            };
+            try exchange.respondStream(.{
+                .status = if (mem.eql(u8, target, "/stream-204"))
+                    .no_content
+                else
+                    .not_modified,
+            }, .{
+                .stream = .{ .ptr = source, .vtable = &ChunkStream.vtable },
+                .content_length = null,
+            });
+            return;
+        }
+        if (mem.eql(u8, target, "/stream-length")) {
+            const source = try exchange.arena.create(ChunkStream);
+            source.* = .{
+                .chunks = &.{ "one\n", "two\n" },
+                .pulls = &self.pulls,
+            };
+            try exchange.respondStream(.{ .status = .ok }, .{
+                .stream = .{ .ptr = source, .vtable = &ChunkStream.vtable },
+                .content_length = 8,
+            });
+            return;
+        }
+        if (mem.eql(u8, target, "/stream-short") or
+            mem.eql(u8, target, "/stream-long"))
+        {
+            const source = try exchange.arena.create(ChunkStream);
+            source.* = .{
+                .chunks = if (mem.eql(u8, target, "/stream-short"))
+                    &.{"abc"}
+                else
+                    &.{"abcdef"},
+                .pulls = &self.pulls,
+            };
+            try exchange.respondStream(.{ .status = .ok }, .{
+                .stream = .{ .ptr = source, .vtable = &ChunkStream.vtable },
+                .content_length = 5,
+            });
+            return;
+        }
         if (mem.eql(u8, target, "/no-response")) return;
         if (mem.eql(u8, target, "/big")) {
             const body = try exchange.arena.alloc(u8, 1024 * 1024);
@@ -681,4 +767,111 @@ test "poll lets the application shape a framing rejection" {
     try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 400 Bad Request\r\n") != false);
     try testing.expect(mem.find(u8, got, "Content-Type: application/json") != null);
     try testing.expect(mem.endsWith(u8, got, "{\"error\":501}\n"));
+}
+
+test "poll streams chunked and keeps the connection alive" {
+    var h: Harness = undefined;
+    try h.init(.{}, 8);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+
+    try send(
+        stream,
+        h.io,
+        "GET /stream HTTP/1.1\r\nHost: x\r\n\r\n" ++
+            "GET /tail HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+
+    var response: [2048]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expectEqual(2, mem.count(u8, got, "HTTP/1.1 200 OK"));
+    try testing.expect(mem.find(u8, got, "Transfer-Encoding: chunked") != null);
+    try testing.expect(mem.find(u8, got, "4\r\none\n\r\n4\r\ntwo\n\r\n0\r\n\r\n") != null);
+    try testing.expect(mem.find(u8, got, "/tail 0\n") != null);
+}
+
+test "poll streams close-delimited on HTTP/1.0" {
+    var h: Harness = undefined;
+    try h.init(.{}, 8);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+
+    try send(stream, h.io, "GET /stream HTTP/1.0\r\n\r\n");
+
+    var response: [2048]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expect(mem.startsWith(u8, got, "HTTP/1.0 200 OK\r\n"));
+    try testing.expect(mem.find(u8, got, "Transfer-Encoding") == null);
+    try testing.expect(mem.endsWith(u8, got, "one\ntwo\n"));
+}
+
+test "poll does not pull a stream for HEAD, 204, or 304" {
+    var h: Harness = undefined;
+    try h.init(.{}, 8);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+
+    try send(
+        stream,
+        h.io,
+        "HEAD /stream HTTP/1.1\r\nHost: x\r\n\r\n" ++
+            "GET /stream-204 HTTP/1.1\r\nHost: x\r\n\r\n" ++
+            "GET /stream-304 HTTP/1.1\r\nHost: x\r\n\r\n" ++
+            "GET /tail HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+
+    var response: [2048]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expectEqual(4, mem.count(u8, got, "HTTP/1.1"));
+    try testing.expect(mem.find(u8, got, "Transfer-Encoding") == null);
+    try testing.expect(mem.find(u8, got, "one\n") == null);
+    try testing.expect(mem.find(u8, got, "/tail 0\n") != null);
+    try testing.expectEqual(0, h.app.pulls);
+}
+
+test "poll uses Content-Length for a known-length stream" {
+    var h: Harness = undefined;
+    try h.init(.{}, 8);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+
+    try send(stream, h.io, "GET /stream-length HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+
+    var response: [2048]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expect(mem.find(u8, got, "Content-Length: 8") != null);
+    try testing.expect(mem.find(u8, got, "Transfer-Encoding") == null);
+    try testing.expect(mem.endsWith(u8, got, "one\ntwo\n"));
+}
+
+test "poll closes a known-length stream on underrun and overrun" {
+    var h: Harness = undefined;
+    try h.init(.{}, 8);
+    defer h.deinit();
+
+    inline for (.{ "/stream-short", "/stream-long" }) |target| {
+        const stream = try h.connect();
+        defer stream.close(h.io);
+        var request: [128]u8 = undefined;
+        const head = try std.fmt.bufPrint(
+            &request,
+            "GET {s} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            .{target},
+        );
+        try send(stream, h.io, head);
+
+        var response: [2048]u8 = undefined;
+        const got = try readAll(stream, h.io, &response);
+        try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
+        try testing.expectEqual(1, mem.count(u8, got, "HTTP/1.1"));
+        try testing.expect(mem.find(u8, got, "abcdef") == null);
+    }
 }

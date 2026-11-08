@@ -65,10 +65,15 @@ const Slot = struct {
     exchange_active: bool = false,
     response_stream: ?stream_mod.ResponseStream = null,
     response_options: ?h1.ServerConn.ResponseOptions = null,
-    stream_head_len: usize = 0,
-    stream_head_sent: usize = 0,
+    stream_mode: ?h1.ServerConn.StreamMode = null,
+    stream_chunk_header: [24]u8 = undefined,
+    stream_chunk_header_len: usize = 0,
+    stream_chunk_header_sent: usize = 0,
     stream_body: []const u8 = &.{},
     stream_body_sent: usize = 0,
+    stream_total: u64 = 0,
+    stream_crlf_only: bool = false,
+    stream_terminal: bool = false,
 
     fn bindExchange(self: *Slot, id: usize, io: Io) void {
         self.exchange = .{
@@ -356,6 +361,7 @@ pub fn Server(comptime Waiter: type) type {
                 slot.response_stream = null;
                 slot.response_options = null;
             }
+            slot.stream_mode = null;
             slot.exchange.response_stream = null;
             slot.exchange.response_options = null;
             self.cancelDeferred(slot);
@@ -605,44 +611,63 @@ pub fn Server(comptime Waiter: type) type {
         ) bool {
             _ = self;
             const options = slot.exchange.response_options orelse return false;
-            var fixed = Io.Writer.fixed(slot.response_head);
-            var writer: h1.Writer = .init(&fixed);
-            writer.statusLine(slot.conn.negotiatedVersion(), options.status) catch return false;
-            if (options.content_type) |value| {
-                writer.field("Content-Type", value) catch return false;
-            }
-            for (options.headers) |header| {
-                writer.field(header.name, header.value) catch return false;
-            }
-            writer.field("Connection", "close") catch return false;
-            if (source.content_length) |length| {
-                writer.contentLength(length) catch return false;
-            }
-            writer.endFields() catch return false;
+            const mode = slot.conn.beginStream(options, source.content_length) catch return false;
 
             slot.response_stream = source;
             slot.response_options = options;
-            slot.stream_head_len = fixed.buffered().len;
-            slot.stream_head_sent = 0;
+            slot.stream_mode = mode;
+            slot.stream_chunk_header_len = 0;
+            slot.stream_chunk_header_sent = 0;
             slot.stream_body = &.{};
             slot.stream_body_sent = 0;
+            slot.stream_total = 0;
+            slot.stream_crlf_only = false;
+            slot.stream_terminal = false;
             slot.state = .write;
             return true;
         }
 
+        fn finishStreamSlot(
+            self: *Self,
+            slot: *Slot,
+            now: Io.Timestamp,
+        ) void {
+            if (slot.response_stream) |source| {
+                source.stream.close();
+                slot.response_stream = null;
+            }
+            slot.response_options = null;
+            slot.exchange.response_stream = null;
+            slot.exchange.response_options = null;
+            slot.stream_mode = null;
+            const done = slot.conn.finishStream(now);
+            self.finishExchange(slot);
+            switch (done) {
+                .keep_alive => {
+                    const event = slot.conn.advance(now);
+                    self.afterKeepAlive(slot, event);
+                },
+                .close, .switched => self.closeSlot(slot),
+                .close_after_drain => slot.state = .drain,
+                .read, .more => self.closeSlot(slot),
+            }
+        }
+
         fn writeStreamSlot(self: *Self, slot: *Slot, now: Io.Timestamp) void {
-            _ = now;
             const source = slot.response_stream orelse {
                 self.closeSlot(slot);
                 return;
             };
+            const mode = slot.stream_mode orelse {
+                self.closeSlot(slot);
+                return;
+            };
+
             while (true) {
-                if (slot.stream_head_sent < slot.stream_head_len) {
-                    const n = P.send(
-                        slot.fd,
-                        slot.response_head[slot.stream_head_sent..slot.stream_head_len],
-                        "",
-                    ) catch |err| switch (err) {
+                // The response head is queued in ServerConn and sent first.
+                const slices = slot.conn.sendSlices();
+                if (slices.head.len != 0) {
+                    const n = P.send(slot.fd, slices.head, "") catch |err| switch (err) {
                         error.WouldBlock => return,
                         else => {
                             self.closeSlot(slot);
@@ -653,7 +678,61 @@ pub fn Server(comptime Waiter: type) type {
                         self.closeSlot(slot);
                         return;
                     }
-                    slot.stream_head_sent += n;
+                    _ = slot.conn.sent(n, now);
+                    continue;
+                }
+
+                if (mode == .none) {
+                    self.finishStreamSlot(slot, now);
+                    return;
+                }
+
+                if (slot.stream_terminal) {
+                    if (slot.stream_chunk_header_sent < slot.stream_chunk_header_len) {
+                        const hdr = slot.stream_chunk_header;
+                        const start = slot.stream_chunk_header_sent;
+                        const end = slot.stream_chunk_header_len;
+                        const n = P.send(slot.fd, hdr[start..end], "") catch |err| switch (err) {
+                            error.WouldBlock => return,
+                            else => {
+                                self.closeSlot(slot);
+                                return;
+                            },
+                        };
+                        if (n == 0) {
+                            self.closeSlot(slot);
+                            return;
+                        }
+                        slot.stream_chunk_header_sent += n;
+                        continue;
+                    }
+                    self.finishStreamSlot(slot, now);
+                    return;
+                }
+
+                if (slot.stream_chunk_header_sent < slot.stream_chunk_header_len) {
+                    const hdr = slot.stream_chunk_header;
+                    const start = slot.stream_chunk_header_sent;
+                    const end = slot.stream_chunk_header_len;
+                    const header = hdr[start..end];
+                    const body = slot.stream_body[slot.stream_body_sent..];
+                    const n = P.send(slot.fd, header, body) catch |err| switch (err) {
+                        error.WouldBlock => return,
+                        else => {
+                            self.closeSlot(slot);
+                            return;
+                        },
+                    };
+                    if (n == 0) {
+                        self.closeSlot(slot);
+                        return;
+                    }
+                    if (n <= header.len) {
+                        slot.stream_chunk_header_sent += n;
+                    } else {
+                        slot.stream_chunk_header_sent = slot.stream_chunk_header_len;
+                        slot.stream_body_sent += n - header.len;
+                    }
                     continue;
                 }
 
@@ -677,9 +756,51 @@ pub fn Server(comptime Waiter: type) type {
                     continue;
                 }
 
+                // The current chunk, when chunked, still needs its CRLF.
+                if (mode == .chunked and slot.stream_chunk_header_len != 0) {
+                    if (slot.stream_body.len == 0) {
+                        if (slot.stream_crlf_only) {
+                            slot.stream_crlf_only = false;
+                            slot.stream_chunk_header_len = 0;
+                            slot.stream_chunk_header_sent = 0;
+                            continue;
+                        }
+                        // A chunk with an empty body: send the CRLF as the
+                        // chunk's trailer.
+                        @memcpy(slot.stream_chunk_header[0..2], "\r\n");
+                        slot.stream_chunk_header_len = 2;
+                        slot.stream_chunk_header_sent = 0;
+                        slot.stream_crlf_only = true;
+                        continue;
+                    }
+                    @memcpy(slot.stream_chunk_header[0..2], "\r\n");
+                    slot.stream_chunk_header_len = 2;
+                    slot.stream_chunk_header_sent = 0;
+                    slot.stream_crlf_only = true;
+                    slot.stream_body = &.{};
+                    slot.stream_body_sent = 0;
+                    continue;
+                }
+
+                if (mode == .length and slot.stream_total == source.content_length.?) {
+                    self.finishStreamSlot(slot, now);
+                    return;
+                }
+
                 const result = source.stream.next() catch |err| switch (err) {
                     error.EndOfStream => {
-                        self.closeSlot(slot);
+                        if (mode == .length) {
+                            self.closeSlot(slot);
+                            return;
+                        }
+                        if (mode == .chunked) {
+                            @memcpy(slot.stream_chunk_header[0..5], "0\r\n\r\n");
+                            slot.stream_chunk_header_len = 5;
+                            slot.stream_chunk_header_sent = 0;
+                            slot.stream_terminal = true;
+                            continue;
+                        }
+                        self.finishStreamSlot(slot, now);
                         return;
                     },
                     error.Pending => {
@@ -695,8 +816,31 @@ pub fn Server(comptime Waiter: type) type {
                     self.closeSlot(slot);
                     return;
                 }
+                slot.stream_total = std.math.add(
+                    u64,
+                    slot.stream_total,
+                    result.data.len,
+                ) catch {
+                    self.closeSlot(slot);
+                    return;
+                };
+                if (mode == .length and slot.stream_total > source.content_length.?) {
+                    self.closeSlot(slot);
+                    return;
+                }
                 slot.stream_body = result.data;
                 slot.stream_body_sent = 0;
+                slot.stream_chunk_header_len = 0;
+                slot.stream_chunk_header_sent = 0;
+                slot.stream_crlf_only = false;
+                if (mode == .chunked) {
+                    var header: Io.Writer = .fixed(&slot.stream_chunk_header);
+                    header.print("{x}\r\n", .{result.data.len}) catch {
+                        self.closeSlot(slot);
+                        return;
+                    };
+                    slot.stream_chunk_header_len = header.buffered().len;
+                }
             }
         }
 

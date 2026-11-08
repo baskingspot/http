@@ -204,14 +204,14 @@ fn handleRequest(
     };
 
     if (exchange.response_stream) |source| {
-        writeStreamResponse(writer, &exchange, source) catch |err| {
+        const done = writeStreamResponse(writer, &exchange, source) catch |err| {
             source.stream.close();
             complete(handler, &exchange, arena, config.common.arena_retain_bytes);
             return err;
         };
         source.stream.close();
         complete(handler, &exchange, arena, config.common.arena_retain_bytes);
-        return .close;
+        return done;
     }
 
     const done = writePending(io, conn, writer) catch |err| {
@@ -235,46 +235,59 @@ fn writeStreamResponse(
     writer: *Io.Writer,
     exchange: *Exchange,
     source: stream_mod.ResponseStream,
-) !void {
+) !h1.ServerConn.Done {
+    const conn = exchange.conn;
     const options = exchange.response_options orelse return error.NoResponse;
-    var w: h1.Writer = .init(writer);
-    try w.statusLine(exchange.conn.negotiatedVersion(), options.status);
-    if (options.content_type) |value| try w.field("Content-Type", value);
-    for (options.headers) |header| try w.field(header.name, header.value);
-    try w.field("Connection", "close");
-    const chunked = source.content_length == null;
-    if (chunked) {
-        try w.chunked();
-    } else {
-        try w.contentLength(source.content_length.?);
-    }
-    try w.endFields();
-    try writer.flush();
+    const mode = try conn.beginStream(options, source.content_length);
 
-    var total: u64 = 0;
     while (true) {
-        const result = source.stream.next() catch |err| switch (err) {
-            error.EndOfStream => break,
-            error.Pending => return error.StreamPending,
-            else => return err,
-        };
-        const bytes = result.data;
-        if (bytes.len == 0) return error.EmptyChunk;
-        total = std.math.add(u64, total, bytes.len) catch return error.BodyTooLong;
-        if (chunked) {
-            try w.chunk(bytes);
-        } else {
-            if (total > source.content_length.?) return error.BodyTooLong;
-            try writer.writeAll(bytes);
-        }
+        const slices = conn.sendSlices();
+        if (slices.head.len == 0) break;
+        try writer.writeAll(slices.head);
         try writer.flush();
+        const done = conn.sent(slices.head.len, now(exchange.io));
+        if (done != .more) return error.InvalidState;
     }
-    if (chunked) {
-        try w.lastChunk(&.{});
-    } else if (total != source.content_length.?) {
-        return error.BodyTooShort;
+
+    if (mode == .none) return conn.finishStream(now(exchange.io));
+
+    var w: h1.Writer = .init(writer);
+    var total: u64 = 0;
+    if (mode != .length or source.content_length.? != 0) {
+        while (true) {
+            const result = source.stream.next() catch |err| switch (err) {
+                error.EndOfStream => break,
+                error.Pending => return error.StreamPending,
+                else => return err,
+            };
+            const bytes = result.data;
+            if (bytes.len == 0) return error.EmptyChunk;
+            total = std.math.add(u64, total, bytes.len) catch return error.BodyTooLong;
+            switch (mode) {
+                .none => unreachable,
+                .chunked => try w.chunk(bytes),
+                .length => {
+                    if (total > source.content_length.?) return error.BodyTooLong;
+                    try writer.writeAll(bytes);
+                },
+                .close => try writer.writeAll(bytes),
+            }
+            try writer.flush();
+        }
     }
-    try writer.flush();
+
+    switch (mode) {
+        .none => unreachable,
+        .chunked => {
+            try w.lastChunk(&.{});
+            try writer.flush();
+        },
+        .length => {
+            if (total != source.content_length.?) return error.BodyTooShort;
+        },
+        .close => {},
+    }
+    return conn.finishStream(now(exchange.io));
 }
 
 fn complete(
