@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const compat = @import("../../compat.zig");
+const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -201,8 +202,9 @@ const SlotSink = struct {
 };
 
 /// The request body for a streaming engine: pulls one buffered chunk per
-/// `next`. The slice is copied into the slot arena, so it stays valid until
-/// the handler asks for the next one.
+/// `next`. The slot keeps two reusable buffers and swaps them, so the returned
+/// slice stays valid until the handler asks for the next one and consumed bytes
+/// are not retained. It is not copied into the arena.
 const SlotReader = struct {
     connection: *Connection,
     index: usize,
@@ -1458,6 +1460,127 @@ test "a zero-credit write keeps its tail and resumes on WINDOW_UPDATE" {
     try feedSession(&conn, &client);
     try testing.expect(app.ended);
     try testing.expectEqual(@as(usize, 0), conn.session.streams.count());
+}
+
+/// Holds the current chunk across a deadline wake and checks it is intact.
+/// Every byte must be seen once; nothing may be retained between rounds.
+const ResidentMemoryApp = struct {
+    held: []const u8 = &.{},
+    expected_byte: u8 = 0,
+    deadline_ns: i96 = 0,
+    received: usize = 0,
+    expiries: usize = 0,
+    ended: bool = false,
+
+    fn handler(self: *ResidentMemoryApp) Handler {
+        return .{ .ptr = self, .vtable = &.{
+            .handle = handle,
+            .complete = Handler.noopComplete,
+            .report_error = Handler.noopReportError,
+            .policy_response = Handler.defaultPolicyResponse,
+        } };
+    }
+
+    fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
+        const self: *ResidentMemoryApp = @ptrCast(@alignCast(ptr));
+        if (exchange.wake == .expired) {
+            self.expiries += 1;
+            try testing.expectEqual(@as(usize, 4096), self.held.len);
+            for (self.held) |byte| try testing.expectEqual(self.expected_byte, byte);
+            self.held = &.{};
+        }
+        const chunk = exchange.request_body.?.next() catch |err| switch (err) {
+            error.Pending => return exchange.waitForProgress(),
+            error.EndOfStream => {
+                self.ended = true;
+                try exchange.beginResponse(.{ .status = .ok });
+                return exchange.endResponse(&.{});
+            },
+            else => return err,
+        };
+        self.held = chunk.data;
+        self.received += chunk.data.len;
+        exchange.setDeadline(self.deadline_ns);
+        exchange.waitForProgress();
+    }
+};
+
+test "resident memory plateaus across consume, park, and deadline" {
+    // RFC 9113 §5.1 and §5.2: one long-lived stream, each chunk's credit
+    // returned after a deadline wake. `body_bytes` is large enough here that
+    // the upload never trips it; what must not grow is the allocator total.
+    // The baseline is taken at 16 chunks, so the loop runs to 32: a 16-chunk
+    // test would compare the baseline with itself.
+    var counter: std.heap.DebugAllocator(.{
+        .enable_memory_limit = true,
+        .stack_trace_frames = 0,
+    }) = .init;
+    defer assert(counter.deinit() == .ok);
+    const allocator = counter.allocator();
+
+    var app: ResidentMemoryApp = .{};
+    var conn = try Connection.init(.{
+        .allocator = allocator,
+        .handler = app.handler(),
+        .body_mode = .stream,
+        .body_bytes = 8 * 1024 * 1024,
+        .max_streams = 1,
+    });
+    defer conn.deinit();
+
+    var client = try Session.init(testing.allocator, .{ .role = .client });
+    defer client.deinit(testing.allocator);
+
+    const now = Io.Timestamp.zero;
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+    while (try client.nextEvent(testing.allocator)) |_| {}
+
+    const id = try client.submitRequest(testing.allocator, &stream_fields, false);
+    try feedConnection(&client, &conn, now);
+
+    var warm_live: usize = 0;
+    var warm_capacity: usize = 0;
+    for (0..32) |round| {
+        const now_ns: i96 = @intCast(round * 10);
+        app.deadline_ns = now_ns + 5;
+        app.expected_byte = @truncate(round);
+        const bytes: [4096]u8 = @splat(app.expected_byte);
+        const accepted = try client.submitData(testing.allocator, id, &bytes, false);
+        try testing.expectEqual(bytes.len, accepted);
+        try feedConnection(&client, &conn, Io.Timestamp.fromNanoseconds(now_ns));
+        try testing.expectEqual((round + 1) * bytes.len, app.received);
+        try testing.expectEqual(bytes.len, app.held.len);
+
+        _ = try conn.drive(Io.Timestamp.fromNanoseconds(app.deadline_ns));
+        try testing.expectEqual(round + 1, app.expiries);
+        try feedSession(&conn, &client);
+        while (try client.nextEvent(testing.allocator)) |_| {}
+
+        // The allocator total is the test: at the old revision every chunk was
+        // duplicated into the slot arena, and a capacity-only check misses it
+        // because `unread` stays the same shape while the arena grows.
+        const slot = &conn.slots[0];
+        const capacity = slot.chunk.capacity + slot.unread.capacity;
+        if (round == 15) {
+            warm_live = counter.total_requested_bytes;
+            warm_capacity = capacity;
+        }
+        if (round >= 15) {
+            try testing.expectEqual(warm_live, counter.total_requested_bytes);
+            try testing.expectEqual(warm_capacity, capacity);
+        }
+    }
+
+    _ = try client.submitData(testing.allocator, id, "", true);
+    try feedConnection(&client, &conn, Io.Timestamp.fromNanoseconds(20_000));
+    try feedSession(&conn, &client);
+    while (try client.nextEvent(testing.allocator)) |_| {}
+
+    try testing.expect(app.ended);
+    try testing.expectEqual(@as(usize, 32 * 4096), app.received);
+    try testing.expectEqual(@as(usize, 0), conn.session.streams.count());
+    try testing.expectEqual(@as(i64, 65_535), conn.session.conn_recv.available);
 }
 
 test "a peer reset returns unread body credit to the connection window" {
