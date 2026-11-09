@@ -32,6 +32,8 @@ const EchoApp = struct {
     /// The tail of a chunk the peer had no window for. The borrowed chunk is
     /// valid until the next `next`, so it must be finished first.
     pending: []const u8 = &.{},
+    /// Never read the body, so the unread balance is what grows.
+    deaf: bool = false,
     failure: ?anyerror = null,
 
     fn handler(self: *EchoApp) Handler {
@@ -59,6 +61,7 @@ const EchoApp = struct {
     fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
         const self: *EchoApp = @ptrCast(@alignCast(ptr));
         self.turns += 1;
+        if (self.deaf) return exchange.waitForProgress();
         const body = exchange.request_body.?;
         while (true) {
             if (self.pending.len != 0) {
@@ -256,9 +259,9 @@ test "two request and response messages cross before END_STREAM (RFC 9113 §5.1)
     try testing.expectEqual(@as(?anyerror, null), harness.app.failure);
 }
 
-test "a request body over body_bytes gets a reset, not a bigger buffer (RFC 9113 §5.4.2)" {
+test "a peer that outruns the handler past body_bytes is reset (RFC 9113 §5.4.2)" {
     var harness: Harness = undefined;
-    try harness.init();
+    try harness.initApp(.{ .deaf = true });
     defer harness.deinit();
 
     const stream = try harness.connect();
@@ -286,9 +289,8 @@ test "a request body over body_bytes gets a reset, not a bigger buffer (RFC 9113
 
     var chunk: [300]u8 = undefined;
     @memset(&chunk, 'x');
-    // The engine caps the request body at 1024 bytes. The fourth chunk is the
-    // one that must fail rather than grow; the reset is the documented outcome
-    // whether the writer or the response head sees it first.
+    // The handler never reads, so the unread balance is what the 1024-byte cap
+    // bounds. Four 300-byte chunks must trip it rather than grow storage.
     var refused = false;
     for (0..4) |_| {
         body_writer.write(&chunk) catch {
@@ -313,8 +315,9 @@ test "a request body over body_bytes gets a reset, not a bigger buffer (RFC 9113
         refused_outcome = true;
     }
     try testing.expect(refused_outcome);
-    try testing.expect(harness.app.chunks <= 4);
-    try testing.expect(harness.app.bytes <= 1024);
+    // Nothing was consumed, so nothing was echoed.
+    try testing.expectEqual(@as(usize, 0), harness.app.chunks);
+    try testing.expectEqual(@as(usize, 0), harness.app.bytes);
 }
 
 test "a reset mid-body reaches the writer as Reset (RFC 9113 6.8)" {
