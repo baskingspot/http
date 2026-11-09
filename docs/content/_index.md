@@ -910,7 +910,9 @@ END_STREAM. In `.stream`, `body_bytes` caps what the handler has not consumed,
 not the whole upload: a long-lived exchange can carry any number of bytes as
 long as the handler keeps reading, and the per-slot storage is reused. A peer
 that runs ahead of the handler gets RST_STREAM `ENHANCE_YOUR_CALM`, not a
-larger buffer. `.buffered` still caps the whole request.
+larger buffer. Keep `body_bytes` at least one `MAX_FRAME_SIZE` (16 KiB) when
+streaming: a DATA frame cannot be split, so a smaller cap resets a peer that
+fills one. `.buffered` still caps the whole request.
 
 ## Stream a request body
 
