@@ -50,6 +50,7 @@ All notable changes to http are recorded here. The format follows
   gains `error.OutOfMemory`. The response body is still borrowed and must stay
   valid until `complete` returns.
 
+
 ### Added
 
 - `http_tls.h2.transport.tls_client`: the h2-over-TLS client byte transport.
@@ -89,6 +90,14 @@ All notable changes to http are recorded here. The format follows
   `error.InvalidResponse` instead of dropping it.
 - `h2.Session.releaseConnection` and `releaseStream`: independent receive
   window credits for streaming servers.
+
+### Fixed
+
+- `http_tls` builds on Zig 0.16 again. The deadline wait used the 0.17-only
+  `Io.Operation.net_read`; on 0.16 a future deadline now reports
+  `error.DeadlineUnsupported` and an already-passed deadline still reports
+  `error.TimedOut`. `tests/tls_connection.zig` also selected the Linux wait
+  backend on macOS, so the suite did not compile there.
 
 ## [0.2.0] - 2026-11-06
 

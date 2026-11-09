@@ -10,6 +10,7 @@
 //! entity, and an end entity cannot anchor a chain.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const Io = std.Io;
 
@@ -50,8 +51,14 @@ const leaf_b64 =
 const leaf_scalar_b64 = "CH5wDP96TpNJK4U/29zPZbad1B24GBkqcNqakuC0e1g=";
 
 /// The `comptime P` syscall backend the transports take. The listener thread
-/// drives the server transport over the accepted stream's fd.
-const Platform = http.h2.engine.wait_poll.Wait.Platform;
+/// drives the server transport over the accepted stream's fd. It matches the
+/// choice `http_tls.client.Connection` makes: poll(2) on Linux and kqueue(2)
+/// on macOS.
+const Platform = switch (builtin.os.tag) {
+    .linux => http.h2.engine.wait_poll.Wait.Platform,
+    .macos => http.h2.engine.wait_kqueue.Wait.Platform,
+    else => http.h2.engine.wait_poll.Wait.Platform,
+};
 
 /// `tls` wants DER in `cert_chain`; a PEM blob there fails on the peer as
 /// `CertificateFieldHasWrongDataType`, which reads like a bad certificate

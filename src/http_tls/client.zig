@@ -328,33 +328,43 @@ pub const Connection = struct {
                 .fromNanoseconds(deadline)
                 .withClock(Io.Clock.awake);
 
-            var storage: [1]Io.Operation.Storage = undefined;
-            var batch: Io.Batch = .init(&storage);
-            var iovecs: [1][]u8 = .{buffer};
-            _ = batch.add(.{ .net_read = .{
-                .socket_handle = self.socket.socket.handle,
-                .data = &iovecs,
-            } });
-            batch.awaitConcurrent(self.io, .{ .deadline = give_up }) catch |err| switch (err) {
-                error.Timeout, error.Canceled => {
-                    self.expired = true;
-                    return error.TimedOut;
-                },
-                error.ConcurrencyUnavailable => return error.DeadlineUnsupported,
-            };
-            while (batch.next()) |completion| {
-                switch (completion.result) {
-                    .net_read => |result| {
-                        const ready = try result;
-                        if (ready.data_len == 0) return false;
-                        self.slot.wireReceived(ready.data_len);
-                        return true;
+            // Zig 0.17 spells this operation `net_read` with a vectored
+            // payload. Zig 0.16 calls it `net_receive` with a message buffer
+            // and returns the count in that buffer, so the batched wait is not
+            // portable across the two. A 0.16 build refuses a future deadline
+            // instead of failing to compile; the expiry check above still
+            // reports an already-passed deadline.
+            if (comptime @hasField(Io.Operation, "net_read")) {
+                var storage: [1]Io.Operation.Storage = undefined;
+                var batch: Io.Batch = .init(&storage);
+                var iovecs: [1][]u8 = .{buffer};
+                _ = batch.add(.{ .net_read = .{
+                    .socket_handle = self.socket.socket.handle,
+                    .data = &iovecs,
+                } });
+                batch.awaitConcurrent(self.io, .{ .deadline = give_up }) catch |err| switch (err) {
+                    error.Timeout, error.Canceled => {
+                        self.expired = true;
+                        return error.TimedOut;
                     },
-                    else => {},
+                    error.ConcurrencyUnavailable => return error.DeadlineUnsupported,
+                };
+                while (batch.next()) |completion| {
+                    switch (completion.result) {
+                        .net_read => |result| {
+                            const ready = try result;
+                            if (ready.data_len == 0) return false;
+                            self.slot.wireReceived(ready.data_len);
+                            return true;
+                        },
+                        else => {},
+                    }
                 }
+                self.expired = true;
+                return error.TimedOut;
+            } else {
+                return error.DeadlineUnsupported;
             }
-            self.expired = true;
-            return error.TimedOut;
         }
 
         var iovecs: [1][]u8 = .{buffer};
