@@ -19,8 +19,11 @@ All notable changes to http are recorded here. The format follows
   A body chunk's flow-control credit returns when the next chunk is asked for,
   so a handler that stops reading stops the peer. A peer reset makes the next
   read `error.Canceled`, and the outstanding balance returns to the connection
-  window only. `Config.body_bytes` still caps one request; a larger body gets
-  RST_STREAM `ENHANCE_YOUR_CALM` rather than a bigger buffer. `respond` in the
+  window only. In `.stream`, `Config.body_bytes` caps the unconsumed body, not its
+  total: a handler that keeps reading may take an upload of any length, and
+  the two per-slot buffers are reused. A peer that runs ahead of the handler
+  gets RST_STREAM `ENHANCE_YOUR_CALM` rather than a bigger buffer.
+  `.buffered` still caps the whole request body. `respond` in the
   h2 engine is now the buffered convenience over the same pump.
 
 - h2 handler deadlines: `Exchange.setDeadline(absolute_ns)` arms an

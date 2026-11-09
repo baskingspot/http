@@ -906,8 +906,11 @@ about `max_streams × body_bytes` of live request memory.
 `h2.engine.Config.body_mode` selects `.buffered` (the default) or `.stream`.
 `.stream` runs the handler on the request head instead of on the complete body.
 The handler then reads the body a chunk at a time and may answer before
-END_STREAM. `body_bytes` still caps one request; a peer that sends more gets
-RST_STREAM `ENHANCE_YOUR_CALM`, not a larger buffer.
+END_STREAM. In `.stream`, `body_bytes` caps what the handler has not consumed,
+not the whole upload: a long-lived exchange can carry any number of bytes as
+long as the handler keeps reading, and the per-slot storage is reused. A peer
+that runs ahead of the handler gets RST_STREAM `ENHANCE_YOUR_CALM`, not a
+larger buffer. `.buffered` still caps the whole request.
 
 ## Stream a request body
 

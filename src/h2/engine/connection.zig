@@ -66,7 +66,11 @@ const Slot = struct {
     body: std.ArrayList(u8) = .empty,
     /// `.stream`: body bytes received and not yet handed to the handler.
     unread: std.ArrayList(u8) = .empty,
-    /// `.stream`: flow-control charge for the chunk the handler holds.
+    /// `.stream`: the chunk the handler holds, valid until the next `next`.
+    /// The two buffers swap per chunk, so consumed bytes are reusable and the
+    /// memory is bounded by two chunks, not by the whole upload.
+    chunk: std.ArrayList(u8) = .empty,
+    /// `.stream`: flow-control charge for `chunk`.
     chunk_flow: u32 = 0,
     request_head: ?head.RequestHead = null,
     trailers: Headers = .{ .items = &.{} },
@@ -261,6 +265,7 @@ pub const Connection = struct {
         self.completeAll();
         for (self.slots) |*slot| {
             slot.unread.deinit(self.allocator);
+            slot.chunk.deinit(self.allocator);
             slot.arena.deinit();
         }
         self.allocator.free(self.slots);
@@ -367,6 +372,7 @@ pub const Connection = struct {
                 slot.stream_id = request.stream_id;
                 slot.body = .empty;
                 slot.unread.clearRetainingCapacity();
+                slot.chunk.clearRetainingCapacity();
                 slot.chunk_flow = 0;
                 slot.trailers = .{ .items = &.{} };
                 slot.received = 0;
@@ -412,15 +418,20 @@ pub const Connection = struct {
                     self.finishSlot(slot, false);
                     return;
                 };
-                if (slot.content_length) |length| {
-                    if (length > self.body_bytes) {
-                        try self.session.submitReset(
-                            self.allocator,
-                            request.stream_id,
-                            .enhance_your_calm,
-                        );
-                        self.finishSlot(slot, false);
-                        return;
+                // A declared length above the cap is a buffered-mode refusal:
+                // there the engine must hold the whole body. A streamed body
+                // is bounded by what is unconsumed, not by its total.
+                if (self.body_mode == .buffered) {
+                    if (slot.content_length) |length| {
+                        if (length > self.body_bytes) {
+                            try self.session.submitReset(
+                                self.allocator,
+                                request.stream_id,
+                                .enhance_your_calm,
+                            );
+                            self.finishSlot(slot, false);
+                            return;
+                        }
                     }
                 }
                 slot.sink = .{ .connection = self, .index = slot_index };
@@ -438,7 +449,11 @@ pub const Connection = struct {
                     }
                     return;
                 };
-                if (slot.received + data.bytes.len > self.body_bytes) {
+                const unconsumed = if (self.body_mode == .buffered)
+                    slot.received + data.bytes.len
+                else
+                    slot.unread.items.len + data.bytes.len;
+                if (unconsumed > self.body_bytes) {
                     try self.session.submitReset(
                         self.allocator,
                         data.stream_id,
@@ -645,13 +660,15 @@ pub const Connection = struct {
         const slot = &self.slots[index];
         if (!slot.used) return error.Canceled;
         try self.releaseChunk(slot);
+        slot.chunk.clearRetainingCapacity();
         if (slot.reset_pending) return error.Canceled;
         if (slot.unread.items.len != 0) {
-            const chunk = slot.arena.allocator().dupe(u8, slot.unread.items) catch
-                return error.OutOfMemory;
-            slot.chunk_flow = @intCast(slot.unread.items.len);
-            slot.unread.clearRetainingCapacity();
-            return .{ .data = chunk };
+            // The caller is done with the previous chunk, so its storage
+            // becomes the buffer for the next one. Neither buffer outgrows
+            // `body_bytes`, so a long-lived stream reuses them.
+            std.mem.swap(std.ArrayList(u8), &slot.chunk, &slot.unread);
+            slot.chunk_flow = @intCast(slot.chunk.items.len);
+            return .{ .data = slot.chunk.items };
         }
         if (slot.request_complete) return error.EndOfStream;
         return error.Pending;
@@ -818,6 +835,7 @@ pub const Connection = struct {
             );
             slot.chunk_flow = 0;
             slot.unread.clearRetainingCapacity();
+            slot.chunk.clearRetainingCapacity();
             if (outstanding != 0 and !self.session.isClosed()) {
                 self.session.releaseConnection(
                     self.allocator,
@@ -1506,6 +1524,81 @@ test "a request body over body_bytes is a reset, not growth" {
         .reset => |reset| try testing.expectEqual(frame.ErrorCode.enhance_your_calm, reset.code),
         else => return error.TestUnexpectedResult,
     }
+    try testing.expectEqual(@as(usize, 0), conn.session.streams.count());
+    try testing.expectEqual(@as(i64, 65_535), conn.session.conn_recv.available);
+}
+
+/// The next DATA event, skipping the one response head and control events.
+fn readEcho(client: *Session, sink: []u8) ![]const u8 {
+    while (try nextClientEvent(client)) |event| {
+        switch (event) {
+            .response => |response| try testing.expect(!response.end_stream),
+            .data => |data| {
+                @memcpy(sink[0..data.bytes.len], data.bytes);
+                return sink[0..data.bytes.len];
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    return error.EndOfStream;
+}
+
+test "a streamed body is bounded by unconsumed bytes, not by its total" {
+    // `Config.body_bytes` is a memory cap. A handler that consumes a chunk
+    // before the next arrives reopens the window, so the upload itself may be
+    // arbitrarily longer than the cap. What may not grow is the unread
+    // balance: the two slot buffers are reused, never accumulated.
+    const allocator = testing.allocator;
+    var app: StreamingApp = .{};
+    var conn = try Connection.init(.{
+        .allocator = allocator,
+        .handler = app.handler(),
+        .body_mode = .stream,
+        .body_bytes = 8,
+    });
+    defer conn.deinit();
+
+    var client = try Session.init(allocator, .{ .role = .client });
+    defer client.deinit(allocator);
+
+    const now = Io.Timestamp.zero;
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+    while (try client.nextEvent(allocator)) |_| {}
+
+    const id = try client.submitRequest(allocator, &stream_fields, false);
+    try feedConnection(&client, &conn, now);
+
+    var total: usize = 0;
+    var sink: [16]u8 = undefined;
+    var capacity_after_second: usize = 0;
+    for (0..6) |round| {
+        _ = try client.submitData(allocator, id, "abcd", false);
+        try feedConnection(&client, &conn, now);
+        try feedSession(&conn, &client);
+
+        const echo = try readEcho(&client, &sink);
+        try testing.expectEqualStrings("abcd", echo);
+        total += echo.len;
+        try client.release(allocator, id, 4);
+        try testing.expectEqual((round + 1) * 4, app.received);
+
+        // From the second chunk on, the two buffers are reused: 24 bytes of
+        // upload leave the same storage behind as 8.
+        const slot = &conn.slots[0];
+        const capacity = slot.chunk.capacity + slot.unread.capacity;
+        if (round == 1) capacity_after_second = capacity;
+        if (round >= 1) try testing.expectEqual(capacity_after_second, capacity);
+    }
+    // Six 4-byte chunks against an 8-byte cap: the total is three times the
+    // cap and nothing was reset.
+    try testing.expectEqual(@as(usize, 24), total);
+    try testing.expect(conn.slots[0].chunk.items.len <= 8);
+
+    _ = try client.submitData(allocator, id, "", true);
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+    try testing.expect(app.ended);
     try testing.expectEqual(@as(usize, 0), conn.session.streams.count());
     try testing.expectEqual(@as(i64, 65_535), conn.session.conn_recv.available);
 }
