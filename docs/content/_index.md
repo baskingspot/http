@@ -791,6 +791,30 @@ how `examples/http1_tls_client.zig` runs after its handshake.
 pair. It multiplexes nothing: one request at a time on a connection, with the
 body streamed through `client.Body`.
 
+A request body does not have to exist before the request starts. `begin` sends
+the head without END_STREAM and returns a `client.BodyWriter`; `response` waits
+for the response head whenever the caller is ready.
+
+```zig
+const writer = try client.begin(.{
+    .method_token = "POST",
+    .scheme = .http,
+    .authority = "example.com",
+    .target = "/chat",
+});
+try writer.write("first message");
+const response = try client.response();
+_ = try response.body.read();
+try writer.write("second message");
+try writer.close();
+```
+
+The two directions are independent. A write may block until the peer opens the
+flow-control window, and response bytes that arrive during a write are held for
+`Body.read`. Flow-control credit for held bytes returns as they are consumed,
+so the buffer is bounded by the connection window. `request` is the
+static-body convenience over the same two calls.
+
 `goAway()` reports the connection's GOAWAY and `streamId()` the last stream it
 opened, so a caller can tell which requests were processed before the boundary
 and which are safe to retry. `isConnectionPoisoned()` and `commitState()` say
@@ -842,7 +866,8 @@ has to be built before `handle` returns.
 The h1 `Exchange` carries `id`, the `*h1.ServerConn`, the complete `request`
 with its head and body, and an `arena`. The h2 `Exchange` carries `id`, the
 `stream_id`, a `request` of a typed head, the whole body, and the trailers, and
-its own `arena`. In both, the request lives in engine storage until `complete`,
+its own `arena`. In a streaming h2 engine the body stays empty and
+`request_body` is the incremental reader instead. In both, the request lives in engine storage until `complete`,
 and the body passed to `respond` must stay valid until the response is written.
 
 `arena` is the engine's allocator for whatever the handler needs to build the
@@ -877,6 +902,45 @@ An engine buffers one whole request before it calls the handler. That is the
 trade for a plain function signature, and it makes `body_bytes` a policy value
 rather than a suggestion. h2 keeps one arena per stream, so the worst case is
 about `max_streams × body_bytes` of live request memory.
+
+`h2.engine.Config.body_mode` selects `.buffered` (the default) or `.stream`.
+`.stream` runs the handler on the request head instead of on the complete body.
+The handler then reads the body a chunk at a time and may answer before
+END_STREAM. `body_bytes` still caps one request; a peer that sends more gets
+RST_STREAM `ENHANCE_YOUR_CALM`, not a larger buffer.
+
+## Stream a request body
+
+Set `body_mode = .stream` on the h2 engine's `Config`. The engine calls the
+handler again for each turn: once at the head, once per body chunk, and once
+for END_STREAM. Read with `exchange.request_body.next()`. Answer with
+`beginResponse`, `write`, and `endResponse`. Park a turn with
+`waitForProgress` when there is nothing to read or write yet.
+
+```zig
+fn handle(_: *anyopaque, exchange: *Exchange) anyerror!void {
+    const chunk = exchange.request_body.?.next() catch |err| switch (err) {
+        error.Pending => return exchange.waitForProgress(),
+        error.Canceled => return,
+        error.EndOfStream => {
+            try exchange.beginResponse(.{ .status = .ok });
+            return exchange.endResponse(&.{.{ .name = "grpc-status", .value = "0" }});
+        },
+        else => return err,
+    };
+    if (!exchange.response_started) {
+        try exchange.beginResponse(.{ .status = .ok });
+    }
+    _ = try exchange.write(chunk.data);
+}
+```
+
+The body chunk is valid until the next `next()` call. Its flow-control credit
+returns when the handler asks for the next chunk, so a handler that stops
+reading stops the peer. `write` returns the accepted count and zero when the
+output budget is full; park and retry on the next turn. `resetStream` is legal
+at any point. A peer reset makes the next read return `error.Canceled` and the
+unread balance returns to the connection window.
 
 ## The h2 engines
 
@@ -974,7 +1038,8 @@ absolute value against this table.
 
 Not implemented:
 
-- Streaming request bodies. `client.Request.body` is a `[]const u8`, and an engine's `Exchange.request.body` is the whole body up to `Config.body_bytes`. `h2.Session` is the streaming path on the h2 side.
+- Streaming request bodies on h1. `h1.ServerConn` has no incremental body delivery, and `h1.client.streaming` sends `Request.body` in one call. The h2 client and server do stream: `h2.client.blocking.Client.begin` and `body_mode = .stream`.
+- A streaming request body through `client.blocking.Client`. The protocol-neutral facade has no `begin`; use the h2 adapter when the body does not exist up front.
 - Chunked request bodies on the server. `h1.ServerConn` answers 501 with `RejectReason.chunked_unsupported`; `h1.chunked.Decoder` is there for a caller that drives the body itself.
 - Response trailers on the client. `h1.ClientConn` parses them into `Config.trailers`, and `client.ResponseHead` has no trailer list, so the adapters that sit above it drop the fields.
 - Connection reuse and pooling. `h1.client.blocking.fetch` reads one response and does not reuse the connection, and nothing in `http.client` pools connections. `h2.client.blocking.Client` keeps the one connection it was given.

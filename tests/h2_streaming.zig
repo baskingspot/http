@@ -26,6 +26,8 @@ const EchoApp = struct {
     saw_end: bool = false,
     ended: bool = false,
     answered_before_end: bool = false,
+    /// Reset the stream on the first body chunk instead of answering.
+    reset_first: bool = false,
     failure: ?anyerror = null,
 
     fn handler(self: *EchoApp) Handler {
@@ -61,6 +63,10 @@ const EchoApp = struct {
                 },
                 else => return err,
             };
+            if (self.reset_first) {
+                try exchange.resetStream(.cancel);
+                return;
+            }
             if (!self.response_started) {
                 try exchange.beginResponse(.{
                     .status = .ok,
@@ -128,8 +134,12 @@ const Harness = struct {
     allow_read_failed: bool = true,
 
     fn init(self: *Harness) !void {
+        return self.initApp(.{});
+    }
+
+    fn initApp(self: *Harness, app: EchoApp) !void {
         self.io = testing.io;
-        self.app = .{};
+        self.app = app;
         self.allow_read_failed = true;
         const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
         self.listener = try address.listen(self.io, .{
@@ -267,9 +277,65 @@ test "a request body over body_bytes gets a reset, not a bigger buffer (RFC 9113
         };
     }
     body_writer.close();
-    if (!refused) {
-        try testing.expectError(error.StreamReset, client.response());
+    // The reset arrives at the writer, at the response head, or mid-response
+    // body; all three are the documented outcome.
+    var refused_outcome = refused;
+    if (client.response()) |response| {
+        defer response.body.close();
+        while (true) {
+            _ = response.body.read() catch {
+                refused_outcome = true;
+                break;
+            };
+        }
+    } else |err| {
+        try testing.expectEqual(error.StreamReset, err);
+        refused_outcome = true;
     }
+    try testing.expect(refused_outcome);
     try testing.expect(harness.app.chunks <= 4);
     try testing.expect(harness.app.bytes <= 1024);
+}
+
+test "a reset mid-body reaches the writer as Reset (RFC 9113 6.8)" {
+    var harness: Harness = undefined;
+    try harness.initApp(.{ .reset_first = true });
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+
+    var client: Client = undefined;
+    try client.init(
+        &reader.interface,
+        &writer.interface,
+        .{ .allocator = testing.allocator },
+    );
+    defer client.deinit();
+
+    const body_writer = try client.begin(.{
+        .method_token = "POST",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/chat",
+        .headers = &fields,
+    });
+
+    var saw_reset = false;
+    for (0..4) |_| {
+        body_writer.write("chunk") catch |err| switch (err) {
+            error.Reset => {
+                saw_reset = true;
+                break;
+            },
+            else => return err,
+        };
+    }
+    body_writer.close();
+    if (!saw_reset) try testing.expectError(error.StreamReset, client.response());
+    try testing.expect(harness.app.chunks <= 1);
 }

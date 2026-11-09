@@ -44,7 +44,7 @@ The library is pre-1.0 and the API is not frozen; a consumer pins a version.
 - [The client contract](https://baskingspot.dev/http/#the-client-contract): `client.Request` and `client.Body` are protocol-neutral, and `client.blocking.Client` dispatches to an h1 or an h2 adapter.
 - [Running a server](https://baskingspot.dev/http/#running-a-server): `engine.Handler(Exchange)` is the one vtable every engine calls, and `http_tls` adds TLS without putting crypto in the core.
 - [Performance](https://baskingspot.dev/http/#performance): 81 ns against 79 ns on a typical request head, 255 ns against 334 ns on a wide one, and 3.8x on a 1 KiB header value.
-- [Limits](https://baskingspot.dev/http/#limits): no streaming request bodies, no connection reuse, and the rest of what is not here.
+- [Limits](https://baskingspot.dev/http/#limits): no chunked request bodies on h1, no connection reuse, and the rest of what is not here.
 
 Not implemented:
 

@@ -7,6 +7,22 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- h2 request-body streaming, client and server. The client sends a body it does
+  not have up front: `h2.client.blocking.Client.begin` queues the request
+  HEADERS and returns a `client.BodyWriter`, `write` adds DATA under flow
+  control, and `close` sends END_STREAM. `response()` reads the response head
+  separately, so both directions stay live on one stream and a response may
+  arrive while the request body is incomplete. The server sets
+  `body_mode = .stream` on the h2 engine `Config`: the handler runs on the
+  request head, reads `Exchange.request_body`, and answers with
+  `beginResponse`, `write`, `endResponse`, or `resetStream` before END_STREAM.
+  A body chunk's flow-control credit returns when the next chunk is asked for,
+  so a handler that stops reading stops the peer. A peer reset makes the next
+  read `error.Canceled`, and the outstanding balance returns to the connection
+  window only. `Config.body_bytes` still caps one request; a larger body gets
+  RST_STREAM `ENHANCE_YOUR_CALM` rather than a bigger buffer. `respond` in the
+  h2 engine is now the buffered convenience over the same pump.
+
 - `tests/tls_connection.zig`: a loopback test for `http_tls.client.Connection`.
   A listener thread drives `tls_nonblocking.Server` through a handshake and
   echoes plaintext; the client side is the connection under test. Covers a
