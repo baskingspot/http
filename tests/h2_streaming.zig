@@ -21,6 +21,7 @@ const Client = client_mod.Client;
 /// response head goes out with the first chunk and the trailers with the last.
 const EchoApp = struct {
     response_started: bool = false,
+    turns: usize = 0,
     chunks: usize = 0,
     bytes: usize = 0,
     saw_end: bool = false,
@@ -41,6 +42,7 @@ const EchoApp = struct {
 
     fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
         const self: *EchoApp = @ptrCast(@alignCast(ptr));
+        self.turns += 1;
         const body = exchange.request_body.?;
         while (true) {
             const chunk = body.next() catch |err| switch (err) {
@@ -338,4 +340,154 @@ test "a reset mid-body reaches the writer as Reset (RFC 9113 6.8)" {
     body_writer.close();
     if (!saw_reset) try testing.expectError(error.StreamReset, client.response());
     try testing.expect(harness.app.chunks <= 1);
+}
+
+/// The two gRPC messages from the acceptance sequence, byte for byte.
+const grpc_one = "\x00\x00\x00\x00\x05\x0a\x03one";
+const grpc_two = "\x00\x00\x00\x00\x05\x0a\x03two";
+
+/// The next event that carries application data; flow control and SETTINGS
+/// are bookkeeping, not part of the sequence under test.
+fn nextSessionEvent(session: *http.h2.Session) !?http.h2.session.Event {
+    while (try session.nextEvent(testing.allocator)) |event| {
+        switch (event) {
+            .window_update, .settings => continue,
+            else => return event,
+        }
+    }
+    return null;
+}
+
+/// Move one side's queued output into the other and drain its events.
+fn pumpToConnection(from: *http.h2.Session, to: *http.h2.engine.Connection) !void {
+    var buffer: [4096]u8 = undefined;
+    while (true) {
+        const n = from.send(&buffer);
+        if (n == 0) break;
+        var offset: usize = 0;
+        while (offset < n) {
+            const written = to.receive(buffer[offset..n]);
+            if (written == 0) {
+                _ = try to.drive(Io.Timestamp.zero);
+                continue;
+            }
+            offset += written;
+            _ = try to.drive(Io.Timestamp.zero);
+        }
+    }
+    _ = try to.drive(Io.Timestamp.zero);
+}
+
+fn pumpToSession(from: *http.h2.engine.Connection, to: *http.h2.Session) !void {
+    var buffer: [4096]u8 = undefined;
+    while (true) {
+        const n = from.send(&buffer);
+        if (n == 0) break;
+        var offset: usize = 0;
+        while (offset < n) {
+            const written = to.receive(buffer[offset..n]);
+            if (written == 0) return error.InputStuck;
+            offset += written;
+        }
+    }
+}
+
+// The wire sequence grpc-lead named, frame for frame. One stream:
+//
+//     C HEADERS (END_HEADERS, no END_STREAM)
+//     C DATA 00000000050a036f6e65
+//     S HEADERS (END_HEADERS, no END_STREAM)  :status 200
+//     S DATA 00000000050a036f6e65
+//     C DATA 00000000050a0374776f
+//     S DATA 00000000050a0374776f
+//     C DATA (empty, END_STREAM)
+//     S HEADERS (END_HEADERS|END_STREAM) grpc-status: 0
+//
+// The assertion that matters is the order: each response frame exists before
+// the client sends the next request frame, and END_STREAM on the request
+// comes last. RFC 9113 §5.1 keeps the stream open in both directions until
+// either side ends its half.
+test "grpc full duplex: two echoes before END_STREAM (RFC 9113 5.1)" {
+    const grpc_fields = [_]http.Header{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = ":path", .value = "/svc.Method" },
+        .{ .name = "content-type", .value = "application/grpc+proto" },
+        .{ .name = "te", .value = "trailers" },
+    };
+
+    var app: EchoApp = .{};
+    var server = try http.h2.engine.Connection.init(.{
+        .allocator = testing.allocator,
+        .handler = app.handler(),
+        .body_mode = .stream,
+    });
+    defer server.deinit();
+
+    var client = try http.h2.Session.init(testing.allocator, .{ .role = .client });
+    defer client.deinit(testing.allocator);
+
+    try pumpToConnection(&client, &server);
+    try pumpToSession(&server, &client);
+    while (try nextSessionEvent(&client)) |_| {}
+
+    const id = try client.submitRequest(testing.allocator, &grpc_fields, false);
+    try pumpToConnection(&client, &server);
+    // The handler ran on the head with the body still open.
+    try testing.expectEqual(@as(usize, 1), app.turns);
+    try testing.expect(!app.response_started);
+
+    _ = try client.submitData(testing.allocator, id, grpc_one, false);
+    try pumpToConnection(&client, &server);
+    try pumpToSession(&server, &client);
+
+    const response_head = (try nextSessionEvent(&client)).?;
+    switch (response_head) {
+        .response => |response| {
+            try testing.expectEqual(@as(u16, 200), response.head.status.code());
+            try testing.expect(!response.end_stream);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    const echo_one = (try nextSessionEvent(&client)).?;
+    switch (echo_one) {
+        .data => |data| {
+            try testing.expectEqualSlices(u8, grpc_one, data.bytes);
+            try testing.expect(!data.end_stream);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try client.release(testing.allocator, id, grpc_one.len);
+    // Both response frames exist while the request half is still open.
+    try testing.expect(!app.saw_end);
+
+    _ = try client.submitData(testing.allocator, id, grpc_two, false);
+    try pumpToConnection(&client, &server);
+    try pumpToSession(&server, &client);
+    const echo_two = (try nextSessionEvent(&client)).?;
+    switch (echo_two) {
+        .data => |data| {
+            try testing.expectEqualSlices(u8, grpc_two, data.bytes);
+            try testing.expect(!data.end_stream);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try client.release(testing.allocator, id, grpc_two.len);
+    try testing.expect(!app.saw_end);
+
+    _ = try client.submitData(testing.allocator, id, "", true);
+    try pumpToConnection(&client, &server);
+    try pumpToSession(&server, &client);
+    const trailing = (try nextSessionEvent(&client)).?;
+    switch (trailing) {
+        .trailers => |trailers| {
+            try testing.expect(trailers.end_stream);
+            try testing.expectEqualStrings("0", trailers.headers.get("grpc-status").?);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(app.saw_end);
+    try testing.expect(app.ended);
+    try testing.expectEqual(@as(?anyerror, null), app.failure);
 }
