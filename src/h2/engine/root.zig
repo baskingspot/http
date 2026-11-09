@@ -19,6 +19,7 @@ pub const kqueue = if (builtin.os.tag == .macos) kqueue_impl else struct {};
 
 pub const connection = @import("connection.zig");
 pub const Connection = connection.Connection;
+pub const BodyMode = connection.BodyMode;
 pub const ConnectionOptions = connection.Options;
 
 // Shared with the optional `http_tls` module, which instantiates the

@@ -5,6 +5,13 @@
 //! `drive` to deliver events and queue responses, and drains `send`. It never
 //! touches a socket. `blocking` and the readiness engines are thin drivers
 //! around this type.
+//!
+//! `Options.body_mode` chooses when the handler runs. `.buffered` (the
+//! default) waits for END_STREAM and hands over the whole body, which is what
+//! a request/response server wants. `.stream` runs the handler on the request
+//! head and gives it `Exchange.request_body` plus the push response API, so it
+//! can answer before the body ends. The handler is re-entered on each turn
+//! rather than parked on a stack frame; see `h2.engine.common`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -16,9 +23,9 @@ const Session = session_mod.Session;
 const SessionOptions = session_mod.Options;
 const Event = session_mod.Event;
 const head = @import("../head.zig");
+const frame = @import("../frame.zig");
 const Header = @import("../../header.zig").Header;
 const Headers = @import("../../header.zig").Headers;
-const response_mod = @import("../../response.zig");
 
 const common = @import("common.zig");
 const shared = @import("../../engine/common.zig");
@@ -26,6 +33,13 @@ pub const Exchange = common.Exchange;
 pub const Handler = common.Handler;
 pub const Request = common.Request;
 pub const ResponseOptions = common.ResponseOptions;
+pub const BodyMode = enum {
+    /// Run the handler once, with the whole request body.
+    buffered,
+    /// Run the handler on the request head; it reads the body with
+    /// `Exchange.request_body` and may respond before END_STREAM.
+    stream,
+};
 
 // ast-grep-ignore: public-struct-field-default -- options bag; defaults are the policy
 pub const Options = struct {
@@ -39,24 +53,161 @@ pub const Options = struct {
     head_timeout: Io.Duration = .zero,
     /// Time from a request head to its END_STREAM; zero disables.
     body_timeout: Io.Duration = .zero,
+    /// When the handler runs, and therefore whether the body is buffered.
+    body_mode: BodyMode = .buffered,
 };
 
 const Slot = struct {
     used: bool = false,
     stream_id: u31 = 0,
     arena: ArenaAllocator,
+    /// `.buffered`: the whole request body.
     body: std.ArrayList(u8) = .empty,
+    /// `.stream`: body bytes received and not yet handed to the handler.
+    unread: std.ArrayList(u8) = .empty,
+    /// `.stream`: flow-control charge for the chunk the handler holds.
+    chunk_flow: u32 = 0,
     request_head: ?head.RequestHead = null,
     trailers: Headers = .{ .items = &.{} },
     content_length: ?u64 = null,
     received: u64 = 0,
     request_complete: bool = false,
     handler_called: bool = false,
+    /// `.stream`: the handler asked for another turn when something changes.
+    parked: bool = false,
+    /// A response head is queued.
+    response_started: bool = false,
+    /// The response head and body are queued by `pumpAll`, not by the sink.
+    reply: ?Exchange.Response = null,
     headers_sent: bool = false,
     trailers_sent: bool = false,
     body_offset: usize = 0,
+    /// `.stream`: the response ends after `end_trailers`, in `pumpAll`.
+    response_ended: bool = false,
+    end_sent: bool = false,
+    end_trailers: Headers = .{ .items = &.{} },
+    /// `.stream`: the handler queued RST_STREAM.
+    reset_pending: bool = false,
+    /// The peer's RST_STREAM code, if the stream was reset.
+    reset_code: ?u32 = null,
+    sink: SlotSink = undefined,
+    reader: SlotReader = undefined,
     body_deadline: ?Io.Timestamp = null,
     exchange: Exchange = undefined,
+};
+
+/// The engine behind `Exchange.beginResponse`, `write`, `endResponse`, and
+/// `resetStream`. One per slot; the slots slice never moves.
+const SlotSink = struct {
+    connection: *Connection,
+    index: usize,
+
+    fn sink(self: *SlotSink) common.Sink {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: common.Sink.VTable = .{
+        .buffered = buffered,
+        .begin = begin,
+        .write = write,
+        .end = end,
+        .reset = reset,
+    };
+
+    fn target(self: *SlotSink) *Slot {
+        return &self.connection.slots[self.index];
+    }
+
+    fn buffered(
+        ptr: *anyopaque,
+        options: ResponseOptions,
+        body: []const u8,
+    ) common.Sink.SinkError!void {
+        const self: *SlotSink = @ptrCast(@alignCast(ptr));
+        const slot = self.target();
+        if (slot.response_started) return error.ResponseEnded;
+        slot.response_started = true;
+        slot.reply = .{ .options = options, .body = body };
+    }
+
+    fn begin(ptr: *anyopaque, options: ResponseOptions) common.Sink.SinkError!void {
+        const self: *SlotSink = @ptrCast(@alignCast(ptr));
+        const slot = self.target();
+        if (slot.response_started) return error.ResponseEnded;
+        self.connection.session.submitResponse(
+            self.connection.allocator,
+            slot.stream_id,
+            .{
+                .status = options.status,
+                .content_type = options.content_type,
+                .content_length = null,
+                .headers = options.headers,
+            },
+            false,
+        ) catch |err| return mapSession(err);
+        slot.response_started = true;
+        slot.headers_sent = true;
+    }
+
+    fn write(ptr: *anyopaque, bytes: []const u8) common.Sink.SinkError!usize {
+        const self: *SlotSink = @ptrCast(@alignCast(ptr));
+        const slot = self.target();
+        if (!slot.headers_sent) return error.ResponseNotStarted;
+        return self.connection.session.submitData(
+            self.connection.allocator,
+            slot.stream_id,
+            bytes,
+            false,
+        ) catch |err| return mapSession(err);
+    }
+
+    fn end(ptr: *anyopaque, trailers: []const Header) common.Sink.SinkError!void {
+        const self: *SlotSink = @ptrCast(@alignCast(ptr));
+        const slot = self.target();
+        if (slot.response_ended) return error.ResponseEnded;
+        // The end frame is queued by `pumpAll`, after this handler returns, so
+        // a full output budget cannot make the last byte of the response a
+        // retryable failure.
+        slot.end_trailers = copyHeaders(slot.arena.allocator(), .{ .items = trailers }) catch
+            return error.OutOfMemory;
+        slot.response_ended = true;
+    }
+
+    fn reset(ptr: *anyopaque, code: frame.ErrorCode) common.Sink.SinkError!void {
+        const self: *SlotSink = @ptrCast(@alignCast(ptr));
+        const slot = self.target();
+        self.connection.session.submitReset(
+            self.connection.allocator,
+            slot.stream_id,
+            code,
+        ) catch |err| return mapSession(err);
+        slot.response_ended = true;
+        slot.reset_pending = true;
+        slot.end_sent = true;
+    }
+};
+
+/// The request body for a streaming engine: pulls one buffered chunk per
+/// `next`. The slice is copied into the slot arena, so it stays valid until
+/// the handler asks for the next one.
+const SlotReader = struct {
+    connection: *Connection,
+    index: usize,
+    stream: shared.stream.ReadStream = undefined,
+
+    fn reader(self: *SlotReader) shared.stream.ReadStream {
+        self.stream = .{ .ptr = self, .vtable = &vtable };
+        return self.stream;
+    }
+
+    const vtable: shared.stream.ReadStream.VTable = .{ .next = next, .close = close };
+
+    fn next(ptr: *anyopaque) shared.stream.ReadError!shared.stream.ReadResult {
+        const self: *SlotReader = @ptrCast(@alignCast(ptr));
+        return self.connection.nextBodyChunk(self.index);
+    }
+
+    fn close(_: *anyopaque) void {}
 };
 
 pub const Connection = struct {
@@ -66,6 +217,7 @@ pub const Connection = struct {
     slots: []Slot,
     body_bytes: usize,
     arena_retain_bytes: usize,
+    body_mode: BodyMode,
     head_timeout: Io.Duration,
     body_timeout: Io.Duration,
     head_deadline: ?Io.Timestamp,
@@ -89,6 +241,7 @@ pub const Connection = struct {
             .slots = slots,
             .body_bytes = options.body_bytes,
             .arena_retain_bytes = options.arena_retain_bytes,
+            .body_mode = options.body_mode,
             .head_timeout = options.head_timeout,
             .body_timeout = options.body_timeout,
             .head_deadline = null,
@@ -97,7 +250,10 @@ pub const Connection = struct {
 
     pub fn deinit(self: *Connection) void {
         self.completeAll();
-        for (self.slots) |*slot| slot.arena.deinit();
+        for (self.slots) |*slot| {
+            slot.unread.deinit(self.allocator);
+            slot.arena.deinit();
+        }
         self.allocator.free(self.slots);
         self.session.deinit(self.allocator);
         self.* = undefined;
@@ -108,7 +264,15 @@ pub const Connection = struct {
     }
 
     pub fn send(self: *Connection, out: []u8) usize {
-        return self.session.send(out);
+        const n = self.session.send(out);
+        // A handler that parked on a full output budget resumes once any
+        // output leaves the queue.
+        if (n != 0) {
+            for (self.slots) |*slot| {
+                if (slot.used) slot.parked = false;
+            }
+        }
+        return n;
     }
 
     pub fn isClosed(self: *const Connection) bool {
@@ -142,9 +306,9 @@ pub const Connection = struct {
         return at;
     }
 
-    /// Deliver every complete event currently buffered, start the handlers
-    /// whose requests are complete, and queue as much response output as flow
-    /// control accepts. Returns whether anything happened.
+    /// Deliver every complete event currently buffered, run the handlers whose
+    /// turn it is, and queue as much response output as flow control accepts.
+    /// Returns whether anything happened.
     pub fn drive(self: *Connection, now: Io.Timestamp) !bool {
         if (self.session.isClosed()) return false;
 
@@ -165,7 +329,7 @@ pub const Connection = struct {
     fn processEvent(self: *Connection, event: Event, now: Io.Timestamp) !void {
         switch (event) {
             .request => |request| {
-                const slot = allocSlot(self.slots) orelse {
+                const slot_index = allocSlotIndex(self.slots) orelse {
                     try self.session.submitReset(
                         self.allocator,
                         request.stream_id,
@@ -173,16 +337,27 @@ pub const Connection = struct {
                     );
                     return;
                 };
+                const slot = &self.slots[slot_index];
                 slot.used = true;
                 slot.stream_id = request.stream_id;
                 slot.body = .empty;
+                slot.unread.clearRetainingCapacity();
+                slot.chunk_flow = 0;
                 slot.trailers = .{ .items = &.{} };
                 slot.received = 0;
                 slot.request_complete = request.end_stream;
                 slot.handler_called = false;
+                slot.parked = false;
+                slot.response_started = false;
+                slot.reply = null;
                 slot.headers_sent = false;
                 slot.trailers_sent = false;
                 slot.body_offset = 0;
+                slot.response_ended = false;
+                slot.end_sent = false;
+                slot.end_trailers = .{ .items = &.{} };
+                slot.reset_pending = false;
+                slot.reset_code = null;
                 slot.body_deadline = null;
                 self.head_deadline = null;
                 if (!request.end_stream and self.body_timeout.nanoseconds > 0) {
@@ -218,8 +393,11 @@ pub const Connection = struct {
                             .enhance_your_calm,
                         );
                         self.finishSlot(slot, false);
+                        return;
                     }
                 }
+                slot.sink = .{ .connection = self, .index = slot_index };
+                slot.reader = .{ .connection = self, .index = slot_index };
             },
 
             .data => |data| {
@@ -246,16 +424,31 @@ pub const Connection = struct {
                             @intCast(data.bytes.len),
                         );
                     }
-                    self.finishSlot(slot, false);
+                    self.finishSlot(slot, slot.handler_called);
                     return;
                 }
 
-                slot.body.appendSlice(slot.arena.allocator(), data.bytes) catch |err| {
-                    try self.session.submitReset(
-                        self.allocator,
-                        data.stream_id,
-                        .internal_error,
-                    );
+                const storage = if (self.body_mode == .buffered)
+                    slot.arena.allocator()
+                else
+                    self.allocator;
+                if (self.body_mode == .buffered) {
+                    slot.body.appendSlice(storage, data.bytes) catch |err| {
+                        try self.session.submitReset(
+                            self.allocator,
+                            data.stream_id,
+                            .internal_error,
+                        );
+                        if (data.bytes.len > 0) {
+                            try self.session.release(
+                                self.allocator,
+                                data.stream_id,
+                                @intCast(data.bytes.len),
+                            );
+                        }
+                        self.finishSlot(slot, slot.handler_called);
+                        return err;
+                    };
                     if (data.bytes.len > 0) {
                         try self.session.release(
                             self.allocator,
@@ -263,20 +456,33 @@ pub const Connection = struct {
                             @intCast(data.bytes.len),
                         );
                     }
-                    self.finishSlot(slot, false);
-                    return err;
-                };
-                slot.received += data.bytes.len;
-                if (data.bytes.len > 0) {
-                    try self.session.release(
-                        self.allocator,
-                        data.stream_id,
-                        @intCast(data.bytes.len),
-                    );
+                } else {
+                    // The bytes stay charged to both windows until the handler
+                    // asks for the next chunk, so a handler that stops reading
+                    // stops the peer.
+                    slot.unread.appendSlice(storage, data.bytes) catch |err| {
+                        try self.session.submitReset(
+                            self.allocator,
+                            data.stream_id,
+                            .internal_error,
+                        );
+                        if (data.bytes.len > 0) {
+                            try self.session.release(
+                                self.allocator,
+                                data.stream_id,
+                                @intCast(data.bytes.len),
+                            );
+                        }
+                        self.finishSlot(slot, slot.handler_called);
+                        return err;
+                    };
+                    if (data.bytes.len != 0) slot.parked = false;
                 }
+                slot.received += data.bytes.len;
                 if (data.end_stream) {
                     slot.request_complete = true;
                     slot.body_deadline = null;
+                    slot.parked = false;
                 }
             },
 
@@ -291,16 +497,18 @@ pub const Connection = struct {
                         trailers.stream_id,
                         .internal_error,
                     );
-                    self.finishSlot(slot, false);
+                    self.finishSlot(slot, slot.handler_called);
                     return err;
                 };
                 slot.request_complete = trailers.end_stream;
+                slot.parked = false;
                 if (trailers.end_stream) slot.body_deadline = null;
             },
 
             .reset => |reset| {
                 if (findSlot(self.slots, reset.stream_id)) |slot| {
-                    self.finishSlot(slot, true);
+                    slot.reset_code = compatCode(reset.code);
+                    self.finishSlot(slot, slot.handler_called);
                 }
             },
 
@@ -310,65 +518,157 @@ pub const Connection = struct {
 
     fn startReady(self: *Connection) !void {
         for (self.slots, 0..) |*slot, index| {
-            if (!slot.used or !slot.request_complete or slot.handler_called) continue;
+            if (!slot.used) continue;
+            if (slot.response_ended or slot.reset_pending) continue;
+            if (self.body_mode == .buffered) {
+                if (!slot.request_complete or slot.handler_called) continue;
+            } else if (slot.parked) {
+                continue;
+            }
 
-            if (slot.content_length) |expected| {
-                if (expected != slot.received) {
-                    try self.session.submitReset(
-                        self.allocator,
-                        slot.stream_id,
-                        .protocol_error,
-                    );
-                    self.finishSlot(slot, false);
-                    continue;
+            if (slot.request_complete) {
+                if (slot.content_length) |expected| {
+                    if (expected != slot.received) {
+                        try self.session.submitReset(
+                            self.allocator,
+                            slot.stream_id,
+                            .protocol_error,
+                        );
+                        self.finishSlot(slot, slot.handler_called);
+                        continue;
+                    }
                 }
             }
+
+            var body: []const u8 = &.{};
+            if (self.body_mode == .buffered) body = slot.body.items;
+            const request_body = if (self.body_mode == .stream)
+                slot.reader.reader()
+            else
+                null;
 
             slot.exchange = .{
                 .id = index,
                 .stream_id = slot.stream_id,
                 .request = .{
                     .head = slot.request_head.?,
-                    .body = slot.body.items,
+                    .body = body,
                     .trailers = slot.trailers,
                 },
                 .arena = slot.arena.allocator(),
+                .request_body = request_body,
+                .reset_code = slot.reset_code,
+                .response_started = slot.response_started,
+                .sink = slot.sink.sink(),
+                .parked = false,
             };
             slot.handler_called = true;
+            slot.parked = false;
 
             var failed = false;
             self.handler.vtable.handle(self.handler.ptr, &slot.exchange) catch |err| {
                 self.handler.vtable.report_error(self.handler.ptr, err);
                 failed = true;
             };
-            if (slot.exchange.response == null) {
-                if (!failed) {
-                    self.handler.vtable.report_error(self.handler.ptr, error.NoResponse);
-                }
-                slot.exchange.respond(.{ .status = .internal_server_error }, "") catch {
-                    try self.session.submitReset(
-                        self.allocator,
-                        slot.stream_id,
-                        .internal_error,
-                    );
-                    self.finishSlot(slot, true);
-                };
+            if (slot.exchange.parked) slot.parked = true;
+            slot.response_started = slot.response_started or slot.exchange.response_started;
+
+            if (slot.response_started or slot.response_ended or slot.reset_pending) continue;
+            if (self.body_mode == .stream and slot.parked) continue;
+            if (!failed) {
+                self.handler.vtable.report_error(self.handler.ptr, error.NoResponse);
             }
+            slot.exchange.respond(.{ .status = .internal_server_error }, "") catch {
+                try self.session.submitReset(
+                    self.allocator,
+                    slot.stream_id,
+                    .internal_error,
+                );
+                self.finishSlot(slot, true);
+            };
         }
+    }
+
+    fn nextBodyChunk(
+        self: *Connection,
+        index: usize,
+    ) shared.stream.ReadError!shared.stream.ReadResult {
+        const slot = &self.slots[index];
+        if (!slot.used) return error.Canceled;
+        try self.releaseChunk(slot);
+        if (slot.reset_pending) return error.Canceled;
+        if (slot.unread.items.len != 0) {
+            const chunk = slot.arena.allocator().dupe(u8, slot.unread.items) catch
+                return error.OutOfMemory;
+            slot.chunk_flow = @intCast(slot.unread.items.len);
+            slot.unread.clearRetainingCapacity();
+            return .{ .data = chunk };
+        }
+        if (slot.request_complete) return error.EndOfStream;
+        return error.Pending;
+    }
+
+    /// Return the flow-control credit for the chunk the handler finished with.
+    /// A stream that the peer already reset has no stream window left, so only
+    /// the connection window is credited.
+    fn releaseChunk(self: *Connection, slot: *Slot) shared.stream.ReadError!void {
+        if (slot.chunk_flow == 0) return;
+        const count = slot.chunk_flow;
+        slot.chunk_flow = 0;
+        self.session.release(self.allocator, slot.stream_id, count) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.Canceled,
+        };
     }
 
     fn pumpAll(self: *Connection) !bool {
         var progressed = false;
         for (self.slots) |*slot| {
-            if (!slot.used or !slot.handler_called) continue;
-            const reply = slot.exchange.response orelse continue;
-            const response: response_mod.Response = .{
-                .status = reply.options.status,
-                .content_type = reply.options.content_type,
-                .content_length = reply.body.len,
-                .headers = reply.options.headers,
-            };
+            if (!slot.used) continue;
 
+            if (slot.response_ended or slot.reset_pending) {
+                if (!slot.end_sent) {
+                    if (slot.reset_pending) {
+                        slot.end_sent = true;
+                    } else if (slot.end_trailers.items.len != 0) {
+                        self.session.submitTrailers(
+                            self.allocator,
+                            slot.stream_id,
+                            slot.end_trailers.items,
+                        ) catch |err| switch (err) {
+                            error.WouldBlock => continue,
+                            error.UnknownStream, error.StreamClosed => {
+                                self.finishSlot(slot, slot.handler_called);
+                                progressed = true;
+                                continue;
+                            },
+                            else => return err,
+                        };
+                        slot.end_sent = true;
+                    } else {
+                        _ = self.session.submitData(
+                            self.allocator,
+                            slot.stream_id,
+                            &.{},
+                            true,
+                        ) catch |err| switch (err) {
+                            error.UnknownStream, error.StreamClosed => {
+                                self.finishSlot(slot, slot.handler_called);
+                                progressed = true;
+                                continue;
+                            },
+                            else => return err,
+                        };
+                        slot.end_sent = true;
+                    }
+                }
+                self.finishSlot(slot, slot.handler_called);
+                progressed = true;
+                continue;
+            }
+
+            if (slot.reply == null) continue;
+            const reply = slot.reply.?;
             if (!slot.headers_sent) {
                 // END_STREAM on the head only when nothing follows it. A
                 // trailer section needs the stream left open.
@@ -376,12 +676,17 @@ pub const Connection = struct {
                 self.session.submitResponse(
                     self.allocator,
                     slot.stream_id,
-                    response,
+                    .{
+                        .status = reply.options.status,
+                        .content_type = reply.options.content_type,
+                        .content_length = reply.body.len,
+                        .headers = reply.options.headers,
+                    },
                     end,
                 ) catch |err| switch (err) {
                     error.WouldBlock => continue,
                     error.UnknownStream, error.StreamClosed => {
-                        self.finishSlot(slot, true);
+                        self.finishSlot(slot, slot.handler_called);
                         progressed = true;
                         continue;
                     },
@@ -390,7 +695,7 @@ pub const Connection = struct {
                 slot.headers_sent = true;
                 progressed = true;
                 if (end) {
-                    self.finishSlot(slot, true);
+                    self.finishSlot(slot, slot.handler_called);
                     continue;
                 }
             }
@@ -403,7 +708,7 @@ pub const Connection = struct {
                     reply.options.trailers.len == 0,
                 ) catch |err| switch (err) {
                     error.UnknownStream, error.StreamClosed => {
-                        self.finishSlot(slot, true);
+                        self.finishSlot(slot, slot.handler_called);
                         progressed = true;
                         break;
                     },
@@ -423,7 +728,7 @@ pub const Connection = struct {
                     ) catch |err| switch (err) {
                         error.WouldBlock => continue,
                         error.UnknownStream, error.StreamClosed => {
-                            self.finishSlot(slot, true);
+                            self.finishSlot(slot, slot.handler_called);
                             progressed = true;
                             continue;
                         },
@@ -431,7 +736,7 @@ pub const Connection = struct {
                     };
                     slot.trailers_sent = true;
                 }
-                self.finishSlot(slot, true);
+                self.finishSlot(slot, slot.handler_called);
                 progressed = true;
             }
         }
@@ -439,6 +744,25 @@ pub const Connection = struct {
     }
 
     fn finishSlot(self: *Connection, slot: *Slot, call_complete: bool) void {
+        if (slot.used and self.body_mode == .stream) {
+            // Unread bytes and the outstanding chunk are still charged to the
+            // receive windows. The stream is gone, so only the connection
+            // window can take them back.
+            const outstanding = @min(
+                @as(u64, slot.chunk_flow) + slot.unread.items.len,
+                0x7fff_ffff,
+            );
+            slot.chunk_flow = 0;
+            slot.unread.clearRetainingCapacity();
+            if (outstanding != 0 and !self.session.isClosed()) {
+                self.session.releaseConnection(
+                    self.allocator,
+                    @intCast(outstanding),
+                ) catch |err| {
+                    _ = @errorName(err);
+                };
+            }
+        }
         if (call_complete and slot.handler_called) {
             self.handler.vtable.complete(self.handler.ptr, &slot.exchange);
         }
@@ -452,9 +776,17 @@ pub const Connection = struct {
         slot.received = 0;
         slot.request_complete = false;
         slot.handler_called = false;
+        slot.parked = false;
+        slot.response_started = false;
+        slot.reply = null;
         slot.headers_sent = false;
         slot.trailers_sent = false;
         slot.body_offset = 0;
+        slot.response_ended = false;
+        slot.end_sent = false;
+        slot.end_trailers = .{ .items = &.{} };
+        slot.reset_pending = false;
+        slot.reset_code = null;
         slot.body_deadline = null;
         slot.exchange = undefined;
     }
@@ -465,6 +797,21 @@ pub const Connection = struct {
         }
     }
 };
+
+fn mapSession(err: anyerror) common.Sink.SinkError {
+    return switch (err) {
+        error.UnknownStream, error.StreamClosed => error.StreamClosed,
+        error.ConnectionClosed, error.WrongRole => error.ConnectionClosed,
+        error.WouldBlock => error.WouldBlock,
+        error.InvalidHead => error.InvalidResponse,
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.ConnectionClosed,
+    };
+}
+
+fn compatCode(code: frame.ErrorCode) u32 {
+    return @backingInt(code);
+}
 
 fn earliest(a: ?Io.Timestamp, b: Io.Timestamp) Io.Timestamp {
     const at = a orelse return b;
@@ -478,9 +825,9 @@ fn findSlot(slots: []Slot, stream_id: u31) ?*Slot {
     return null;
 }
 
-fn allocSlot(slots: []Slot) ?*Slot {
-    for (slots) |*slot| {
-        if (!slot.used) return slot;
+fn allocSlotIndex(slots: []Slot) ?usize {
+    for (slots, 0..) |*slot, index| {
+        if (!slot.used) return index;
     }
     return null;
 }
@@ -526,4 +873,362 @@ fn parseContentLength(headers: Headers) error{Invalid}!?u64 {
         value = parsed;
     }
     return value;
+}
+
+const testing = std.testing;
+
+const stream_fields = [_]Header{
+    .{ .name = ":method", .value = "POST" },
+    .{ .name = ":scheme", .value = "http" },
+    .{ .name = ":authority", .value = "example.com" },
+    .{ .name = ":path", .value = "/" },
+    .{ .name = "content-type", .value = "application/grpc" },
+};
+
+/// Push one session's queued output into a connection and drain events.
+fn feedConnection(from: *Session, to: *Connection, now: Io.Timestamp) !void {
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = from.send(&buf);
+        if (n == 0) break;
+        var offset: usize = 0;
+        while (offset < n) {
+            const written = to.receive(buf[offset..n]);
+            if (written == 0) {
+                _ = try to.drive(now);
+                continue;
+            }
+            offset += written;
+            _ = try to.drive(now);
+        }
+    }
+    _ = try to.drive(now);
+}
+
+/// Push one connection's queued output into a session.
+fn feedSession(from: *Connection, to: *Session) !void {
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = from.send(&buf);
+        if (n == 0) break;
+        var offset: usize = 0;
+        while (offset < n) {
+            const written = to.receive(buf[offset..n]);
+            if (written == 0) return error.InputStuck;
+            offset += written;
+        }
+    }
+}
+
+/// The next event that carries application data. Flow-control and SETTINGS
+/// events are protocol bookkeeping, not test subjects.
+fn nextClientEvent(client: *Session) !?Event {
+    while (try client.nextEvent(testing.allocator)) |event| {
+        switch (event) {
+            .window_update, .settings => continue,
+            else => return event,
+        }
+    }
+    return null;
+}
+
+/// Echo every request-body chunk back as a response chunk, before END_STREAM.
+const StreamingApp = struct {
+    response_started: bool = false,
+    turns: usize = 0,
+    received: usize = 0,
+    ended: bool = false,
+    failed: ?anyerror = null,
+
+    fn handler(self: *StreamingApp) Handler {
+        return .{ .ptr = self, .vtable = &.{
+            .handle = handle,
+            .complete = Handler.noopComplete,
+            .report_error = reportError,
+            .policy_response = Handler.defaultPolicyResponse,
+        } };
+    }
+
+    fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
+        const self: *StreamingApp = @ptrCast(@alignCast(ptr));
+        self.turns += 1;
+        const body = exchange.request_body.?;
+        while (true) {
+            const chunk = body.next() catch |err| switch (err) {
+                error.Pending => return exchange.waitForProgress(),
+                error.Canceled => return,
+                error.EndOfStream => {
+                    if (!self.response_started) {
+                        try exchange.beginResponse(.{ .status = .ok });
+                        self.response_started = true;
+                    }
+                    self.ended = true;
+                    const trailers = [_]Header{.{ .name = "grpc-status", .value = "0" }};
+                    return exchange.endResponse(&trailers);
+                },
+                else => return err,
+            };
+            if (!self.response_started) {
+                try exchange.beginResponse(.{ .status = .ok });
+                self.response_started = true;
+            }
+            var rest = chunk.data;
+            while (rest.len != 0) {
+                const written = try exchange.write(rest);
+                if (written == 0) return exchange.waitForProgress();
+                rest = rest[written..];
+                self.received += written;
+            }
+        }
+    }
+
+    fn reportError(ptr: *anyopaque, err: anyerror) void {
+        const self: *StreamingApp = @ptrCast(@alignCast(ptr));
+        self.failed = err;
+    }
+};
+
+test "the stream engine answers twice before the request ends" {
+    // RFC 9113 §5.1: a stream is bidirectional while open, so the server may
+    // send HEADERS and DATA while the client still sends DATA.
+    const allocator = testing.allocator;
+    var app: StreamingApp = .{};
+    var conn = try Connection.init(.{
+        .allocator = allocator,
+        .handler = app.handler(),
+        .body_mode = .stream,
+    });
+    defer conn.deinit();
+
+    var client = try Session.init(allocator, .{ .role = .client });
+    defer client.deinit(allocator);
+
+    const now = Io.Timestamp.zero;
+    // Client preface and SETTINGS.
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+    while (try client.nextEvent(allocator)) |_| {}
+
+    const id = try client.submitRequest(allocator, &stream_fields, false);
+    try feedConnection(&client, &conn, now);
+    try testing.expectEqual(@as(usize, 1), app.turns);
+    // The handler ran on the head with no body yet, and paused.
+    try testing.expect(!app.response_started);
+    try testing.expectEqual(@as(usize, 0), app.received);
+
+    _ = try client.submitData(allocator, id, "one", false);
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+
+    const response_event = (try nextClientEvent(&client)).?;
+    switch (response_event) {
+        .response => |response| {
+            try testing.expectEqual(@as(u16, 200), response.head.status.code());
+            try testing.expect(!response.end_stream);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    const first = (try nextClientEvent(&client)).?;
+    switch (first) {
+        .data => |data| {
+            try testing.expectEqualStrings("one", data.bytes);
+            try testing.expect(!data.end_stream);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try client.release(allocator, id, 3);
+    // The request is still open when the first response arrives.
+    try testing.expect(!app.ended);
+
+    _ = try client.submitData(allocator, id, "two", false);
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+    const second = (try nextClientEvent(&client)).?;
+    switch (second) {
+        .data => |data| {
+            try testing.expectEqualStrings("two", data.bytes);
+            try testing.expect(!data.end_stream);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try client.release(allocator, id, 3);
+
+    _ = try client.submitData(allocator, id, "", true);
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+    const trailers = (try nextClientEvent(&client)).?;
+    switch (trailers) {
+        .trailers => |t| try testing.expectEqualStrings(
+            "0",
+            t.headers.get("grpc-status").?,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(@as(usize, 6), app.received);
+    try testing.expectEqual(@as(?anyerror, null), app.failed);
+}
+
+/// Parks on the first turn without reading, so the test can inspect the
+/// unread balance.
+const ParkApp = struct {
+    turns: usize = 0,
+
+    fn handler(self: *ParkApp) Handler {
+        return .{ .ptr = self, .vtable = &.{
+            .handle = handle,
+            .complete = Handler.noopComplete,
+            .report_error = Handler.noopReportError,
+            .policy_response = Handler.defaultPolicyResponse,
+        } };
+    }
+
+    fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
+        const self: *ParkApp = @ptrCast(@alignCast(ptr));
+        self.turns += 1;
+        exchange.waitForProgress();
+    }
+};
+
+/// Reads exactly one chunk per turn, then parks, so the test can observe the
+/// credit balance between turns.
+const OneChunkApp = struct {
+    chunks: usize = 0,
+
+    fn handler(self: *OneChunkApp) Handler {
+        return .{ .ptr = self, .vtable = &.{
+            .handle = handle,
+            .complete = Handler.noopComplete,
+            .report_error = Handler.noopReportError,
+            .policy_response = Handler.defaultPolicyResponse,
+        } };
+    }
+
+    fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
+        const self: *OneChunkApp = @ptrCast(@alignCast(ptr));
+        const chunk = exchange.request_body.?.next() catch |err| switch (err) {
+            error.Pending, error.Canceled => return exchange.waitForProgress(),
+            error.EndOfStream => {
+                try exchange.beginResponse(.{ .status = .ok });
+                return exchange.endResponse(&.{});
+            },
+            else => return err,
+        };
+        try testing.expect(chunk.data.len != 0);
+        self.chunks += 1;
+        exchange.waitForProgress();
+    }
+};
+
+test "a chunk's flow-control credit returns when the handler supersedes it" {
+    // RFC 9113 §5.2.1: a receiver returns credit with WINDOW_UPDATE once it has
+    // consumed DATA. The engine consumes one chunk at a time, so the previous
+    // chunk is what the handler has finished with.
+    const allocator = testing.allocator;
+    var app: OneChunkApp = .{};
+    var conn = try Connection.init(.{
+        .allocator = allocator,
+        .handler = app.handler(),
+        .body_mode = .stream,
+    });
+    defer conn.deinit();
+
+    var client = try Session.init(allocator, .{ .role = .client });
+    defer client.deinit(allocator);
+
+    const now = Io.Timestamp.zero;
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+    while (try client.nextEvent(allocator)) |_| {}
+
+    const id = try client.submitRequest(allocator, &stream_fields, false);
+    try feedConnection(&client, &conn, now);
+
+    _ = try client.submitData(allocator, id, "one", false);
+    try feedConnection(&client, &conn, now);
+    try testing.expectEqual(@as(usize, 1), app.chunks);
+    // The handler holds "one"; both windows are charged for it.
+    try testing.expectEqual(@as(i64, 65_535 - 3), conn.session.conn_recv.available);
+    try testing.expectEqual(
+        @as(i64, 65_535 - 3),
+        conn.session.streams.get(id).?.recv.available,
+    );
+
+    _ = try client.submitData(allocator, id, "two", false);
+    try feedConnection(&client, &conn, now);
+    try testing.expectEqual(@as(usize, 2), app.chunks);
+    // Superseding "one" returned three bytes, then "two" was consumed.
+    try testing.expectEqual(@as(i64, 65_535 - 3), conn.session.conn_recv.available);
+
+    _ = try client.submitData(allocator, id, "", true);
+    try feedConnection(&client, &conn, now);
+    try testing.expectEqual(@as(i64, 65_535), conn.session.conn_recv.available);
+    try testing.expectEqual(@as(usize, 0), conn.session.streams.count());
+}
+
+test "a peer reset returns unread body credit to the connection window" {
+    // A reset stream has no stream window left (RFC 9113 §5.1), so the unread
+    // bytes can only be credited at the connection level.
+    const allocator = testing.allocator;
+    var app: ParkApp = .{};
+    var conn = try Connection.init(.{
+        .allocator = allocator,
+        .handler = app.handler(),
+        .body_mode = .stream,
+    });
+    defer conn.deinit();
+
+    var client = try Session.init(allocator, .{ .role = .client });
+    defer client.deinit(allocator);
+
+    const now = Io.Timestamp.zero;
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+    while (try client.nextEvent(allocator)) |_| {}
+
+    const id = try client.submitRequest(allocator, &stream_fields, false);
+    try feedConnection(&client, &conn, now);
+    _ = try client.submitData(allocator, id, "abc", false);
+    try feedConnection(&client, &conn, now);
+    try testing.expectEqual(@as(i64, 65_535 - 3), conn.session.conn_recv.available);
+
+    try client.submitReset(allocator, id, .cancel);
+    try feedConnection(&client, &conn, now);
+    try testing.expectEqual(@as(usize, 0), conn.session.streams.count());
+    try testing.expectEqual(@as(i64, 65_535), conn.session.conn_recv.available);
+    // The head turn and one turn woken by the DATA.
+    try testing.expectEqual(@as(usize, 2), app.turns);
+}
+
+test "a request body over body_bytes is a reset, not growth" {
+    const allocator = testing.allocator;
+    var app: ParkApp = .{};
+    var conn = try Connection.init(.{
+        .allocator = allocator,
+        .handler = app.handler(),
+        .body_mode = .stream,
+        .body_bytes = 4,
+    });
+    defer conn.deinit();
+
+    var client = try Session.init(allocator, .{ .role = .client });
+    defer client.deinit(allocator);
+
+    const now = Io.Timestamp.zero;
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+    while (try client.nextEvent(allocator)) |_| {}
+
+    const id = try client.submitRequest(allocator, &stream_fields, false);
+    try feedConnection(&client, &conn, now);
+    _ = try client.submitData(allocator, id, "abcde", false);
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+
+    const event = (try nextClientEvent(&client)).?;
+    switch (event) {
+        .reset => |reset| try testing.expectEqual(frame.ErrorCode.enhance_your_calm, reset.code),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(@as(usize, 0), conn.session.streams.count());
+    try testing.expectEqual(@as(i64, 65_535), conn.session.conn_recv.available);
 }

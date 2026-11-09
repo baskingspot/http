@@ -5,12 +5,21 @@
 //! snapshots; body bytes are borrowed from the connection until the next
 //! advancing operation.
 //!
-//! The next shape, after v0.1, is a writable request body rather than a reader
-//! the adapter drains. DATA may follow a committed header block. The producer
-//! appends only after the previous frame is fully accepted; the queue reports
-//! capacity, not frame state, and `AppendWhilePartial` is a bug signal rather
-//! than a control path. Retry belongs to the transport write. Nothing may
-//! interleave a header block between HEADERS and its final CONTINUATION.
+//! A request body is either a static slice (`Request.body`) or a `BodyWriter`
+//! the caller drives. The adapter writes each `BodyWriter.write` straight to
+//! the connection, so DATA may follow a header block whose END_HEADERS is on
+//! the wire, and the body does not have to exist up front. Nothing may
+//! interleave a header block between HEADERS and its final CONTINUATION, so
+//! every write appends whole frames, never a partial one.
+//!
+//! A streaming adapter (`h2.client.blocking.Client.begin`) returns the writer
+//! after the request head is committed and reads the response head separately
+//! with `response()`. The two sides of one stream are independent: the caller
+//! may write body bytes, read a response chunk, and write again before either
+//! side ends. A blocking `write` accepts all the bytes it is given or fails;
+//! a partial write is not a result. Request bytes are copied into the
+//! connection queue during the call, so the slice does not outlive it.
+//!
 //! Trailers share the connection buffer with a borrowed body slice, so a
 //! `trailers()` accessor must snapshot into the response arena when eof is
 //! reported, not lazily on access.
@@ -60,10 +69,10 @@ pub const Request = struct {
     /// names: h1 forwards them as-is, while h2 rejects uppercase as
     /// `InvalidHeader`.
     headers: []const Header = &.{},
-    /// Request body bytes. h1 sends them with Content-Length; h2 sends DATA
-    /// inside the request stream. Empty is the common case. When h2 returns an
-    /// early final response before the body is sent, this slice stays valid
-    /// until `Body.close`.
+    /// The whole request body, sent in one call. h1 sends it with
+    /// Content-Length; h2 sends DATA inside the request stream. Empty is the
+    /// common case. Use `Client.begin` and its `BodyWriter` when the body does
+    /// not exist up front; `begin` rejects a non-empty slice here.
     body: []const u8 = "",
 };
 
@@ -88,6 +97,46 @@ pub const Local = enum {
     /// A local failure left a partial frame on the wire. The connection is not
     /// usable; close it. A blocking adapter must not produce this.
     unusable,
+};
+
+/// The request body of an in-flight request. The caller owns the bytes it
+/// passes and the adapter copies them during the call.
+///
+/// `write` may block until flow control opens, and it never returns a short
+/// count. `close` sends END_STREAM and is idempotent; the response body stays
+/// readable after it. A write after `close` is `error.Closed`.
+pub const BodyWriter = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        write: *const fn (ptr: *anyopaque, bytes: []const u8) BodyWriteError!void,
+        close: *const fn (ptr: *anyopaque) void,
+    };
+
+    pub fn write(self: BodyWriter, bytes: []const u8) BodyWriteError!void {
+        return self.vtable.write(self.ptr, bytes);
+    }
+
+    pub fn close(self: BodyWriter) void {
+        self.vtable.close(self.ptr);
+    }
+};
+
+/// Request-body failures. A reset stream is the peer's decision; the code is
+/// on the client that produced the writer.
+pub const BodyWriteError = error{
+    /// The peer reset the stream mid-body. The connection survives.
+    Reset,
+    /// The connection ended before the body was sent. It is not reusable.
+    Truncated,
+    /// The peer or the adapter broke a protocol rule. The connection is not
+    /// reusable.
+    Protocol,
+    /// The writer is already closed, or its request is no longer open.
+    Closed,
+    /// Allocation failed. The connection is not reusable.
+    LocalOutOfMemory,
 };
 
 /// A successful body read. The slice is borrowed for the connection

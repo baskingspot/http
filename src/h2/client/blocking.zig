@@ -1,9 +1,18 @@
-//! A blocking HTTP/2 client with a streaming response body.
+//! A blocking HTTP/2 client with streaming request and response bodies.
 //!
 //! The adapter owns a `h2.Session`, serializes one request at a time, and
 //! snapshots response header names and values into the per-response arena.
-//! Body reads drive both directions of the session so SETTINGS acknowledgments
-//! and WINDOW_UPDATE frames are flushed while the response body is consumed.
+//! `begin` sends the request head and hands back a `BodyWriter`; `response`
+//! waits for the response head. The two sides of the stream are independent,
+//! so a caller can write a body chunk, read a response chunk, and write again
+//! before either side ends. `request` is the static-body convenience built on
+//! the same two calls.
+//!
+//! Body reads and writes both drive the connection, so SETTINGS
+//! acknowledgments and WINDOW_UPDATE frames are flushed in either direction.
+//! Response DATA that arrives during a write is buffered until the caller
+//! reads it; flow-control credit for it is returned as it is consumed, which
+//! bounds that buffer to the connection window.
 //!
 //! The request, response, body, and config types come from the shared client
 //! contract; `h1.client.streaming` implements the same contract.
@@ -32,6 +41,7 @@ pub const Scheme = shared.Scheme;
 pub const Request = shared.Request;
 pub const ResponseHead = shared.ResponseHead;
 pub const Body = shared.Body;
+pub const BodyWriter = shared.BodyWriter;
 pub const Response = shared.Response;
 pub const Config = shared.Config;
 
@@ -52,28 +62,39 @@ pub const Client = struct {
     remote_end: bool = false,
     /// All response bytes have been delivered to the caller.
     body_eof: bool = false,
-    /// A reset was queued for the current stream by `close`.
+    /// A reset was queued by `close`.
     reset_sent: bool = false,
+    /// The request body sent END_STREAM.
+    request_closed: bool = false,
     /// Staged until the request's END_HEADERS reaches the writer.
     request_state: RequestState = .idle,
     /// A write or connection failure poisoned this client.
     connection_poisoned: bool = false,
     /// Bytes successfully handed to the writer.
     output_written: u64 = 0,
-    /// Borrowed from the current session event until it is consumed.
-    pending: []const u8 = &.{},
-    /// Flow-control charge for `pending`, including padding.
-    pending_flow: u32 = 0,
+    /// Response bytes received and not yet handed to the caller.
+    inbox: std.ArrayList(u8) = .empty,
+    /// Flow-control charge for `inbox`, including padding.
+    inbox_flow: u32 = 0,
+    /// Response bytes handed to the caller. Released on the next read.
+    chunk: std.ArrayList(u8) = .empty,
+    /// Flow-control charge for `chunk`.
+    chunk_flow: u32 = 0,
     /// Unfed transport bytes, kept when the session input buffer is full.
     net_buffer: [4096]u8 = undefined,
     net_start: usize = 0,
     net_end: usize = 0,
     body: Body = undefined,
+    body_writer: BodyWriter = undefined,
     goaway: ?shared.GoAway = null,
-    /// Response head received while the request body was still being sent.
+    /// Response head received while the request body was still being written.
     early_head: ?ResponseHead = null,
-    /// Request-body bytes still to send after an early response head.
+    /// The tail of a static `Request.body` that did not fit the send window.
+    /// `readBody` sends it as the caller consumes the response. The streaming
+    /// writer has no such remainder: it blocks instead.
     pending_body: []const u8 = &.{},
+    /// `response` already returned the head for this request.
+    response_taken: bool = false,
     /// RST_STREAM code when the last read returned error.Reset.
     body_reset_code: ?u32 = null,
     /// Local cause when the last read returned a Local* error.
@@ -111,6 +132,7 @@ pub const Client = struct {
         errdefer self.session.deinit(self.allocator);
         errdefer self.arena.deinit();
         self.body = .{ .ptr = self, .vtable = &body_vtable };
+        self.body_writer = .{ .ptr = self, .vtable = &body_writer_vtable };
 
         // Flush the client preface and initial SETTINGS. sendFrame starts at a
         // frame boundary, so the preface is drained here with the byte API.
@@ -119,6 +141,8 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         self.closeBody();
+        self.inbox.deinit(self.allocator);
+        self.chunk.deinit(self.allocator);
         self.session.deinit(self.allocator);
         self.arena.deinit();
         self.* = undefined;
@@ -146,73 +170,86 @@ pub const Client = struct {
     }
 
     /// Send one request, including its body, and wait for the response head.
+    ///
+    /// A final response that arrives before the body is sent ends the send
+    /// early: the rest stays in `pending_body` and `readBody` sends it under
+    /// flow control as the response is consumed. This is the v0.1 contract,
+    /// and it is why the static body is not simply `write` plus `close`.
     pub fn request(self: *Client, value: Request) !Response {
-        if (self.active) return error.RequestInProgress;
-        if (self.connection_poisoned) return error.ConnectionPoisoned;
-        if (self.goaway != null) return error.GoAway;
-        if (value.authority.len == 0) return error.InvalidAuthority;
-        self.request_state = .idle;
-        _ = self.arena.reset(.free_all);
-        self.early_head = null;
-        self.pending_body = &.{};
-
-        var has_length = false;
-        for (value.headers) |header| {
-            if (ascii.eqlIgnoreCase(header.name, "content-length")) has_length = true;
-        }
-        const add_length = value.body.len != 0 and !has_length;
-        const field_count = 4 + value.headers.len + @as(usize, if (add_length) 1 else 0);
-        const fields = try self.allocator.alloc(Header, field_count);
-        defer self.allocator.free(fields);
-
-        fields[0] = .{ .name = ":method", .value = value.method_token };
-        fields[1] = .{ .name = ":scheme", .value = value.scheme.token() };
-        fields[2] = .{ .name = ":authority", .value = value.authority };
-        fields[3] = .{ .name = ":path", .value = value.target };
-
-        for (value.headers, 0..) |header, index| {
-            if (ascii.eqlIgnoreCase(header.name, "host")) return error.DuplicateAuthority;
-            if (!validLowerHeaderName(header.name)) return error.InvalidHeader;
-            fields[4 + index] = header;
-        }
-        if (add_length) {
-            var length_text: [20]u8 = undefined;
-            const text = try std.fmt.bufPrint(&length_text, "{d}", .{value.body.len});
-            fields[field_count - 1] = .{ .name = "content-length", .value = text };
-        }
-
-        const id = self.session.submitRequest(
-            self.allocator,
-            fields,
-            value.body.len == 0,
-        ) catch |err| {
-            return err;
-        };
-        const run = self.session.lastHeaderRun() orelse return error.MissingHeaderRun;
-        if (run.stream_id != id) return error.MissingHeaderRun;
-        self.request_state = .staged;
-        self.stream_id = id;
-        self.active = true;
-        self.remote_end = false;
-        self.body_eof = false;
-        self.body_reset_code = null;
-        self.body_local = null;
-        self.reset_sent = false;
-        self.pending = &.{};
-        self.pending_flow = 0;
-        self.net_start = 0;
-        self.net_end = 0;
-
         errdefer self.closeBody();
-        self.flushFrames() catch |err| {
-            self.connection_poisoned = true;
-            return err;
-        };
+        try self.start(value, value.body.len == 0, value.body.len);
         if (value.body.len != 0) {
-            try self.sendRequestBody(value.body, id);
-            if (self.early_head) |head| {
-                return .{ .head = head, .body = self.body };
+            self.writeStaticBody(value.body) catch |err| {
+                self.closeBody();
+                return err;
+            };
+        }
+        if (self.pending_body.len == 0) self.closeRequestBody();
+        return self.response();
+    }
+
+    fn writeStaticBody(self: *Client, body: []const u8) !void {
+        var offset: usize = 0;
+        while (offset < body.len) {
+            const accepted = self.session.submitData(
+                self.allocator,
+                self.stream_id,
+                body[offset..],
+                true,
+            ) catch |err| {
+                self.connection_poisoned = true;
+                return err;
+            };
+            offset += accepted;
+            if (accepted != 0) {
+                self.flushFrames() catch |err| {
+                    self.connection_poisoned = true;
+                    return err;
+                };
             }
+            if (offset == body.len) break;
+
+            const event = self.nextEvent() catch |err| {
+                self.connection_poisoned = true;
+                return err;
+            };
+            self.onWriteEvent(event) catch |err| {
+                self.connection_poisoned = true;
+                return err;
+            };
+            if (self.early_head != null) {
+                self.pending_body = body[offset..];
+                return;
+            }
+        }
+    }
+
+    /// Send the request head without END_STREAM and return its body writer.
+    /// `value.body` must be empty; the caller writes the body. The response
+    /// head is read with `response`, which may be called before or after any
+    /// `write`.
+    pub fn begin(self: *Client, value: Request) !BodyWriter {
+        if (value.body.len != 0) return error.BodyNotAllowed;
+        try self.start(value, false, 0);
+        return self.body_writer;
+    }
+
+    /// Drop the in-flight request without reading its response. Idempotent.
+    /// A caller that stopped after `begin` or a failed `response` uses this so
+    /// the client can take another request.
+    pub fn abort(self: *Client) void {
+        self.closeBody();
+    }
+
+    /// Wait for the response head. Callable once per request, before or after
+    /// the request body ends.
+    pub fn response(self: *Client) !Response {
+        if (!self.active) return error.NoRequest;
+        if (self.response_taken) return error.ResponseTaken;
+        if (self.early_head) |head| {
+            self.response_taken = true;
+            self.early_head = null;
+            return .{ .head = head, .body = self.body };
         }
 
         while (true) {
@@ -226,22 +263,23 @@ pub const Client = struct {
                     return err;
                 },
                 .window_update => {},
-                .response => |response| {
-                    if (response.stream_id != id) return error.UnexpectedStream;
-                    if (response.head.status.class() == .informational) {
-                        if (response.end_stream) return error.ProtocolError;
+                .response => |head_event| {
+                    if (head_event.stream_id != self.stream_id) return error.UnexpectedStream;
+                    if (head_event.head.status.class() == .informational) {
+                        if (head_event.end_stream) return error.ProtocolError;
                         continue;
                     }
-                    const head = try self.snapshot(response.head.headers);
-                    if (response.end_stream) {
+                    const headers = try self.snapshot(head_event.head.headers);
+                    if (head_event.end_stream) {
                         self.remote_end = true;
                         self.body_eof = true;
                     }
+                    self.response_taken = true;
                     return .{
                         .head = .{
                             .protocol = .h2,
-                            .status = response.head.status,
-                            .headers = head,
+                            .status = head_event.head.status,
+                            .headers = headers,
                         },
                         .body = self.body,
                     };
@@ -251,7 +289,7 @@ pub const Client = struct {
                         .last_stream_id = goaway.last_stream_id,
                         .code = compat.enumToInt(goaway.code),
                     };
-                    if (id > goaway.last_stream_id) {
+                    if (self.stream_id > goaway.last_stream_id) {
                         self.connection_poisoned = true;
                         return error.GoAway;
                     }
@@ -268,77 +306,79 @@ pub const Client = struct {
         }
     }
 
-    fn sendRequestBody(self: *Client, body: []const u8, id: u31) !void {
-        var offset: usize = 0;
-        while (offset < body.len) {
-            const accepted = self.session.submitData(
-                self.allocator,
-                id,
-                body[offset..],
-                true,
-            ) catch |err| {
-                self.connection_poisoned = true;
-                return err;
-            };
-            offset += accepted;
-            if (accepted != 0) {
-                self.flushFrames() catch |err| {
-                    self.connection_poisoned = true;
-                    return err;
-                };
-            }
-            if (offset == body.len) break;
+    /// Queue the request head and reset the per-request state.
+    fn start(
+        self: *Client,
+        value: Request,
+        end_stream: bool,
+        content_length: usize,
+    ) !void {
+        if (self.active) return error.RequestInProgress;
+        if (self.connection_poisoned) return error.ConnectionPoisoned;
+        if (self.goaway != null) return error.GoAway;
+        if (value.authority.len == 0) return error.InvalidAuthority;
+        self.request_state = .idle;
+        _ = self.arena.reset(.free_all);
+        self.early_head = null;
+        self.response_taken = false;
+        self.request_closed = false;
 
-            // Flow control is empty, or output is full. Drain an event.
-            const event = try self.nextEvent();
-            switch (event) {
-                .window_update => {},
-                .settings => self.flushFrames() catch |err| {
-                    self.connection_poisoned = true;
-                    return err;
-                },
-                .response => |response| {
-                    if (response.stream_id != id) return error.UnexpectedStream;
-                    if (response.head.status.class() == .informational) {
-                        if (response.end_stream) return error.ProtocolError;
-                        continue;
-                    }
-                    if (self.early_head != null) return error.UnexpectedResponse;
-                    self.early_head = .{
-                        .protocol = .h2,
-                        .status = response.head.status,
-                        .headers = try self.snapshot(response.head.headers),
-                    };
-                    if (response.end_stream) {
-                        self.remote_end = true;
-                        self.body_eof = true;
-                    } else {
-                        // Keep the tail of the request body for Body.read to
-                        // send while it consumes the response.
-                        self.pending_body = body[offset..];
-                    }
-                    return;
-                },
-                .data => return error.UnexpectedData,
-                .trailers => return error.UnexpectedTrailers,
-                .goaway => |goaway| {
-                    self.goaway = .{
-                        .last_stream_id = goaway.last_stream_id,
-                        .code = compat.enumToInt(goaway.code),
-                    };
-                    if (id > goaway.last_stream_id) {
-                        self.connection_poisoned = true;
-                        return error.GoAway;
-                    }
-                },
-                .connection_error => {
-                    self.connection_poisoned = true;
-                    return error.ConnectionError;
-                },
-                .reset => return error.StreamReset,
-                .request => return error.UnexpectedRequest,
-            }
+        var has_length = false;
+        for (value.headers) |header| {
+            if (ascii.eqlIgnoreCase(header.name, "content-length")) has_length = true;
         }
+        const add_length = content_length != 0 and !has_length;
+        const field_count = 4 + value.headers.len + @as(usize, if (add_length) 1 else 0);
+        const fields = try self.allocator.alloc(Header, field_count);
+        defer self.allocator.free(fields);
+
+        fields[0] = .{ .name = ":method", .value = value.method_token };
+        fields[1] = .{ .name = ":scheme", .value = value.scheme.token() };
+        fields[2] = .{ .name = ":authority", .value = value.authority };
+        fields[3] = .{ .name = ":path", .value = value.target };
+
+        for (value.headers, 0..) |header, index| {
+            if (ascii.eqlIgnoreCase(header.name, "host")) return error.DuplicateAuthority;
+            if (!validLowerHeaderName(header.name)) return error.InvalidHeader;
+            fields[4 + index] = header;
+        }
+        if (add_length) {
+            var length_text: [20]u8 = undefined;
+            const text = try std.fmt.bufPrint(&length_text, "{d}", .{content_length});
+            fields[field_count - 1] = .{ .name = "content-length", .value = text };
+        }
+
+        const id = self.session.submitRequest(
+            self.allocator,
+            fields,
+            end_stream,
+        ) catch |err| {
+            return err;
+        };
+        const run = self.session.lastHeaderRun() orelse return error.MissingHeaderRun;
+        if (run.stream_id != id) return error.MissingHeaderRun;
+        self.request_state = .staged;
+        self.stream_id = id;
+        self.active = true;
+        self.remote_end = false;
+        self.body_eof = false;
+        self.body_reset_code = null;
+        self.body_local = null;
+        self.reset_sent = false;
+        self.request_closed = end_stream;
+        self.pending_body = &.{};
+        self.inbox_flow = 0;
+        self.chunk_flow = 0;
+        self.inbox.clearRetainingCapacity();
+        self.chunk.clearRetainingCapacity();
+        self.net_start = 0;
+        self.net_end = 0;
+
+        errdefer self.closeBody();
+        self.flushFrames() catch |err| {
+            self.connection_poisoned = true;
+            return err;
+        };
     }
 
     fn validLowerHeaderName(name: []const u8) bool {
@@ -378,22 +418,108 @@ pub const Client = struct {
         return .{ .items = items };
     }
 
+    /// Write request-body bytes. Blocks until every byte is queued, reading
+    /// events so flow control can open. Response events that arrive first are
+    /// kept for `response` and the body reader.
+    fn writeBody(self: *Client, bytes: []const u8) shared.BodyWriteError!void {
+        if (!self.active or self.request_closed) return error.Closed;
+        if (bytes.len == 0) return;
+
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const accepted = self.session.submitData(
+                self.allocator,
+                self.stream_id,
+                bytes[offset..],
+                false,
+            ) catch |err| return self.writeFailure(err);
+            if (accepted != 0) {
+                offset += accepted;
+                self.flushFrames() catch |err| return self.writeFailure(err);
+                continue;
+            }
+            const event = self.nextEvent() catch |err| return self.writeFailure(err);
+            self.onWriteEvent(event) catch |err| return self.writeFailure(err);
+        }
+    }
+
+    fn onWriteEvent(self: *Client, event: Event) !void {
+        switch (event) {
+            .window_update => {},
+            .settings => try self.flushFrames(),
+            .response => |head_event| {
+                if (head_event.stream_id != self.stream_id) return error.UnexpectedStream;
+                if (head_event.head.status.class() == .informational) {
+                    if (head_event.end_stream) return error.ProtocolError;
+                    return;
+                }
+                if (self.response_taken or self.early_head != null) {
+                    return error.UnexpectedResponse;
+                }
+                self.early_head = .{
+                    .protocol = .h2,
+                    .status = head_event.head.status,
+                    .headers = try self.snapshot(head_event.head.headers),
+                };
+                if (head_event.end_stream) self.remote_end = true;
+            },
+            .data => |data| {
+                if (data.stream_id != self.stream_id) return error.UnexpectedData;
+                try self.buffer(data.bytes);
+                if (data.end_stream) self.remote_end = true;
+            },
+            .trailers => |trailers| {
+                if (trailers.stream_id != self.stream_id) return error.UnexpectedTrailers;
+                self.remote_end = true;
+            },
+            .goaway => |goaway| {
+                self.goaway = .{
+                    .last_stream_id = goaway.last_stream_id,
+                    .code = compat.enumToInt(goaway.code),
+                };
+                if (self.stream_id > goaway.last_stream_id) {
+                    self.connection_poisoned = true;
+                    return error.GoAway;
+                }
+            },
+            .connection_error => {
+                self.connection_poisoned = true;
+                return error.ConnectionError;
+            },
+            .reset => |reset| {
+                self.body_reset_code = compat.enumToInt(reset.code);
+                return error.Reset;
+            },
+            .request => return error.UnexpectedRequest,
+        }
+    }
+
+    /// Keep response bytes that arrived before the caller read them. The flow
+    /// charge stays until `readBody` hands them out and the next read
+    /// supersedes them, so the buffer is bounded by the connection window.
+    fn buffer(self: *Client, bytes: []const u8) !void {
+        if (bytes.len == 0) return;
+        try self.inbox.appendSlice(self.allocator, bytes);
+        self.inbox_flow += @intCast(bytes.len);
+    }
+
     fn readBody(self: *Client) shared.BodyError!shared.BodyResult {
         if (!self.active) return error.EndOfStream;
 
         while (true) {
-            if (self.pending.len != 0) {
+            if (self.chunk.items.len != 0) {
                 // The previous read returned this slice. Release its flow
                 // before advancing; the caller is done with it by contract.
-                self.pending = &.{};
-                self.releasePending() catch |err| return self.bodyFailure(err);
-                if (self.remote_end) {
-                    self.body_eof = true;
-                    return error.EndOfStream;
-                }
+                self.chunk.clearRetainingCapacity();
+                self.releaseChunk() catch |err| return self.bodyFailure(err);
             }
 
-            if (self.body_eof) return error.EndOfStream;
+            if (self.inbox.items.len != 0) {
+                mem.swap(std.ArrayList(u8), &self.chunk, &self.inbox);
+                self.chunk_flow = self.inbox_flow;
+                self.inbox_flow = 0;
+                return .{ .data = self.chunk.items };
+            }
 
             if (self.pending_body.len != 0) {
                 const accepted = self.session.submitData(
@@ -405,10 +531,16 @@ pub const Client = struct {
                 if (accepted != 0) {
                     self.pending_body = self.pending_body[accepted..];
                     self.flushFrames() catch |err| return self.bodyFailure(err);
-                    if (self.pending_body.len == 0) continue;
+                    if (self.pending_body.len != 0) continue;
                 }
-                // No flow-control room. Read one event; response DATA is
-                // handed to the caller, which is the backpressure point.
+                // No window. Read an event; response bytes are the
+                // backpressure point.
+            }
+
+            if (self.remote_end) {
+                self.body_eof = true;
+                self.pending_body = &.{};
+                return error.EndOfStream;
             }
 
             const event = self.nextEvent() catch |err| return self.bodyFailure(err);
@@ -420,49 +552,28 @@ pub const Client = struct {
                     }
                     // Padding was already returned by Session.onData; only the
                     // application bytes are still charged to the windows.
-                    self.pending_flow = @intCast(data.bytes.len);
-                    if (data.end_stream) {
-                        self.remote_end = true;
-                        self.pending_body = &.{};
-                    }
-                    if (data.bytes.len == 0) {
-                        self.releasePending() catch |err| return self.bodyFailure(err);
-                        if (self.remote_end) {
-                            self.body_eof = true;
-                            return error.EndOfStream;
-                        }
-                        continue;
-                    }
-                    self.pending = data.bytes;
-                    return .{ .data = data.bytes };
+                    self.buffer(data.bytes) catch |err| return self.bodyFailure(err);
+                    if (data.end_stream) self.remote_end = true;
                 },
                 .trailers => |trailers| {
                     if (trailers.stream_id != self.stream_id) {
                         self.connection_poisoned = true;
                         return error.Protocol;
                     }
-                    if (trailers.end_stream) {
-                        self.remote_end = true;
-                        self.body_eof = true;
-                        self.pending_body = &.{};
-                        return error.EndOfStream;
-                    }
+                    if (trailers.end_stream) self.remote_end = true;
                 },
-                .response => |response| {
-                    if (response.stream_id != self.stream_id) {
+                .response => |head_event| {
+                    if (head_event.stream_id != self.stream_id) {
                         self.connection_poisoned = true;
                         return error.Protocol;
                     }
-                    if (response.head.status.class() == .informational) {
-                        if (response.end_stream) return error.Protocol;
+                    if (head_event.head.status.class() == .informational) {
+                        if (head_event.end_stream) return error.Protocol;
                         continue;
                     }
-                    if (response.end_stream) {
-                        self.remote_end = true;
-                        self.body_eof = true;
-                        self.pending_body = &.{};
-                        return error.EndOfStream;
-                    }
+                    // A second final response head is a protocol violation.
+                    self.connection_poisoned = true;
+                    return error.Protocol;
                 },
                 .settings => self.flushFrames() catch |err| return self.bodyFailure(err),
                 .window_update => {},
@@ -482,7 +593,6 @@ pub const Client = struct {
                 },
                 .reset => |reset| {
                     if (reset.code == .no_error and self.remote_end) {
-                        self.pending_body = &.{};
                         self.body_eof = true;
                         return error.EndOfStream;
                     }
@@ -532,6 +642,31 @@ pub const Client = struct {
         return outcome;
     }
 
+    fn writeFailure(self: *Client, err: anyerror) shared.BodyWriteError {
+        const outcome: shared.BodyWriteError = switch (err) {
+            error.Reset => error.Reset,
+            error.OutOfMemory => blk: {
+                self.connection_poisoned = true;
+                break :blk error.LocalOutOfMemory;
+            },
+            error.ProtocolError,
+            error.UnexpectedData,
+            error.UnexpectedTrailers,
+            error.UnexpectedResponse,
+            error.UnexpectedStream,
+            error.UnexpectedRequest,
+            => blk: {
+                self.connection_poisoned = true;
+                break :blk error.Protocol;
+            },
+            else => blk: {
+                self.connection_poisoned = true;
+                break :blk error.Truncated;
+            },
+        };
+        return outcome;
+    }
+
     fn bodyResetCode(ptr: *anyopaque) ?u32 {
         const self: *Client = @ptrCast(@alignCast(ptr));
         return self.body_reset_code;
@@ -542,42 +677,64 @@ pub const Client = struct {
         return self.body_local;
     }
 
-    fn releasePending(self: *Client) !void {
-        if (self.pending_flow == 0) return;
-        const count = self.pending_flow;
-        self.pending_flow = 0;
+    /// Return the flow-control credit for the chunk the caller finished with.
+    fn releaseChunk(self: *Client) !void {
+        if (self.chunk_flow == 0) return;
+        const count = self.chunk_flow;
+        self.chunk_flow = 0;
         try self.session.release(self.allocator, self.stream_id, count);
         try self.flushFrames();
+    }
+
+    fn closeRequestBody(self: *Client) void {
+        if (!self.active or self.request_closed) return;
+        if (self.pending_body.len != 0) return;
+        self.request_closed = true;
+        _ = self.session.submitData(
+            self.allocator,
+            self.stream_id,
+            &.{},
+            true,
+        ) catch |err| switch (err) {
+            error.StreamClosed, error.UnknownStream, error.ConnectionClosed => return,
+            else => {
+                self.connection_poisoned = true;
+                return;
+            },
+        };
+        self.flushFrames() catch |err| ignoreError(err);
     }
 
     fn closeBody(self: *Client) void {
         if (!self.active) return;
 
-        const reset_code: frame.ErrorCode = if (self.pending_body.len != 0)
+        if (self.inbox_flow != 0) {
+            self.session.release(
+                self.allocator,
+                self.stream_id,
+                self.inbox_flow,
+            ) catch |err| ignoreError(err);
+        }
+        if (self.chunk_flow != 0) {
+            self.session.release(
+                self.allocator,
+                self.stream_id,
+                self.chunk_flow,
+            ) catch |err| ignoreError(err);
+        }
+        self.inbox_flow = 0;
+        self.chunk_flow = 0;
+
+        // An unfinished request body is abandoned with NO_ERROR, not CANCEL:
+        // the response that arrived first is still the answer. An unfinished
+        // response is CANCEL. Both sides done needs no reset at all.
+        const code: ?frame.ErrorCode = if (!self.remote_end)
+            .cancel
+        else if (!self.request_closed)
             .no_error
         else
-            .cancel;
-        if (self.pending.len != 0) {
-            if (self.remote_end) {
-                self.session.release(
-                    self.allocator,
-                    self.stream_id,
-                    self.pending_flow,
-                ) catch |err| ignoreError(err);
-            } else {
-                self.session.submitReset(
-                    self.allocator,
-                    self.stream_id,
-                    reset_code,
-                ) catch |err| ignoreError(err);
-                self.reset_sent = true;
-                self.session.release(
-                    self.allocator,
-                    self.stream_id,
-                    self.pending_flow,
-                ) catch |err| ignoreError(err);
-            }
-        } else if (!self.remote_end) {
+            null;
+        if (code) |reset_code| {
             self.session.submitReset(
                 self.allocator,
                 self.stream_id,
@@ -585,17 +742,19 @@ pub const Client = struct {
             ) catch |err| ignoreError(err);
             self.reset_sent = true;
         }
-        self.pending = &.{};
-        self.pending_flow = 0;
         self.flushFrames() catch |err| ignoreError(err);
 
         self.active = false;
         self.remote_end = false;
         self.body_eof = false;
+        self.request_closed = false;
+        self.response_taken = false;
         self.net_start = 0;
         self.net_end = 0;
         self.early_head = null;
         self.pending_body = &.{};
+        self.inbox.clearRetainingCapacity();
+        self.chunk.clearRetainingCapacity();
         _ = self.arena.reset(.free_all);
     }
 
@@ -740,6 +899,21 @@ fn bodyRead(ptr: *anyopaque) shared.BodyError!shared.BodyResult {
 fn bodyClose(ptr: *anyopaque) void {
     const self: *Client = @ptrCast(@alignCast(ptr));
     self.closeBody();
+}
+
+const body_writer_vtable: BodyWriter.VTable = .{
+    .write = bodyWrite,
+    .close = bodyWriterClose,
+};
+
+fn bodyWrite(ptr: *anyopaque, bytes: []const u8) shared.BodyWriteError!void {
+    const self: *Client = @ptrCast(@alignCast(ptr));
+    return self.writeBody(bytes);
+}
+
+fn bodyWriterClose(ptr: *anyopaque) void {
+    const self: *Client = @ptrCast(@alignCast(ptr));
+    self.closeRequestBody();
 }
 
 const testing = std.testing;

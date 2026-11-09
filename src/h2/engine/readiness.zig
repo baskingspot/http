@@ -42,6 +42,9 @@ pub fn Config(comptime Transport: type) type {
         write_buffer_bytes: usize = 16 * 1024,
         max_streams: u16 = 128,
         common: shared.Config = .{ .arena_retain_bytes = 4 * 1024 },
+        /// `.buffered` runs the handler on the complete body. `.stream` runs
+        /// it on the request head, so it can answer before END_STREAM.
+        body_mode: connection_mod.BodyMode = .buffered,
         session: SessionOptions = .{ .role = .server },
         /// Zero disables the deadline.
         idle_timeout: Io.Duration = .zero,
@@ -275,6 +278,7 @@ pub fn Server(comptime Wait: type, comptime Transport: type) type {
                     .session = self.config.session,
                     .head_timeout = self.config.head_timeout,
                     .body_timeout = self.config.body_timeout,
+                    .body_mode = self.config.body_mode,
                 }) catch |err| {
                     transport.deinit();
                     P.close(fd);

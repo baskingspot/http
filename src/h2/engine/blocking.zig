@@ -16,6 +16,7 @@ const Connection = connection_mod.Connection;
 const common = @import("common.zig");
 const shared = @import("../../engine/common.zig");
 
+pub const BodyMode = connection_mod.BodyMode;
 pub const Exchange = common.Exchange;
 pub const Handler = common.Handler;
 pub const Request = common.Request;
@@ -32,6 +33,9 @@ pub const Config = struct {
     max_streams: u16 = 128,
     common: shared.Config = .{ .arena_retain_bytes = 4 * 1024 },
     session: Options = .{ .role = .server },
+    /// `.buffered` runs the handler on the complete body. `.stream` runs it on
+    /// the request head, so it can answer before END_STREAM.
+    body_mode: BodyMode = .buffered,
 };
 
 /// Accept connections until an unrecoverable accept error.
@@ -99,6 +103,7 @@ pub fn serveIo(
         .body_bytes = config.common.body_bytes,
         .arena_retain_bytes = config.common.arena_retain_bytes,
         .session = config.session,
+        .body_mode = config.body_mode,
     });
     defer conn.deinit();
 

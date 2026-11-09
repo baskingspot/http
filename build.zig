@@ -221,6 +221,21 @@ pub fn build(b: *std.Build) void {
     passthruArgs(b, run_h2_engine_tests);
     test_step.dependOn(&run_h2_engine_tests.step);
 
+    // Full-duplex HTTP/2 request-body streaming over a real loopback socket.
+    const h2_streaming_tests_mod = b.createModule(.{
+        .root_source_file = b.path("tests/h2_streaming.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "http", .module = mod }},
+    });
+    const h2_streaming_tests = b.addTest(.{
+        .root_module = h2_streaming_tests_mod,
+        .test_runner = test_runner,
+    });
+    const run_h2_streaming_tests = b.addRunArtifact(h2_streaming_tests);
+    passthruArgs(b, run_h2_streaming_tests);
+    test_step.dependOn(&run_h2_streaming_tests.step);
+
     // The readiness HTTP/2 engine runs the same socket test on poll, epoll,
     // and kqueue. It is Linux and macOS only.
     if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
