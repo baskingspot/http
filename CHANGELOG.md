@@ -23,6 +23,15 @@ All notable changes to http are recorded here. The format follows
   RST_STREAM `ENHANCE_YOUR_CALM` rather than a bigger buffer. `respond` in the
   h2 engine is now the buffered convenience over the same pump.
 
+- h2 handler deadlines: `Exchange.setDeadline(absolute_ns)` arms an
+  application timer, and `Exchange.wake` says whether the handler was called
+  for progress or because that deadline passed. The engine clears the deadline
+  before the expiry call, so parking again without a new one makes progress.
+  `Connection.deadline` stays the engine's own close condition; the new
+  `Connection.wakeDeadline` is what a readiness driver includes in its poll
+  timeout, so a future deadline with no socket activity still wakes. Application
+  timers survive DATA, trailers, and WINDOW_UPDATE. In `.stream`,
+  `Config.body_timeout` no longer resets a stream once its response started.
 - `tests/tls_connection.zig`: a loopback test for `http_tls.client.Connection`.
   A listener thread drives `tls_nonblocking.Server` through a handshake and
   echoes plaintext; the client side is the connection under test. Covers a

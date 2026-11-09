@@ -530,6 +530,15 @@ pub fn Server(comptime Wait: type, comptime Transport: type) type {
                 if (now.durationTo(deadline).nanoseconds > 0) continue;
                 self.closeSlot(index);
             }
+
+            // An application deadline is not a reason to close. Drive the
+            // slot so `Connection.drive` delivers `wake = .expired`.
+            for (self.slots, 0..) |*slot, index| {
+                if (!slot.used) continue;
+                const at = slot.conn.wakeDeadline() orelse continue;
+                if (now.durationTo(at).nanoseconds > 0) continue;
+                self.driveSlot(index, now);
+            }
         }
 
         fn slotDeadline(self: *const Self, slot: *const Slot) ?Io.Timestamp {
@@ -562,6 +571,11 @@ pub fn Server(comptime Wait: type, comptime Transport: type) type {
             for (self.slots) |*slot| {
                 if (!slot.used) continue;
                 if (self.slotDeadline(slot)) |at| {
+                    deadline = earliest(deadline, at);
+                }
+                // Wake for an application deadline without treating it as a
+                // close condition.
+                if (slot.conn.wakeDeadline()) |at| {
                     deadline = earliest(deadline, at);
                 }
             }

@@ -132,6 +132,9 @@ const SlotSink = struct {
         const slot = self.target();
         if (slot.response_started) return error.ResponseEnded;
         slot.response_started = true;
+        // The response is under way. A handler that armed its own deadline
+        // finishes it; the engine's body timeout must not reset it first.
+        slot.body_deadline = null;
         slot.reply = .{ .options = options, .body = body };
     }
 
@@ -152,6 +155,7 @@ const SlotSink = struct {
         ) catch |err| return mapSession(err);
         slot.response_started = true;
         slot.headers_sent = true;
+        slot.body_deadline = null;
     }
 
     fn write(ptr: *anyopaque, bytes: []const u8) common.Sink.SinkError!usize {
@@ -301,12 +305,28 @@ pub const Connection = struct {
         }
     }
 
-    /// The earliest head or body deadline, if any.
+    /// The earliest deadline this engine enforces itself: head and request
+    /// body. A driver closes the connection when this passes. It deliberately
+    /// excludes `Exchange.setDeadline`, which belongs to the application.
     pub fn deadline(self: *const Connection) ?Io.Timestamp {
         var at = self.head_deadline;
         for (self.slots) |*slot| {
             if (!slot.used) continue;
             if (slot.body_deadline) |body_deadline| at = earliest(at, body_deadline);
+        }
+        return at;
+    }
+
+    /// The earliest deadline a handler armed through `Exchange.setDeadline`.
+    /// A driver uses it only to pick a wakeup time and then calls `drive`,
+    /// which delivers `wake = .expired`. It is never a reason to close.
+    pub fn wakeDeadline(self: *const Connection) ?Io.Timestamp {
+        var at: ?Io.Timestamp = null;
+        for (self.slots) |*slot| {
+            if (!slot.used) continue;
+            const ns = slot.deadline_ns orelse continue;
+            const value = Io.Timestamp.fromNanoseconds(ns);
+            at = if (at) |current| earliest(current, value) else value;
         }
         return at;
     }
@@ -490,7 +510,6 @@ pub const Connection = struct {
                     slot.request_complete = true;
                     slot.body_deadline = null;
                     slot.parked = false;
-                    slot.deadline_ns = null;
                 }
             },
 
@@ -510,7 +529,6 @@ pub const Connection = struct {
                 };
                 slot.request_complete = trailers.end_stream;
                 slot.parked = false;
-                slot.deadline_ns = null;
                 if (trailers.end_stream) slot.body_deadline = null;
             },
 
@@ -528,7 +546,6 @@ pub const Connection = struct {
                     for (self.slots) |*slot| slot.parked = false;
                 } else if (findSlot(self.slots, update.stream_id)) |slot| {
                     slot.parked = false;
-                    slot.deadline_ns = null;
                 }
             },
             .settings, .goaway, .connection_error, .response => {},
@@ -1140,6 +1157,117 @@ test "the stream engine answers twice before the request ends" {
     }
     try testing.expectEqual(@as(usize, 6), app.received);
     try testing.expectEqual(@as(?anyerror, null), app.failed);
+}
+
+/// Arms a future deadline on its first turn and reports how it was woken.
+const DeadlineApp = struct {
+    deadline_ns: i96 = 1_000_000_000,
+    expiries: usize = 0,
+    turns: usize = 0,
+
+    fn handler(self: *DeadlineApp) Handler {
+        return .{ .ptr = self, .vtable = &.{
+            .handle = handle,
+            .complete = Handler.noopComplete,
+            .report_error = Handler.noopReportError,
+            .policy_response = Handler.defaultPolicyResponse,
+        } };
+    }
+
+    fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
+        const self: *DeadlineApp = @ptrCast(@alignCast(ptr));
+        self.turns += 1;
+        if (exchange.wake == .expired) {
+            self.expiries += 1;
+            try exchange.beginResponse(.{ .status = .ok });
+            return exchange.endResponse(&.{
+                .{ .name = "x-deadline", .value = "expired" },
+            });
+        }
+        if (!exchange.response_started and self.expiries == 0) {
+            exchange.setDeadline(self.deadline_ns);
+        }
+        exchange.waitForProgress();
+    }
+};
+
+test "an application deadline survives progress and delivers expired once" {
+    const allocator = testing.allocator;
+    var app: DeadlineApp = .{};
+    var conn = try Connection.init(.{
+        .allocator = allocator,
+        .handler = app.handler(),
+        .body_mode = .stream,
+    });
+    defer conn.deinit();
+
+    var client = try Session.init(allocator, .{ .role = .client });
+    defer client.deinit(allocator);
+
+    const now = Io.Timestamp.zero;
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+    while (try client.nextEvent(allocator)) |_| {}
+
+    const id = try client.submitRequest(allocator, &stream_fields, false);
+    try feedConnection(&client, &conn, now);
+    try testing.expectEqual(@as(usize, 1), app.turns);
+
+    // The application deadline is not an engine close condition, but a driver
+    // must wake for it.
+    try testing.expect(conn.deadline() == null);
+    try testing.expectEqual(
+        @as(?Io.Timestamp, Io.Timestamp.fromNanoseconds(1_000_000_000)),
+        conn.wakeDeadline(),
+    );
+
+    // DATA, a WINDOW_UPDATE, and the trailers that end the request are
+    // progress; none of them may cancel the application timer.
+    _ = try client.submitData(allocator, id, "x", false);
+    try feedConnection(&client, &conn, now);
+    try testing.expectEqual(
+        @as(?Io.Timestamp, Io.Timestamp.fromNanoseconds(1_000_000_000)),
+        conn.wakeDeadline(),
+    );
+
+    try client.release(allocator, id, 1);
+    try feedConnection(&client, &conn, now);
+    try testing.expect(conn.wakeDeadline() != null);
+
+    const trailers = [_]Header{.{ .name = "x-last", .value = "1" }};
+    try client.submitTrailers(allocator, id, &trailers);
+    try feedConnection(&client, &conn, now);
+    try testing.expect(conn.wakeDeadline() != null);
+    try testing.expectEqual(@as(usize, 0), app.expiries);
+
+    // Before the deadline the slot stays parked; after it, one expiry turn.
+    _ = try conn.drive(Io.Timestamp.fromNanoseconds(999_000_000));
+    try testing.expectEqual(@as(usize, 0), app.expiries);
+    _ = try conn.drive(Io.Timestamp.fromNanoseconds(1_001_000_000));
+    try testing.expectEqual(@as(usize, 1), app.expiries);
+    try testing.expect(conn.wakeDeadline() == null);
+    _ = try conn.drive(Io.Timestamp.fromNanoseconds(2_000_000_000));
+    try testing.expectEqual(@as(usize, 1), app.expiries);
+
+    try feedSession(&conn, &client);
+    var saw_head = false;
+    var saw_trailers = false;
+    while (try nextClientEvent(&client)) |event| {
+        switch (event) {
+            .response => |response| {
+                try testing.expectEqual(@as(u16, 200), response.head.status.code());
+                saw_head = true;
+            },
+            .trailers => |t| {
+                try testing.expectEqualStrings("expired", t.headers.get("x-deadline").?);
+                saw_trailers = true;
+            },
+            .data => {},
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    try testing.expect(saw_head);
+    try testing.expect(saw_trailers);
 }
 
 /// Parks on the first turn without reading, so the test can inspect the

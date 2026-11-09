@@ -953,7 +953,10 @@ local that the next turn loses. Its flow-control credit returns when the
 handler asks for the next chunk, so a handler that stops reading stops the
 peer. `write` returns the accepted count and zero when the output budget is
 full; a WINDOW_UPDATE calls the handler again. `exchange.context` is an opaque
-`?*anyopaque` the engine carries across turns and never reads. `resetStream`
+`?*anyopaque` the engine carries across turns and never reads. Arm
+`exchange.setDeadline(ns)` to be called again with `exchange.wake == .expired`
+when the time passes; nothing else has to happen on the connection for that to
+fire. `resetStream`
 is legal at any point. A peer reset makes the next read return
 `error.Canceled` and the unread balance returns to the connection window.
 

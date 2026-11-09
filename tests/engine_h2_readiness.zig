@@ -321,3 +321,163 @@ test "stop sends GOAWAY and drains the connection" {
         }
     }
 }
+
+/// Arms a future application deadline at the request head and finishes the
+/// response when it expires. Nothing else happens on the connection: the wake
+/// can only come from the poll timeout.
+const DeadlineApp = struct {
+    io: Io,
+    wake_at: ?i96 = null,
+    turns: usize = 0,
+    expiries: usize = 0,
+
+    fn handler(self: *DeadlineApp) Handler {
+        return .{ .ptr = self, .vtable = &.{
+            .handle = handle,
+            .complete = Handler.noopComplete,
+            .report_error = reportError,
+            .policy_response = Handler.defaultPolicyResponse,
+        } };
+    }
+
+    fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
+        const self: *DeadlineApp = @ptrCast(@alignCast(ptr));
+        self.turns += 1;
+        if (exchange.wake == .expired) {
+            self.expiries += 1;
+            if (!exchange.response_started) {
+                try exchange.beginResponse(.{ .status = .ok });
+            }
+            return exchange.endResponse(&.{
+                .{ .name = "x-deadline", .value = "expired" },
+            });
+        }
+        if (self.wake_at == null) {
+            self.wake_at = Io.Clock.awake.now(self.io).nanoseconds +
+                100 * std.time.ns_per_ms;
+            exchange.setDeadline(self.wake_at);
+        }
+        exchange.waitForProgress();
+    }
+
+    fn reportError(_: *anyopaque, _: anyerror) void {}
+};
+
+const DeadlineServer = struct {
+    engine: Engine.Server,
+    result: ?anyerror = null,
+
+    fn run(self: *DeadlineServer) void {
+        self.engine.run() catch |err| {
+            self.result = err;
+        };
+    }
+};
+
+const DeadlineHarness = struct {
+    io: Io,
+    app: DeadlineApp,
+    server: DeadlineServer,
+    thread: std.Thread,
+
+    fn init(self: *DeadlineHarness) !void {
+        self.io = testing.io;
+        self.app = .{ .io = self.io };
+        const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
+        self.server = .{
+            .engine = try Engine.Server.init(self.io, address, self.app.handler(), .{
+                .allocator = testing.allocator,
+                .max_connections = 4,
+                .max_streams = 4,
+                .common = .{ .body_bytes = 1024 },
+                .body_mode = .stream,
+                // A wrong implementation loses the wakeup and waits forever.
+                // This turns that hang into a closed connection and a test
+                // failure instead.
+                .total_timeout = .fromSeconds(5),
+            }),
+        };
+        self.thread = try .spawn(.{}, DeadlineServer.run, .{&self.server});
+    }
+
+    fn deinit(self: *DeadlineHarness) void {
+        self.server.engine.requestStop();
+        self.thread.join();
+        self.server.engine.deinit();
+        if (self.server.result) |err| {
+            std.debug.panic("server failed: {s}", .{@errorName(err)});
+        }
+        self.* = undefined;
+    }
+
+    fn connect(self: *DeadlineHarness) !Io.net.Stream {
+        return self.server.engine.address().connect(self.io, .{ .mode = .stream });
+    }
+};
+
+fn deadlineCase(request_end_stream: bool) !void {
+    var harness: DeadlineHarness = undefined;
+    try harness.init();
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+    const r = &reader.interface;
+    const w = &writer.interface;
+
+    var session = try http.h2.Session.init(testing.allocator, .{
+        .role = .client,
+        .max_streams = 4,
+    });
+    defer session.deinit(testing.allocator);
+
+    try flush(&session, w);
+    try handshake(&session, r, w);
+
+    _ = try session.submitRequest(
+        testing.allocator,
+        &request_fields,
+        request_end_stream,
+    );
+    try flush(&session, w);
+
+    // No further input. The only way the response can arrive is the poll
+    // waking on the handler's own deadline.
+    var saw_head = false;
+    var saw_trailers = false;
+    while (!saw_trailers) {
+        const event = try nextEvent(&session, r) orelse return error.EndOfStream;
+        switch (event) {
+            .response => |response| {
+                try testing.expectEqual(@as(u16, 200), response.head.status.code());
+                saw_head = true;
+            },
+            .trailers => |trailers| {
+                try testing.expect(trailers.end_stream);
+                try testing.expectEqualStrings(
+                    "expired",
+                    trailers.headers.get("x-deadline").?,
+                );
+                saw_trailers = true;
+            },
+            .settings => try flush(&session, w),
+            .connection_error => return error.ConnectionError,
+            else => {},
+        }
+    }
+
+    try testing.expect(saw_head);
+    try testing.expectEqual(@as(usize, 1), harness.app.expiries);
+}
+
+test "a future handler deadline wakes the poll with the request still open" {
+    try deadlineCase(false);
+}
+
+test "a future handler deadline wakes the poll after request END_STREAM" {
+    try deadlineCase(true);
+}
