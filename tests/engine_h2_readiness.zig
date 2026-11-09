@@ -481,3 +481,185 @@ test "a future handler deadline wakes the poll with the request still open" {
 test "a future handler deadline wakes the poll after request END_STREAM" {
     try deadlineCase(true);
 }
+
+/// Echo every request chunk as a response chunk before END_STREAM. The tail a
+/// zero write could not take lives in `pending`, never in a local.
+const EchoApp = struct {
+    turns: usize = 0,
+    pending: []const u8 = &.{},
+    saw_end: bool = false,
+
+    fn handler(self: *EchoApp) Handler {
+        return .{ .ptr = self, .vtable = &.{
+            .handle = handle,
+            .complete = Handler.noopComplete,
+            .report_error = Handler.noopReportError,
+            .policy_response = Handler.defaultPolicyResponse,
+        } };
+    }
+
+    fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
+        const self: *EchoApp = @ptrCast(@alignCast(ptr));
+        self.turns += 1;
+        if (exchange.wake != .progress) return;
+        const body = exchange.request_body orelse return;
+        while (true) {
+            if (self.pending.len == 0) {
+                const chunk = body.next() catch |err| switch (err) {
+                    error.Pending, error.Canceled => return exchange.waitForProgress(),
+                    error.EndOfStream => {
+                        self.saw_end = true;
+                        if (!exchange.response_started) {
+                            try exchange.beginResponse(.{ .status = .ok });
+                        }
+                        const trailers = [_]http.Header{
+                            .{ .name = "grpc-status", .value = "0" },
+                        };
+                        return exchange.endResponse(&trailers);
+                    },
+                    else => return err,
+                };
+                if (!exchange.response_started) {
+                    try exchange.beginResponse(.{ .status = .ok });
+                }
+                self.pending = chunk.data;
+            }
+            const written = try exchange.write(self.pending);
+            if (written == 0) return exchange.waitForProgress();
+            self.pending = self.pending[written..];
+        }
+    }
+};
+
+const EchoServer = struct {
+    engine: Engine.Server,
+    result: ?anyerror = null,
+
+    fn run(self: *EchoServer) void {
+        self.engine.run() catch |err| {
+            self.result = err;
+        };
+    }
+};
+
+const EchoHarness = struct {
+    io: Io,
+    app: EchoApp,
+    server: EchoServer,
+    thread: std.Thread,
+
+    fn init(self: *EchoHarness) !void {
+        self.io = testing.io;
+        self.app = .{};
+        const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
+        self.server = .{
+            .engine = try Engine.Server.init(self.io, address, self.app.handler(), .{
+                .allocator = testing.allocator,
+                .max_connections = 4,
+                .max_streams = 4,
+                .common = .{ .body_bytes = 1024 },
+                .body_mode = .stream,
+                .total_timeout = .fromSeconds(5),
+            }),
+        };
+        self.thread = try .spawn(.{}, EchoServer.run, .{&self.server});
+    }
+
+    fn deinit(self: *EchoHarness) void {
+        self.server.engine.requestStop();
+        self.thread.join();
+        self.server.engine.deinit();
+        if (self.server.result) |err| {
+            std.debug.panic("server failed: {s}", .{@errorName(err)});
+        }
+        self.* = undefined;
+    }
+
+    fn connect(self: *EchoHarness) !Io.net.Stream {
+        return self.server.engine.address().connect(self.io, .{ .mode = .stream });
+    }
+};
+
+/// Read until one DATA event arrives; returns its bytes through `sink`.
+fn readData(
+    session: *http.h2.Session,
+    r: *Io.Reader,
+    w: *Io.Writer,
+    sink: []u8,
+) ![]const u8 {
+    while (true) {
+        const event = try nextEvent(session, r) orelse return error.EndOfStream;
+        switch (event) {
+            .data => |data| {
+                try testing.expect(!data.end_stream);
+                @memcpy(sink[0..data.bytes.len], data.bytes);
+                return sink[0..data.bytes.len];
+            },
+            .settings => try flush(session, w),
+            .connection_error => return error.ConnectionError,
+            else => {},
+        }
+    }
+}
+
+test "the readiness engine streams two pairs before END_STREAM" {
+    var harness: EchoHarness = undefined;
+    try harness.init();
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+    const r = &reader.interface;
+    const w = &writer.interface;
+
+    var session = try http.h2.Session.init(testing.allocator, .{
+        .role = .client,
+        .max_streams = 4,
+    });
+    defer session.deinit(testing.allocator);
+
+    try flush(&session, w);
+    try handshake(&session, r, w);
+
+    const id = try session.submitRequest(testing.allocator, &request_fields, false);
+    try flush(&session, w);
+
+    var sink: [64]u8 = undefined;
+
+    _ = try session.submitData(testing.allocator, id, "one", false);
+    try flush(&session, w);
+    try testing.expectEqualStrings("one", try readData(&session, r, w, &sink));
+    // The request half is still open when the first echo arrives.
+    try testing.expect(!harness.app.saw_end);
+
+    _ = try session.submitData(testing.allocator, id, "two", false);
+    try flush(&session, w);
+    try testing.expectEqualStrings("two", try readData(&session, r, w, &sink));
+    try testing.expect(!harness.app.saw_end);
+
+    _ = try session.submitData(testing.allocator, id, "", true);
+    try flush(&session, w);
+
+    var saw_trailers = false;
+    while (!saw_trailers) {
+        const event = try nextEvent(&session, r) orelse return error.EndOfStream;
+        switch (event) {
+            .trailers => |trailers| {
+                try testing.expect(trailers.end_stream);
+                try testing.expectEqualStrings(
+                    "0",
+                    trailers.headers.get("grpc-status").?,
+                );
+                saw_trailers = true;
+            },
+            .settings => try flush(&session, w),
+            .connection_error => return error.ConnectionError,
+            else => {},
+        }
+    }
+    try testing.expect(harness.app.saw_end);
+}
