@@ -637,7 +637,10 @@ pub const Connection = struct {
                             slot.end_trailers.items,
                         ) catch |err| switch (err) {
                             error.WouldBlock => continue,
-                            error.UnknownStream, error.StreamClosed => {
+                            error.UnknownStream,
+                            error.StreamClosed,
+                            error.ConnectionClosed,
+                            => {
                                 self.finishSlot(slot, slot.handler_called);
                                 progressed = true;
                                 continue;
@@ -652,7 +655,10 @@ pub const Connection = struct {
                             &.{},
                             true,
                         ) catch |err| switch (err) {
-                            error.UnknownStream, error.StreamClosed => {
+                            error.UnknownStream,
+                            error.StreamClosed,
+                            error.ConnectionClosed,
+                            => {
                                 self.finishSlot(slot, slot.handler_called);
                                 progressed = true;
                                 continue;
@@ -685,7 +691,10 @@ pub const Connection = struct {
                     end,
                 ) catch |err| switch (err) {
                     error.WouldBlock => continue,
-                    error.UnknownStream, error.StreamClosed => {
+                    error.UnknownStream,
+                    error.StreamClosed,
+                    error.ConnectionClosed,
+                    => {
                         self.finishSlot(slot, slot.handler_called);
                         progressed = true;
                         continue;
@@ -707,7 +716,10 @@ pub const Connection = struct {
                     reply.body[slot.body_offset..],
                     reply.options.trailers.len == 0,
                 ) catch |err| switch (err) {
-                    error.UnknownStream, error.StreamClosed => {
+                    error.UnknownStream,
+                    error.StreamClosed,
+                    error.ConnectionClosed,
+                    => {
                         self.finishSlot(slot, slot.handler_called);
                         progressed = true;
                         break;
@@ -727,7 +739,10 @@ pub const Connection = struct {
                         reply.options.trailers,
                     ) catch |err| switch (err) {
                         error.WouldBlock => continue,
-                        error.UnknownStream, error.StreamClosed => {
+                        error.UnknownStream,
+                        error.StreamClosed,
+                        error.ConnectionClosed,
+                        => {
                             self.finishSlot(slot, slot.handler_called);
                             progressed = true;
                             continue;

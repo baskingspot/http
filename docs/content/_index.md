@@ -931,7 +931,12 @@ fn handle(_: *anyopaque, exchange: *Exchange) anyerror!void {
     if (!exchange.response_started) {
         try exchange.beginResponse(.{ .status = .ok });
     }
-    _ = try exchange.write(chunk.data);
+    var rest = chunk.data;
+    while (rest.len != 0) {
+        const written = try exchange.write(rest);
+        if (written == 0) return exchange.waitForProgress();
+        rest = rest[written..];
+    }
 }
 ```
 
