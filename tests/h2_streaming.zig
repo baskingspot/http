@@ -509,3 +509,108 @@ test "grpc full duplex: two echoes before END_STREAM (RFC 9113 5.1)" {
     try testing.expect(app.ended);
     try testing.expectEqual(@as(?anyerror, null), app.failure);
 }
+
+/// Sends the response head, then arms a deadline that has already passed and
+/// parks. On expiry it finishes the response it started, which is what a gRPC
+/// server does with DEADLINE_EXCEEDED: no second response.
+const DeadlineApp = struct {
+    turns: usize = 0,
+    expired_turns: usize = 0,
+    started: bool = false,
+    ended: bool = false,
+    failure: ?anyerror = null,
+
+    fn handler(self: *DeadlineApp) Handler {
+        return .{ .ptr = self, .vtable = &.{
+            .handle = handle,
+            .complete = Handler.noopComplete,
+            .report_error = reportError,
+            .policy_response = Handler.defaultPolicyResponse,
+        } };
+    }
+
+    fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
+        const self: *DeadlineApp = @ptrCast(@alignCast(ptr));
+        self.turns += 1;
+        switch (exchange.wake) {
+            .expired => {
+                self.expired_turns += 1;
+                const trailers = [_]http.Header{
+                    .{ .name = "grpc-status", .value = "4" },
+                };
+                try exchange.endResponse(&trailers);
+                self.ended = true;
+            },
+            .progress => {
+                if (self.started) return exchange.waitForProgress();
+                try exchange.beginResponse(.{
+                    .status = .ok,
+                    .content_type = "application/grpc",
+                });
+                self.started = true;
+                // Already in the past: the engine sees it on its next turn.
+                exchange.setDeadline(0);
+                return exchange.waitForProgress();
+            },
+        }
+    }
+
+    fn reportError(ptr: *anyopaque, err: anyerror) void {
+        const self: *DeadlineApp = @ptrCast(@alignCast(ptr));
+        self.failure = err;
+    }
+};
+
+test "an expiry finishes the response it started, not a second one" {
+    const io = testing.io;
+
+    const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
+    var listener = try address.listen(io, .{ .mode = .stream, .reuse_address = true });
+    defer listener.deinit(io);
+    var bound = address;
+    bound.setPort(listener.socket.address.getPort());
+
+    var app: DeadlineApp = .{};
+    var server: Server = .{ .io = io, .listener = &listener, .handler = app.handler() };
+    const thread = try std.Thread.spawn(.{}, Server.run, .{&server});
+    defer thread.join();
+    defer if (server.result) |err| {
+        if (err != error.ReadFailed) std.debug.panic("server failed: {s}", .{@errorName(err)});
+    };
+
+    const stream = try bound.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var reader = stream.reader(io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(io, &write_buffer);
+
+    var client: Client = undefined;
+    try client.init(&reader.interface, &writer.interface, .{ .allocator = testing.allocator });
+    defer client.deinit();
+
+    const body_writer = try client.begin(.{
+        .method_token = "POST",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/deadline",
+        .headers = &fields,
+    });
+    // The request body stays open: the deadline fires with no END_STREAM.
+    try body_writer.write("never finished");
+
+    const response = try client.response();
+    defer response.body.close();
+    try testing.expectEqual(@as(u16, 200), response.head.status.code());
+
+    // The response ends with no data, because the expiry finished it.
+    const result = response.body.read() catch |err| switch (err) {
+        error.EndOfStream => null,
+        else => return err,
+    };
+    try testing.expect(result == null);
+
+    try testing.expectEqual(@as(usize, 1), app.expired_turns);
+    try testing.expect(app.started);
+    try testing.expect(app.ended);
+}

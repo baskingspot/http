@@ -76,6 +76,8 @@ const Slot = struct {
     handler_called: bool = false,
     /// `.stream`: the handler asked for another turn when something changes.
     parked: bool = false,
+    /// Absolute awake-clock nanoseconds armed by the handler, or null.
+    deadline_ns: ?i96 = null,
     /// A response head is queued.
     response_started: bool = false,
     /// The response head and body are queued by `pumpAll`, not by the sink.
@@ -323,7 +325,7 @@ pub const Connection = struct {
         }
 
         if (!self.session.isClosed()) {
-            try self.startReady();
+            try self.startReady(now);
         }
         if (try self.pumpAll()) progressed = true;
         return progressed;
@@ -351,6 +353,7 @@ pub const Connection = struct {
                 slot.request_complete = request.end_stream;
                 slot.handler_called = false;
                 slot.parked = false;
+                slot.deadline_ns = null;
                 slot.response_started = false;
                 slot.reply = null;
                 slot.headers_sent = false;
@@ -487,6 +490,7 @@ pub const Connection = struct {
                     slot.request_complete = true;
                     slot.body_deadline = null;
                     slot.parked = false;
+                    slot.deadline_ns = null;
                 }
             },
 
@@ -506,6 +510,7 @@ pub const Connection = struct {
                 };
                 slot.request_complete = trailers.end_stream;
                 slot.parked = false;
+                slot.deadline_ns = null;
                 if (trailers.end_stream) slot.body_deadline = null;
             },
 
@@ -523,20 +528,23 @@ pub const Connection = struct {
                     for (self.slots) |*slot| slot.parked = false;
                 } else if (findSlot(self.slots, update.stream_id)) |slot| {
                     slot.parked = false;
+                    slot.deadline_ns = null;
                 }
             },
             .settings, .goaway, .connection_error, .response => {},
         }
     }
 
-    fn startReady(self: *Connection) !void {
+    fn startReady(self: *Connection, now: Io.Timestamp) !void {
         for (self.slots, 0..) |*slot, index| {
             if (!slot.used) continue;
             if (slot.response_ended or slot.reset_pending) continue;
             if (self.body_mode == .buffered) {
                 if (!slot.request_complete or slot.handler_called) continue;
             } else if (slot.parked) {
-                continue;
+                // A parked handler waits for data, output, or its own deadline.
+                const due = if (slot.deadline_ns) |d| now.nanoseconds >= d else false;
+                if (!due) continue;
             }
 
             if (slot.request_complete) {
@@ -560,6 +568,11 @@ pub const Connection = struct {
             else
                 null;
 
+            const expired = if (slot.deadline_ns) |d| now.nanoseconds >= d else false;
+            // Clearing before the call means a handler that parks without
+            // re-arming cannot spin on a deadline that already passed.
+            if (expired) slot.deadline_ns = null;
+
             slot.exchange = .{
                 .id = index,
                 .stream_id = slot.stream_id,
@@ -575,9 +588,12 @@ pub const Connection = struct {
                 .sink = slot.sink.sink(),
                 .parked = false,
                 .context = slot.context,
+                .wake = if (expired) .expired else .progress,
+                .deadline_ns = slot.deadline_ns,
             };
             slot.handler_called = true;
             slot.parked = false;
+            slot.deadline_ns = null;
 
             var failed = false;
             self.handler.vtable.handle(self.handler.ptr, &slot.exchange) catch |err| {
@@ -586,6 +602,7 @@ pub const Connection = struct {
             };
             if (slot.exchange.parked) slot.parked = true;
             slot.context = slot.exchange.context;
+            slot.deadline_ns = slot.exchange.deadline_ns;
             slot.response_started = slot.response_started or slot.exchange.response_started;
 
             if (slot.response_started or slot.response_ended or slot.reset_pending) continue;
@@ -807,6 +824,7 @@ pub const Connection = struct {
         slot.request_complete = false;
         slot.handler_called = false;
         slot.parked = false;
+        slot.deadline_ns = null;
         slot.response_started = false;
         slot.reply = null;
         slot.headers_sent = false;

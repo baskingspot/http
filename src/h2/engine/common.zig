@@ -97,6 +97,16 @@ pub const Sink = struct {
     };
 };
 
+/// Why the engine called the handler on this turn.
+pub const WakeReason = enum {
+    /// The request head, body data, END_STREAM, or drained response output.
+    progress,
+    /// The deadline the handler armed has passed. The engine clears it before
+    /// the call, so a handler that parks again without arming a new one makes
+    /// progress instead of spinning on a stale deadline.
+    expired,
+};
+
 pub const Exchange = struct {
     /// The engine's stream slot. Stable until `complete`, then reused.
     id: usize,
@@ -122,6 +132,11 @@ pub const Exchange = struct {
     /// frees it. A streaming handler keeps its cursor here, because each turn
     /// gets a fresh `Exchange` value and locals do not survive a park.
     context: ?*anyopaque,
+    /// Why the engine invoked the handler this turn.
+    wake: WakeReason,
+    /// Absolute awake-clock nanoseconds the handler armed, or null. On expiry
+    /// the engine clears it and invokes again with `wake = .expired`.
+    deadline_ns: ?i96,
 
     pub const Response = struct {
         options: ResponseOptions,
@@ -227,6 +242,12 @@ pub const Exchange = struct {
     /// mid-body.
     pub fn resetStream(self: *Exchange, code: frame.ErrorCode) Sink.SinkError!void {
         return self.sink.vtable.reset(self.sink.ptr, code);
+    }
+
+    /// Arm an absolute awake-clock deadline, or clear it with null. On expiry
+    /// the engine invokes the handler again with `wake = .expired`.
+    pub fn setDeadline(self: *Exchange, absolute_ns: ?i96) void {
+        self.deadline_ns = absolute_ns;
     }
 
     /// End this turn without a response. The engine calls `handle` again when
