@@ -1028,6 +1028,8 @@ pub const Session = struct {
         const upper = self.encoder.encodedLen(fields);
         if (upper > self.send_block.len) return error.HeaderBlockTooLarge;
         const reserve = upper + 9 * headerFrameCount(upper);
+        // Budget and queue space before encoding: a WouldBlock or an OOM must
+        // leave the HPACK table and the stream table untouched.
         try self.checkBudget(reserve);
         try self.out.ensure(allocator, reserve);
 
@@ -1086,6 +1088,10 @@ pub const Session = struct {
         const upper = self.encoder.encodedLenResponse(value);
         if (upper > self.send_block.len) return error.HeaderBlockTooLarge;
         const reserve = upper + 9 * headerFrameCount(upper);
+        // Budget and queue space before encoding: a WouldBlock or an OOM must
+        // leave the HPACK table and the stream table untouched. The encoder
+        // checks its output bound before it inserts into the dynamic table, so
+        // a failed encode is also side-effect free.
         try self.checkBudget(reserve);
         try self.out.ensure(allocator, reserve);
         const block = self.encoder.encodeResponse(value, self.send_block) catch {
@@ -1815,6 +1821,66 @@ test "release returns DATA bytes to both windows" {
         .window_update => |w| try testing.expectEqual(id, w.stream_id),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "a WouldBlock response leaves the encoder and stream untouched" {
+    // The budget and the output reserve are taken before the HPACK encoder
+    // runs, so a full queue cannot advance the dynamic table. If it could, the
+    // next block on another stream would reference entries the peer never saw
+    // and decode as garbage or a compression error (RFC 7541 §2.3.3).
+    var client = try Session.init(testing.allocator, .{ .role = .client });
+    defer client.deinit(testing.allocator);
+    var server = try Session.init(testing.allocator, .{
+        .role = .server,
+        .max_out_bytes = 1024,
+    });
+    defer server.deinit(testing.allocator);
+    try handshake(&client, &server, testing.allocator);
+
+    const id = try client.submitRequest(testing.allocator, &request_fields, true);
+    try transfer(&client, &server);
+    _ = (try server.nextEvent(testing.allocator)).?;
+
+    // Empty the queue so the budget is the only thing that can refuse.
+    var sink: [4096]u8 = undefined;
+    while (server.send(&sink) != 0) {}
+
+    var big: [2048]u8 = undefined;
+    @memset(&big, 'v');
+    const big_headers = [_]Header{.{ .name = "x-big", .value = &big }};
+    try testing.expectError(error.WouldBlock, server.submitResponse(
+        testing.allocator,
+        id,
+        .{ .status = .ok, .headers = &big_headers },
+        false,
+    ));
+    try testing.expect(!server.hasPendingOutput());
+    try testing.expect(!server.streams.get(id).?.sent_head);
+
+    const after = [_]Header{.{ .name = "x-after", .value = "yes" }};
+    try server.submitResponse(
+        testing.allocator,
+        id,
+        .{ .status = .ok, .headers = &after },
+        true,
+    );
+    try transfer(&server, &client);
+
+    while (try client.nextEvent(testing.allocator)) |event| {
+        switch (event) {
+            .window_update, .settings => continue,
+            .response => |response| {
+                try testing.expectEqual(@as(u16, 200), response.head.status.code());
+                try testing.expectEqualStrings(
+                    "yes",
+                    response.head.headers.get("x-after").?,
+                );
+                return;
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    return error.TestUnexpectedResult;
 }
 
 test "the output queue reserves capacity without skipping the write cursor" {
