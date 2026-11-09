@@ -14,6 +14,7 @@
 //! rather than parked on a stack frame; see `h2.engine.common`.
 
 const std = @import("std");
+const compat = @import("../../compat.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -825,7 +826,7 @@ fn mapSession(err: anyerror) common.Sink.SinkError {
 }
 
 fn compatCode(code: frame.ErrorCode) u32 {
-    return @backingInt(code);
+    return compat.enumToInt(code);
 }
 
 fn earliest(a: ?Io.Timestamp, b: Io.Timestamp) Io.Timestamp {
