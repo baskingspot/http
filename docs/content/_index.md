@@ -918,34 +918,44 @@ for END_STREAM. Read with `exchange.request_body.next()`. Answer with
 `waitForProgress` when there is nothing to read or write yet.
 
 ```zig
-fn handle(_: *anyopaque, exchange: *Exchange) anyerror!void {
-    const chunk = exchange.request_body.?.next() catch |err| switch (err) {
-        error.Pending => return exchange.waitForProgress(),
-        error.Canceled => return,
-        error.EndOfStream => {
+/// Cross-turn state. A park returns from `handle`, so a local does not
+/// survive it; keep the unsent tail and any cursor here, or behind
+/// `exchange.context`.
+const State = struct { pending: []const u8 = &.{} };
+
+fn handle(state: *State, exchange: *Exchange) anyerror!void {
+    while (true) {
+        if (state.pending.len == 0) {
+            const chunk = exchange.request_body.?.next() catch |err| switch (err) {
+                error.Pending => return exchange.waitForProgress(),
+                error.Canceled => return,
+                error.EndOfStream => {
+                    try exchange.beginResponse(.{ .status = .ok });
+                    return exchange.endResponse(&.{.{ .name = "grpc-status", .value = "0" }});
+                },
+                else => return err,
+            };
+            state.pending = chunk.data;
+        }
+        if (!exchange.response_started) {
             try exchange.beginResponse(.{ .status = .ok });
-            return exchange.endResponse(&.{.{ .name = "grpc-status", .value = "0" }});
-        },
-        else => return err,
-    };
-    if (!exchange.response_started) {
-        try exchange.beginResponse(.{ .status = .ok });
-    }
-    var rest = chunk.data;
-    while (rest.len != 0) {
-        const written = try exchange.write(rest);
+        }
+        const written = try exchange.write(state.pending);
         if (written == 0) return exchange.waitForProgress();
-        rest = rest[written..];
+        state.pending = state.pending[written..];
     }
 }
 ```
 
-The body chunk is valid until the next `next()` call. Its flow-control credit
-returns when the handler asks for the next chunk, so a handler that stops
-reading stops the peer. `write` returns the accepted count and zero when the
-output budget is full; park and retry on the next turn. `resetStream` is legal
-at any point. A peer reset makes the next read return `error.Canceled` and the
-unread balance returns to the connection window.
+The body chunk is valid until the next `next()` call, so finish with it
+before advancing: a zero `write` keeps the rest in your own state, never in a
+local that the next turn loses. Its flow-control credit returns when the
+handler asks for the next chunk, so a handler that stops reading stops the
+peer. `write` returns the accepted count and zero when the output budget is
+full; a WINDOW_UPDATE calls the handler again. `exchange.context` is an opaque
+`?*anyopaque` the engine carries across turns and never reads. `resetStream`
+is legal at any point. A peer reset makes the next read return
+`error.Canceled` and the unread balance returns to the connection window.
 
 ## The h2 engines
 

@@ -91,6 +91,8 @@ const Slot = struct {
     reset_pending: bool = false,
     /// The peer's RST_STREAM code, if the stream was reset.
     reset_code: ?u32 = null,
+    /// The handler's own per-exchange state. The engine never reads it.
+    context: ?*anyopaque = null,
     sink: SlotSink = undefined,
     reader: SlotReader = undefined,
     body_deadline: ?Io.Timestamp = null,
@@ -359,6 +361,7 @@ pub const Connection = struct {
                 slot.end_trailers = .{ .items = &.{} };
                 slot.reset_pending = false;
                 slot.reset_code = null;
+                slot.context = null;
                 slot.body_deadline = null;
                 self.head_deadline = null;
                 if (!request.end_stream and self.body_timeout.nanoseconds > 0) {
@@ -513,7 +516,16 @@ pub const Connection = struct {
                 }
             },
 
-            .window_update, .settings, .goaway, .connection_error, .response => {},
+            .window_update => |update| {
+                // A handler parked on a zero write resumes when credit
+                // arrives. A connection-level update can open any stream.
+                if (update.stream_id == 0) {
+                    for (self.slots) |*slot| slot.parked = false;
+                } else if (findSlot(self.slots, update.stream_id)) |slot| {
+                    slot.parked = false;
+                }
+            },
+            .settings, .goaway, .connection_error, .response => {},
         }
     }
 
@@ -562,6 +574,7 @@ pub const Connection = struct {
                 .response_started = slot.response_started,
                 .sink = slot.sink.sink(),
                 .parked = false,
+                .context = slot.context,
             };
             slot.handler_called = true;
             slot.parked = false;
@@ -572,6 +585,7 @@ pub const Connection = struct {
                 failed = true;
             };
             if (slot.exchange.parked) slot.parked = true;
+            slot.context = slot.exchange.context;
             slot.response_started = slot.response_started or slot.exchange.response_started;
 
             if (slot.response_started or slot.response_ended or slot.reset_pending) continue;
@@ -803,6 +817,7 @@ pub const Connection = struct {
         slot.end_trailers = .{ .items = &.{} };
         slot.reset_pending = false;
         slot.reset_code = null;
+        slot.context = null;
         slot.body_deadline = null;
         slot.exchange = undefined;
     }
@@ -954,6 +969,10 @@ const StreamingApp = struct {
     turns: usize = 0,
     received: usize = 0,
     ended: bool = false,
+    /// The tail of a chunk the peer had no window for. A borrowed body chunk
+    /// is valid until the next advancing call, so the handler must finish
+    /// with it before calling `next` again.
+    pending: []const u8 = &.{},
     failed: ?anyerror = null,
 
     fn handler(self: *StreamingApp) Handler {
@@ -965,11 +984,36 @@ const StreamingApp = struct {
         } };
     }
 
+    /// Queue `bytes`, keeping the unsent tail in `pending` when the peer has
+    /// no credit. False means the turn must park.
+    fn writeAll(self: *StreamingApp, exchange: *Exchange, bytes: []const u8) anyerror!bool {
+        self.pending = bytes;
+        while (self.pending.len != 0) {
+            const written = try exchange.write(self.pending);
+            if (written == 0) return false;
+            self.pending = self.pending[written..];
+            self.received += written;
+        }
+        return true;
+    }
+
     fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
         const self: *StreamingApp = @ptrCast(@alignCast(ptr));
         self.turns += 1;
+        // The engine carries the opaque context, unread, across every turn.
+        if (exchange.context) |saved| {
+            try testing.expectEqual(self, @as(*StreamingApp, @ptrCast(@alignCast(saved))));
+        } else {
+            exchange.context = self;
+        }
         const body = exchange.request_body.?;
         while (true) {
+            if (self.pending.len != 0) {
+                if (!try self.writeAll(exchange, self.pending)) {
+                    return exchange.waitForProgress();
+                }
+                continue;
+            }
             const chunk = body.next() catch |err| switch (err) {
                 error.Pending => return exchange.waitForProgress(),
                 error.Canceled => return,
@@ -988,12 +1032,8 @@ const StreamingApp = struct {
                 try exchange.beginResponse(.{ .status = .ok });
                 self.response_started = true;
             }
-            var rest = chunk.data;
-            while (rest.len != 0) {
-                const written = try exchange.write(rest);
-                if (written == 0) return exchange.waitForProgress();
-                rest = rest[written..];
-                self.received += written;
+            if (!try self.writeAll(exchange, chunk.data)) {
+                return exchange.waitForProgress();
             }
         }
     }
@@ -1178,6 +1218,81 @@ test "a chunk's flow-control credit returns when the handler supersedes it" {
     _ = try client.submitData(allocator, id, "", true);
     try feedConnection(&client, &conn, now);
     try testing.expectEqual(@as(i64, 65_535), conn.session.conn_recv.available);
+    try testing.expectEqual(@as(usize, 0), conn.session.streams.count());
+}
+
+test "a zero-credit write keeps its tail and resumes on WINDOW_UPDATE" {
+    // RFC 9113 §5.2: a sender may not exceed the peer's window. A write that
+    // stops at the window edge must keep the rest; the handler parks, and the
+    // WINDOW_UPDATE that opens the window calls it again with its own state.
+    const allocator = testing.allocator;
+    var app: StreamingApp = .{};
+    var conn = try Connection.init(.{
+        .allocator = allocator,
+        .handler = app.handler(),
+        .body_mode = .stream,
+    });
+    defer conn.deinit();
+
+    // A 3-byte receive window: the echo of a 6-byte chunk cannot fit in one
+    // frame, so the handler hits a zero write mid-message.
+    var client = try Session.init(allocator, .{
+        .role = .client,
+        .initial_window_size = 3,
+    });
+    defer client.deinit(allocator);
+
+    const now = Io.Timestamp.zero;
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+    while (try client.nextEvent(allocator)) |_| {}
+
+    const id = try client.submitRequest(allocator, &stream_fields, false);
+    try feedConnection(&client, &conn, now);
+    _ = try client.submitData(allocator, id, "abcdef", false);
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+
+    var received: [8]u8 = undefined;
+    var used: usize = 0;
+    const response_event = (try nextClientEvent(&client)).?;
+    switch (response_event) {
+        .response => |response| try testing.expect(!response.end_stream),
+        else => return error.TestUnexpectedResult,
+    }
+    const first = (try nextClientEvent(&client)).?;
+    switch (first) {
+        .data => |data| {
+            @memcpy(received[0..data.bytes.len], data.bytes);
+            used = data.bytes.len;
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(@as(usize, 3), used);
+    // The tail is held by the handler, not dropped and not resent.
+    try testing.expectEqual(@as(usize, 3), app.pending.len);
+
+    try client.release(allocator, id, 3);
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+
+    const second = (try nextClientEvent(&client)).?;
+    switch (second) {
+        .data => |data| {
+            @memcpy(received[used..][0..data.bytes.len], data.bytes);
+            used += data.bytes.len;
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqualStrings("abcdef", received[0..used]);
+    try testing.expectEqual(@as(usize, 0), app.pending.len);
+    try testing.expectEqual(@as(usize, 6), app.received);
+
+    try client.release(allocator, id, @intCast(used));
+    _ = try client.submitData(allocator, id, "", true);
+    try feedConnection(&client, &conn, now);
+    try feedSession(&conn, &client);
+    try testing.expect(app.ended);
     try testing.expectEqual(@as(usize, 0), conn.session.streams.count());
 }
 

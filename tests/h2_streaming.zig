@@ -29,6 +29,9 @@ const EchoApp = struct {
     answered_before_end: bool = false,
     /// Reset the stream on the first body chunk instead of answering.
     reset_first: bool = false,
+    /// The tail of a chunk the peer had no window for. The borrowed chunk is
+    /// valid until the next `next`, so it must be finished first.
+    pending: []const u8 = &.{},
     failure: ?anyerror = null,
 
     fn handler(self: *EchoApp) Handler {
@@ -40,11 +43,30 @@ const EchoApp = struct {
         } };
     }
 
+    /// Queue `bytes`, keeping the unsent tail in `pending` when the peer has
+    /// no credit. False means the turn must park.
+    fn writeAll(self: *EchoApp, exchange: *Exchange, bytes: []const u8) anyerror!bool {
+        self.pending = bytes;
+        while (self.pending.len != 0) {
+            const written = try exchange.write(self.pending);
+            if (written == 0) return false;
+            self.pending = self.pending[written..];
+            self.bytes += written;
+        }
+        return true;
+    }
+
     fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
         const self: *EchoApp = @ptrCast(@alignCast(ptr));
         self.turns += 1;
         const body = exchange.request_body.?;
         while (true) {
+            if (self.pending.len != 0) {
+                if (!try self.writeAll(exchange, self.pending)) {
+                    return exchange.waitForProgress();
+                }
+                continue;
+            }
             const chunk = body.next() catch |err| switch (err) {
                 error.Pending => return exchange.waitForProgress(),
                 error.Canceled => return,
@@ -78,12 +100,8 @@ const EchoApp = struct {
             }
             if (!self.saw_end) self.answered_before_end = true;
 
-            var rest = chunk.data;
-            while (rest.len != 0) {
-                const written = try exchange.write(rest);
-                if (written == 0) return exchange.waitForProgress();
-                rest = rest[written..];
-                self.bytes += written;
+            if (!try self.writeAll(exchange, chunk.data)) {
+                return exchange.waitForProgress();
             }
             self.chunks += 1;
         }

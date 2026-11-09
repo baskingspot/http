@@ -118,6 +118,10 @@ pub const Exchange = struct {
     sink: Sink,
     /// Set by `waitForProgress`; the engine parks the slot for this turn.
     parked: bool,
+    /// Opaque application state for this exchange. The engine never reads or
+    /// frees it. A streaming handler keeps its cursor here, because each turn
+    /// gets a fresh `Exchange` value and locals do not survive a park.
+    context: ?*anyopaque,
 
     pub const Response = struct {
         options: ResponseOptions,
