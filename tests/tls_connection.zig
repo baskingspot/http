@@ -225,7 +225,7 @@ test "the blocking connection reads and writes plaintext over TLS" {
     defer conn.deinit();
 
     // Chain verification ran: the leaf is signed by the CA we handed in.
-    try testing.expect(!conn.expired);
+    try testing.expect(!conn.expired());
 
     const w = conn.writer();
     const r = conn.reader();
@@ -272,7 +272,7 @@ test "a passed deadline ends the wait and reports itself" {
     var buf: [8]u8 = undefined;
     try testing.expectError(error.ReadFailed, conn.reader().readSliceAll(&buf));
     // `Io.Reader` cannot report a timeout, so the connection remembers it.
-    try testing.expect(conn.expired);
+    try testing.expect(conn.expired());
 
     // Clearing the deadline makes the connection usable again.
     conn.setDeadline(null);

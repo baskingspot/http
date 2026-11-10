@@ -72,6 +72,14 @@ refactors do not need one unless they change how someone uses the package.
 Write from the user's side: what changed, and what they must do about it. Name
 the symbol, flag, or error. One line, under Added, Changed, Fixed, or Removed.
 
-To release, dispatch the repo's `release.yml` with the version. The workflow
-moves the Unreleased section into a dated heading, sets `.version` in
-`build.zig.zon`, commits, tags, and opens the GitHub release. Do not tag by hand.
+To release:
+
+1. Run `release-prep.py VERSION` with the script from `baskingspot/.github`.
+2. Review the diff.
+3. Commit the change with a signature.
+4. Push the commit.
+5. Run `gh workflow run release.yml -f version=X.Y.Z`.
+6. Do not tag by hand.
+
+The workflow changes no files and creates no commit. It requires the version in
+the changelog.

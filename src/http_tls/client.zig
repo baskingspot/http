@@ -1,77 +1,34 @@
-//! A blocking plaintext connection over TLS.
+//! A blocking TLS client with HTTP ALPN policy.
 //!
-//! The step-shaped `transport.tls_client` is the primitive; this is the
-//! convenience a caller holding a socket actually wants: an `Io.Reader` and an
-//! `Io.Writer` that speak plaintext, with one deadline for the whole call. This
-//! is the same service `transport/plain.zig` provides over a bare socket, one
-//! decryption later, so an HTTP/1.1 client can use it unchanged.
-//!
-//! An `Io.Reader` has no timeout of its own and no way to report one, so the
-//! connection owns the deadline and the caller reads `expired` after a failure.
-//!
-//! Four rules hold this together, each one learned from a silent failure:
-//!
-//! 1. The deadline belongs here, never at the socket. Polling the fd under TLS
-//!    hands whatever reads next a raw record; an HTTP/2 parser reads `17 03 03`
-//!    as a 24-bit frame length and fails with `FRAME_SIZE_ERROR` that points
-//!    nowhere near the fault.
-//! 2. Socket bytes go into `wireBuffer`, which is the storage the record layer
-//!    decrypts from, and never into a buffer of this module's own.
-//! 3. A frame does not fit one TLS record. `write` takes a prefix, so the
-//!    writer tracks an offset and never moves on with bytes still queued.
-//! 4. Flush before every blocking read. During the handshake the peer is
-//!    waiting on our ClientHello and will not answer until it arrives.
-//! 5. `endInput` is not how a wait ends. It means the transport saw EOF and
-//!    surfaces as `error.UnexpectedEof`; a deadline stops driving and releases
-//!    the slot, nothing more.
-//!
-//! There is no plaintext copy here. The transport keeps the delivered slice
-//! pinned until it is consumed, and a partial consume keeps the tail, so the
-//! reader hands over what fits and consumes exactly that much.
+//! `tls_nonblocking.SocketClient` owns the socket I/O, handshake, records,
+//! trust store, and plaintext reader/writer. This wrapper keeps HTTP's policy:
+//! one offered protocol, and that exact selection is required.
 
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
+const mem = std.mem;
+const tls = @import("tls");
+const tls_nonblocking = @import("tls_nonblocking");
 const http = @import("http");
-const anchors_mod = @import("anchors.zig");
-const http_tls = @import("../http_tls.zig");
+const Driver = http.h2.client.Driver;
 
-const Transport = http_tls.h2.transport.tls_client.Transport;
-const builtin = @import("builtin");
-
-/// The platform syscall module the transport's `send` and `receive` want.
-const Platform = switch (builtin.os.tag) {
-    .linux => http.h2.engine.wait_poll.Wait.Platform,
-    .macos => http.h2.engine.wait_kqueue.Wait.Platform,
-    else => http.h2.engine.wait_poll.Wait.Platform,
-};
+const SocketClient = tls_nonblocking.SocketClient;
 
 pub const Error = error{
     /// The handshake finished without the ALPN protocol this client requires.
     WrongAlpn,
-    /// The peer closed before the handshake completed.
-    HandshakeClosed,
 };
 
-// ast-grep-ignore: public-struct-field-default -- init sets identity, rest is buffers
-pub const Connection = struct {
-    io: Io,
-    allocator: Allocator,
-    socket: Io.net.Stream,
-    slot: Transport.Slot = undefined,
-    bundle: anchors_mod.Bundle = undefined,
-    opened_bundle: bool = false,
-    input: Io.Reader = undefined,
-    output: Io.Writer = undefined,
-    /// Absolute monotonic nanoseconds for the next socket wait.
-    deadline_ns: ?i96 = null,
-    /// Set when a wait ended because the deadline passed. `Io.Reader.Error` has
-    /// no timeout to report, so the caller reads this after a failed call.
-    expired: bool = false,
-    open: bool = false,
-    required_alpn: []const u8 = "h2",
+pub const ReadError = SocketClient.ReadError;
+pub const WriteError = SocketClient.WriteError;
 
-    /// Fields a caller controls.
+// ast-grep-ignore: public-struct-field-default -- init sets every field
+pub const Connection = struct {
+    inner: SocketClient,
+    required_alpn: []const u8,
+    alpn_protocols: [1][]const u8,
+
     // ast-grep-ignore: public-struct-field-default -- options bag; alpn defaults to h2
     pub const Options = struct {
         /// PEM certificate blocks, as handed by a caller that already holds
@@ -79,8 +36,7 @@ pub const Connection = struct {
         /// Null trusts nothing unless `insecure_no_chain_anchor` is set.
         ca_pem: ?[]const u8 = null,
         /// Test/demo opt-out from chain verification. Never set in production.
-        /// It has no effect while `ca_pem` is set, because the anchor path runs
-        /// first; a caller that wants it must leave `ca_pem` null.
+        /// Hostname verification still runs. Ignored when `ca_pem` is set.
         insecure_no_chain_anchor: bool = false,
         /// ASCII DNS name for SNI and the DNS-ID check. The caller owns the
         /// bytes and must keep them alive for the connection's lifetime.
@@ -88,10 +44,15 @@ pub const Connection = struct {
         /// Current time in seconds since the Unix epoch, for certificate
         /// validity.
         now_sec: i64,
-        /// The one ALPN protocol to require.
+        /// The one ALPN protocol to offer and require.
         alpn: []const u8 = "h2",
+        /// Absolute monotonic deadline for the handshake and subsequent reads.
+        deadline_ns: ?i96 = null,
     };
 
+    /// Initialize in the final location. The socket stays caller-owned on
+    /// success and failure; TLS state and the parsed trust anchors are owned
+    /// here and released by `deinit`.
     pub fn init(
         self: *Connection,
         allocator: Allocator,
@@ -100,308 +61,77 @@ pub const Connection = struct {
         options: Options,
     ) !void {
         self.* = .{
-            .io = io,
-            .allocator = allocator,
-            .socket = socket,
+            .inner = undefined,
             .required_alpn = options.alpn,
+            .alpn_protocols = .{options.alpn},
         };
+        errdefer self.inner.deinit();
+        try self.inner.init(allocator, io, socket, .{
+            .ca_pem = options.ca_pem,
+            .insecure_no_chain_anchor = options.insecure_no_chain_anchor,
+            .host_name = options.host_name,
+            .now_sec = options.now_sec,
+            .alpn = &self.alpn_protocols,
+            .deadline_ns = options.deadline_ns,
+        });
 
-        var ca: ?*const anchors_mod.Bundle = null;
-        if (options.ca_pem) |pem| {
-            self.bundle = try anchors_mod.build(allocator, pem, options.now_sec);
-            self.opened_bundle = true;
-            ca = &self.bundle;
-        }
-
-        self.slot = try Transport.init(
-            allocator,
-            io,
-            socket.socket.handle,
-            .{
-                .ca = ca,
-                .insecure_no_chain_anchor = options.insecure_no_chain_anchor,
-                .host_name = options.host_name,
-                .now_sec = options.now_sec,
-                .alpn = options.alpn,
-            },
-            0,
-            0,
-        );
-        self.open = true;
-
-        self.input = .{
-            .vtable = &.{
-                .stream = stream,
-                .readVec = readVec,
-            },
-            .buffer = &.{},
-            .seek = 0,
-            .end = 0,
-        };
-        self.output = .{
-            .vtable = &.{
-                .drain = drain,
-                .flush = flush,
-                .rebase = rebase,
-            },
-            .buffer = &.{},
-            .end = 0,
-        };
-
-        try self.handshake();
+        const selected = self.inner.selectedAlpn() orelse return error.WrongAlpn;
+        if (!mem.eql(u8, selected, self.required_alpn)) return error.WrongAlpn;
     }
 
-    /// Release TLS state and the trust store. The socket is **not** closed:
-    /// the caller opened it and the caller closes it. A caller that assumes
-    /// otherwise either leaks it or double-closes, and `Io` panics on the
-    /// second close rather than returning an error.
+    /// Release TLS state and trust anchors. The socket is not closed.
     pub fn deinit(self: *Connection) void {
-        if (self.open) {
-            self.open = false;
-            self.slot.deinit();
-        }
-        if (self.opened_bundle) self.bundle.deinit(self.allocator);
+        self.inner.deinit();
         self.* = undefined;
     }
 
     pub fn reader(self: *Connection) *Io.Reader {
-        return &self.input;
+        return self.inner.reader();
     }
 
     pub fn writer(self: *Connection) *Io.Writer {
-        return &self.output;
+        return self.inner.writer();
     }
 
-    /// The call's deadline, so a socket wait can end when the call does.
+    pub fn selectedAlpn(self: *const Connection) ?[]const u8 {
+        return self.inner.selectedAlpn();
+    }
+
+    pub fn peerAlert(self: *const Connection) ?tls.alert.Alert {
+        return self.inner.peerAlert();
+    }
+
+    pub fn readError(self: *const Connection) ?ReadError {
+        return self.inner.readError();
+    }
+
+    pub fn writeError(self: *const Connection) ?WriteError {
+        return self.inner.writeError();
+    }
+
+    /// Set the absolute monotonic deadline for subsequent read waits and clear
+    /// the previous expiry. Socket writes are not deadline-bounded.
     pub fn setDeadline(self: *Connection, absolute_ns: ?i96) void {
-        self.deadline_ns = absolute_ns;
+        self.inner.setDeadline(absolute_ns);
     }
 
-    fn handshake(self: *Connection) !void {
-        while (true) {
-            switch (try self.slot.next()) {
-                .handshake_complete => {
-                    const alpn = self.slot.selectedAlpn() orelse return error.WrongAlpn;
-                    if (!std.mem.eql(u8, alpn, self.required_alpn)) return error.WrongAlpn;
-                    return;
-                },
-                .need_input => {
-                    self.slot.send(Platform) catch return error.HandshakeClosed;
-                    const ready = self.readSocket() catch return error.HandshakeClosed;
-                    if (!ready) return error.HandshakeClosed;
-                },
-                .need_output => self.slot.send(Platform) catch return error.HandshakeClosed,
-                .progress => {},
-                .application_data => {
-                    // Plaintext can arrive before the completion event: the
-                    // server's SETTINGS routinely shares a flight with its
-                    // Finished, and it is already HTTP/2. Dropping it misaligns
-                    // the frame stream. The slice stays pinned until consumed,
-                    // so the handshake simply ends here and the first read
-                    // collects it.
-                    const alpn = self.slot.selectedAlpn() orelse return error.HandshakeClosed;
-                    if (!std.mem.eql(u8, alpn, self.required_alpn)) return error.WrongAlpn;
-                    return;
-                },
-                .closed => return error.HandshakeClosed,
-            }
-        }
+    /// True only when the latest deadline failure was `TimedOut`.
+    pub fn expired(self: *const Connection) bool {
+        return self.inner.expired();
     }
 
-    fn stream(
-        erased: *Io.Reader,
-        w: *Io.Writer,
-        limit: Io.Limit,
-    ) Io.Reader.StreamError!usize {
-        _ = erased;
-        _ = w;
-        _ = limit;
-        return error.EndOfStream;
+    /// Bind the HTTP driver to this plaintext reader's deadline and cause.
+    pub fn readDeadline(self: *Connection) Driver.ReadDeadline {
+        return .{ .context = self, .set = setReadDeadline, .cause = readCause };
     }
 
-    fn readVec(erased: *Io.Reader, iovecs: [][]u8) Io.Reader.Error!usize {
-        return connectionOf(erased, "input").fill(iovecs);
+    fn setReadDeadline(context: *anyopaque, deadline_ns: ?i96) void {
+        const self: *Connection = @ptrCast(@alignCast(context));
+        self.setDeadline(deadline_ns);
     }
 
-    fn drain(erased: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        return pushAll(connectionOf(erased, "output"), erased, data, splat);
-    }
-
-    fn flush(erased: *Io.Writer) Io.Writer.Error!void {
-        const self = connectionOf(erased, "output");
-        self.slot.send(Platform) catch return error.WriteFailed;
-    }
-
-    fn rebase(erased: *Io.Writer, preserve: usize, capacity: usize) Io.Writer.Error!void {
-        // The bridge writes straight through, so it never rebases a buffer.
-        _ = erased;
-        _ = preserve;
-        _ = capacity;
-    }
-
-    /// Hand plaintext to the transport, taking a prefix at a time and sending
-    /// between attempts. Never returns with bytes still queued.
-    fn push(
-        self: *Connection,
-        w: *Io.Writer,
-        data: []const []const u8,
-        splat: usize,
-    ) Io.Writer.Error!usize {
-        var total: usize = 0;
-
-        if (w.end != 0) {
-            const buffered = w.buffer[0..w.end];
-            w.end = 0;
-            total += try self.pushSlice(buffered);
-        }
-
-        for (data, 0..) |slice, index| {
-            const repeat = if (index + 1 == data.len) splat else 1;
-            var copy: usize = 0;
-            while (copy < repeat) : (copy += 1) total += try self.pushSlice(slice);
-        }
-        return total;
-    }
-
-    fn pushSlice(self: *Connection, bytes: []const u8) Io.Writer.Error!usize {
-        var offset: usize = 0;
-        while (offset < bytes.len) {
-            const accepted = self.slot.write(bytes[offset..]) catch return error.WriteFailed;
-            offset += accepted;
-            self.slot.send(Platform) catch return error.WriteFailed;
-            if (accepted == 0) {
-                // The transport still owes output. Yield rather than spin.
-                self.io.sleep(.fromMilliseconds(1), .awake) catch return error.WriteFailed;
-            }
-        }
-        return offset;
-    }
-
-    /// Return plaintext to the caller, stepping the transport as needed.
-    ///
-    /// The transport is the buffer. `application_data` stays pinned until it is
-    /// consumed, and a partial consume keeps the tail: the next `next()` hands
-    /// back exactly the remainder. So this consumes only what it handed over and
-    /// copies nothing.
-    fn fill(self: *Connection, iovecs: [][]u8) Io.Reader.Error!usize {
-        while (true) {
-            switch (self.slot.next() catch return error.ReadFailed) {
-                .application_data => |bytes| {
-                    const copied = copyInto(iovecs, bytes);
-                    self.slot.consume(@intCast(copied));
-                    return copied;
-                },
-                .need_input => {
-                    // Flush first: during the handshake the peer is waiting on
-                    // our ClientHello and will not answer until it arrives.
-                    self.slot.send(Platform) catch return error.ReadFailed;
-                    if (!(self.readSocket() catch return error.ReadFailed)) return 0;
-                },
-                .need_output => self.slot.send(Platform) catch return error.ReadFailed,
-                .progress, .handshake_complete => {},
-                .closed => return 0,
-            }
-        }
-    }
-
-    /// Read the socket once into the transport's own buffer and commit it.
-    /// False on EOF.
-    ///
-    /// The bytes must land in `receiveBuffer`, because that is the storage the
-    /// TLS layer decrypts from; reading into a private buffer and reporting a
-    /// count produces `RecordTooLarge` on the first record. An empty buffer
-    /// means the transport still owes output, not that the peer closed.
-    fn readSocket(self: *Connection) !bool {
-        const buffer = self.slot.wireBuffer();
-        if (buffer.len == 0) {
-            self.slot.send(Platform) catch return error.WriteFailed;
-            return true;
-        }
-
-        if (self.deadline_ns) |deadline| {
-            const now = Io.Clock.awake.now(self.io).nanoseconds;
-            if (now >= deadline) {
-                self.expired = true;
-                return error.TimedOut;
-            }
-            const give_up: Io.Clock.Timestamp = Io.Timestamp
-                .fromNanoseconds(deadline)
-                .withClock(Io.Clock.awake);
-
-            // Zig 0.17 spells this operation `net_read` with a vectored
-            // payload. Zig 0.16 calls it `net_receive` with a message buffer
-            // and returns the count in that buffer, so the batched wait is not
-            // portable across the two. A 0.16 build refuses a future deadline
-            // instead of failing to compile; the expiry check above still
-            // reports an already-passed deadline.
-            if (comptime @hasField(Io.Operation, "net_read")) {
-                var storage: [1]Io.Operation.Storage = undefined;
-                var batch: Io.Batch = .init(&storage);
-                var iovecs: [1][]u8 = .{buffer};
-                _ = batch.add(.{ .net_read = .{
-                    .socket_handle = self.socket.socket.handle,
-                    .data = &iovecs,
-                } });
-                batch.awaitConcurrent(self.io, .{ .deadline = give_up }) catch |err| switch (err) {
-                    error.Timeout, error.Canceled => {
-                        self.expired = true;
-                        return error.TimedOut;
-                    },
-                    error.ConcurrencyUnavailable => return error.DeadlineUnsupported,
-                };
-                while (batch.next()) |completion| {
-                    switch (completion.result) {
-                        .net_read => |result| {
-                            const ready = try result;
-                            if (ready.data_len == 0) return false;
-                            self.slot.wireReceived(ready.data_len);
-                            return true;
-                        },
-                        else => {},
-                    }
-                }
-                self.expired = true;
-                return error.TimedOut;
-            } else {
-                return error.DeadlineUnsupported;
-            }
-        }
-
-        var iovecs: [1][]u8 = .{buffer};
-        var transport_reader = self.socket.reader(self.io, &.{});
-        const n = transport_reader.interface.readVec(&iovecs) catch |err| switch (err) {
-            error.EndOfStream => return false,
-            else => return err,
-        };
-        if (n == 0) return false;
-        self.slot.wireReceived(n);
-        return true;
+    fn readCause(context: *const anyopaque) ?anyerror {
+        const self: *const Connection = @ptrCast(@alignCast(context));
+        return self.readError();
     }
 };
-
-fn connectionOf(erased: anytype, comptime field: []const u8) *Connection {
-    const base: [*]u8 = @ptrCast(erased);
-    const address = @intFromPtr(base) - @offsetOf(Connection, field);
-    const pointer: *Connection = @ptrFromInt(address);
-    return @alignCast(pointer);
-}
-
-fn pushAll(
-    self: *Connection,
-    w: *Io.Writer,
-    data: []const []const u8,
-    splat: usize,
-) Io.Writer.Error!usize {
-    return self.push(w, data, splat);
-}
-
-fn copyInto(iovecs: [][]u8, bytes: []const u8) usize {
-    var copied: usize = 0;
-    for (iovecs) |iov| {
-        if (copied == bytes.len) break;
-        const take = @min(iov.len, bytes.len - copied);
-        @memcpy(iov[0..take], bytes[copied..][0..take]);
-        copied += take;
-    }
-    return copied;
-}

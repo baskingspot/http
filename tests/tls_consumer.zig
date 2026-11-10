@@ -22,10 +22,15 @@ test "the client exposes the blocking surface" {
     try testing.expect(@hasDecl(Connection, "reader"));
     try testing.expect(@hasDecl(Connection, "writer"));
     try testing.expect(@hasDecl(Connection, "setDeadline"));
-    try testing.expect(@hasField(Connection, "expired"));
+    try testing.expect(@hasDecl(Connection, "expired"));
+    try testing.expect(@hasDecl(Connection, "selectedAlpn"));
+    try testing.expect(@hasDecl(Connection, "peerAlert"));
+    try testing.expect(@hasDecl(Connection, "readError"));
+    try testing.expect(@hasDecl(Connection, "writeError"));
     // No `canWrite`: after a peer close_notify the write is the query.
     try testing.expect(!@hasDecl(Connection, "canWrite"));
     try testing.expect(!@hasField(Connection, "canWrite"));
+    try testing.expect(!@hasField(Connection, "expired"));
 }
 
 test "the anchors builder is reachable through the module name" {

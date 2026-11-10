@@ -217,8 +217,8 @@ pub const Connection = struct {
     /// until the peer hangs up. During the handshake it holds because the
     /// server SETTINGS has not arrived yet.
     pub fn wantsInput(self: *const Connection) bool {
-        if (self.poisoned or self.goaway != null) return false;
-        if (!self.session.settings_received) return true;
+        if (self.poisoned) return false;
+        if (!self.session.settings_received) return self.goaway == null;
         for (self.slots) |*slot| {
             if (slot.used and slot.close_reason == null) return true;
         }
@@ -226,7 +226,11 @@ pub const Connection = struct {
     }
 
     pub fn canOpen(self: *const Connection) bool {
-        return !self.poisoned and self.goaway == null and self.freeSlot() != null;
+        if (self.poisoned or self.goaway != null) return false;
+        for (self.slots) |slot| {
+            if (!slot.used) return true;
+        }
+        return false;
     }
 
     pub fn goAway(self: *const Connection) ?shared.GoAway {
@@ -928,4 +932,44 @@ test "a connection error keeps its frame error code" {
         frame.ErrorCode.frame_size_error,
         client.connectionErrorCode().?,
     );
+}
+
+test "GOAWAY keeps accepted streams readable and rejects new streams" {
+    var client: Connection = undefined;
+    try client.init(.{ .allocator = testing.allocator });
+    defer client.deinit();
+    var server = try Session.init(testing.allocator, .{ .role = .server });
+    defer server.deinit(testing.allocator);
+    try transferServer(&server, &client);
+    try transferConnection(&client, &server);
+    while (try server.nextEvent(testing.allocator)) |_| {}
+    _ = try client.poll();
+
+    const accepted = try client.open(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/accepted",
+    }, true);
+    try transferConnection(&client, &server);
+    try testing.expectEqual(accepted.id, try nextRequestId(&server));
+    try server.submitGoaway(testing.allocator, .no_error);
+    try transferServer(&server, &client);
+    while (try client.poll()) |_| {}
+    try testing.expect(client.goAway() != null);
+    try testing.expect(!client.canOpen());
+    try testing.expect(client.wantsInput());
+
+    try server.submitResponse(testing.allocator, accepted.id, .{ .status = .ok }, true);
+    try transferServer(&server, &client);
+    var saw_response = false;
+    while (try client.poll()) |event| {
+        if (event == .head) {
+            try testing.expectEqual(accepted.id, event.head.stream);
+            try testing.expect(event.head.end_stream);
+            saw_response = true;
+        }
+    }
+    try testing.expect(saw_response);
+    try testing.expect(!client.wantsInput());
 }

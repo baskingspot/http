@@ -5,7 +5,6 @@
 //! anchor is dropped silently rather than reported.
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const tls_nonblocking = @import("tls_nonblocking");
 
 /// A trust store, as `tls.certificate.Policy` expects one.
@@ -14,25 +13,9 @@ pub const Bundle = std.crypto.Certificate.Bundle;
 /// Build a trust store from one or more PEM certificate blocks.
 ///
 /// `now_sec` is the clock used to reject expired anchors. The caller owns the
-/// returned bundle and must call `deinit`.
-///
-/// The underlying loader is not atomic: a malformed block after a valid one
-/// leaves the valid anchor committed. A partial anchor set would fail later as
-/// a chain error with no hint, so any failure discards the whole store, and
-/// `error.NoTrustAnchors` means nothing usable loaded.
-pub fn build(allocator: Allocator, pem: []const u8, now_sec: i64) !Bundle {
-    var bundle: Bundle = .empty;
-    errdefer bundle.deinit(allocator);
-
-    const added = try tls_nonblocking.anchors.addCertsFromPemBytes(
-        &bundle,
-        allocator,
-        pem,
-        now_sec,
-    );
-    if (added == 0) return error.NoTrustAnchors;
-    return bundle;
-}
+/// returned bundle and must call `deinit`. Any failure discards a partial
+/// store; `error.NoTrustAnchors` means nothing usable loaded.
+pub const build = tls_nonblocking.anchors.build;
 
 const testing = std.testing;
 

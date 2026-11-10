@@ -32,7 +32,7 @@ The [API reference](api/) documents every public symbol.
 ## Install
 
 ```sh
-zig fetch --save https://baskingspot.dev/http/v0.2.0.tar.gz
+zig fetch --save https://baskingspot.dev/http/v0.3.0.tar.gz
 ```
 
 Add the module in `build.zig`:
@@ -820,6 +820,43 @@ opened, so a caller can tell which requests were processed before the boundary
 and which are safe to retry. `isConnectionPoisoned()` and `commitState()` say
 whether the connection can take another request at all.
 
+## Multiplexed h2 connections
+
+`h2.client.Connection` is the step-shaped client: open streams with `open`, send
+request DATA with `Stream.write`, and dispatch `poll` events by stream id.
+Response DATA carries a `DataLease`; release it before polling again. Heads,
+DATA, trailers, closes, writable notifications, and GOAWAY stay in that event
+stream, including all trailer fields.
+
+`h2.client.Driver` owns the blocking byte pump around that connection. Its
+`flush` completes successful short writes and flushes complete frames, while
+`read(deadline_ns)` retains any input the connection did not accept. A call that
+absorbs retained input returns `.ready` before reading again, so the caller can
+poll. `.eof` and `.timeout` report transport outcomes; they do not cancel a
+stream or select an application error.
+
+The deadline is absolute awake-monotonic nanoseconds. `Driver.Wait.socket`
+reads raw socket bytes and requires an unbuffered raw reader.
+A TLS driver uses `.wait = .reader` and
+`.read_deadline = connection.readDeadline()` from `http_tls.client.Connection`.
+The hooks pass the same deadline to the decrypting reader and report its concrete
+read-error cause. A timed reader wait without these hooks returns
+`error.DeadlineUnsupported`.
+
+Timeouts and cancellation leave the driver open. Unsupported waits and missing
+completions remain distinct errors and also leave it open. A `WouldBlock` returns
+`.ready` so the caller can yield.
+
+A terminal read or write error closes the driver. EOF also closes it. Later
+`flush` and `read` calls return `error.ConnectionClosed` without transport progress.
+`failureCause()` preserves the first terminal error. Clean EOF retains
+`EndOfStream`. Resets and TLS truncation retain their concrete causes.
+
+All borrowed values must outlive the driver, including the hook context.
+
+A peer GOAWAY prevents new streams. `Connection.wantsInput()` stays true for
+accepted streams until they complete.
+
 # Running a server
 
 The engines differ in transport and agree on the application side: one vtable,
@@ -984,12 +1021,13 @@ accepting, and waits for active streams until `drain_timeout` expires.
 
 ## TLS lives in another module
 
-`http` imports no TLS and links no crypto library. TLS is the separate
-`http_tls` module in the same package: `http_tls.h2.engine.tls.poll`, `.epoll`,
-and `.kqueue` are the h2 readiness engines over `tls_nonblocking` from
-`baskingspot/tls`, with the handshake, record buffers, and ALPN inside the
-transport. Set `Config.transport`, and nothing below `h2.engine.Connection`
-changes.
+`http` imports no TLS and links no crypto library. Pass `.tls = true` to
+`b.dependency("http", ...)` for the separate `http_tls` module:
+`http_tls.h2.engine.tls.poll`, `.epoll`, and `.kqueue` are the h2 readiness
+engines over `tls_nonblocking` from `baskingspot/tls`, with the handshake,
+record buffers, and ALPN inside the transport. Set `Config.transport`, and
+nothing below `h2.engine.Connection` changes. Without that option, a consumer
+does not fetch TLS or the CLI package.
 
 The blocking engines take a plaintext reader and writer instead.
 `examples/http2_tls.zig` runs `tls_std`'s blocking handshake with ALPN `h2` and
@@ -1064,7 +1102,7 @@ Not implemented:
 - Streaming request bodies on h1. `h1.ServerConn` has no incremental body delivery, and `h1.client.streaming` sends `Request.body` in one call. The h2 client and server do stream: `h2.client.blocking.Client.begin` and `body_mode = .stream`.
 - A streaming request body through `client.blocking.Client`. The protocol-neutral facade has no `begin`; use the h2 adapter when the body does not exist up front.
 - Chunked request bodies on the server. `h1.ServerConn` answers 501 with `RejectReason.chunked_unsupported`; `h1.chunked.Decoder` is there for a caller that drives the body itself.
-- Response trailers on the client. `h1.ClientConn` parses them into `Config.trailers`, and `client.ResponseHead` has no trailer list, so the adapters that sit above it drop the fields.
+- Response trailers on the shared blocking client. `h1.ClientConn` parses them into `Config.trailers`, and `client.Response` has no trailer list, so `h1.client` and `h2.client.blocking` drop the fields. Use `h2.client.Connection` to receive complete h2 trailers; snapshots live in the stream arena.
 - Connection reuse and pooling. `h1.client.blocking.fetch` reads one response and does not reuse the connection, and nothing in `http.client` pools connections. `h2.client.blocking.Client` keeps the one connection it was given.
 - Redirects. A 3xx comes back as a `client.Response` with its `Status`; nothing follows it.
 - Cookies. `Headers` never combines `Set-Cookie`, h2 `cookie` lines stay separate, and there is no jar.

@@ -62,7 +62,7 @@ Not implemented:
 ## Install
 
 ```sh
-zig fetch --save https://baskingspot.dev/http/v0.2.0.tar.gz
+zig fetch --save https://baskingspot.dev/http/v0.3.0.tar.gz
 ```
 
 Add the module in `build.zig`:
@@ -72,9 +72,10 @@ const http = b.dependency("http", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("http", http.module("http"));
 ```
 
-`std.http` keeps its name, so `http` sits beside it in the same file. The
-package also exports `http_tls`, a second module for the TLS readiness engines;
-import it only when the server terminates TLS. `http` builds with Zig 0.16 and 0.17.
+`std.http` keeps its name, so `http` sits beside it in the same file. For TLS,
+pass `.tls = true` in the dependency arguments and import
+`http.module("http_tls")`; an ordinary `http` consumer does not fetch TLS.
+`http` builds with Zig 0.16 and 0.17.
 
 ## Documentation
 

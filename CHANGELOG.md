@@ -5,8 +5,11 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-10
+
 ### Added
 
+- `h2.client.Driver` drives a multiplexed `Connection` through caller-owned byte interfaces and buffers. It retains unaccepted input and completes successful short writes. Reader-mode deadlines use `ReadDeadline` hooks, including `http_tls.client.Connection.readDeadline()`.
 - h2 request-body streaming, client and server. The client sends a body it does
   not have up front: `h2.client.blocking.Client.begin` queues the request
   HEADERS and returns a `client.BodyWriter`, `write` adds DATA under flow
@@ -62,9 +65,6 @@ All notable changes to http are recorded here. The format follows
   gains `error.OutOfMemory`. The response body is still borrowed and must stay
   valid until `complete` returns.
 
-
-### Added
-
 - `http_tls.h2.transport.tls_client`: the h2-over-TLS client byte transport.
   Same `transport.Event` union as the h2c and TLS server transports, with the
   binary-frame rules documented. A client/server handshake, application data,
@@ -103,8 +103,22 @@ All notable changes to http are recorded here. The format follows
 - `h2.Session.releaseConnection` and `releaseStream`: independent receive
   window credits for streaming servers.
 
+### Changed
+
+- Package consumers get `http` without fetching TLS or CLI dependencies. Pass
+  `.tls = true` to `b.dependency("http", ...)` to import `http_tls`; the repo's
+  own test and example graph keeps TLS enabled by default. `testingx` stays
+  developer-only.
+- `http_tls.client.Connection` now delegates socket I/O, trust anchors, and
+  deadlines to `tls_nonblocking.SocketClient`. It still requires the configured
+  ALPN protocol and exposes `selectedAlpn`, `peerAlert`, `readError`,
+  `writeError`, and `expired()` without hiding the underlying cause.
+
 ### Fixed
 
+- `h2.client.Driver.read(null)` preserves a transport timeout as a terminal error, not an expired read deadline.
+- `h2.client.Connection.wantsInput()` keeps accepted streams readable after GOAWAY. `canOpen()` also compiles through a const receiver.
+- Terminal read errors, `Driver.flush()` errors, and EOF prevent driver reuse. `failureCause()` preserves the first terminal cause. Timed reads reap pending batch operations and retain concurrent completions.
 - `http_tls` builds on Zig 0.16 again. The deadline wait used the 0.17-only
   `Io.Operation.net_read`; on 0.16 a future deadline now reports
   `error.DeadlineUnsupported` and an already-passed deadline still reports

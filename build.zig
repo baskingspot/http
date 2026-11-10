@@ -19,30 +19,44 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "stdx", .module = stdx.module("stdx") }},
     });
 
-    // TLS is a separate module: importing it must not put libcrypto in an
-    // h2c-only build. Consumers that terminate TLS import `http_tls`.
-    const tls_dep = b.dependency("tls", .{
+    // TLS opt-in is false for a consumer and true for this repo's dev graph.
+    // Register the module before the lazy fetch: an outer consumer can resolve
+    // `module("http_tls")` on the first pass, then Zig fetches and reruns.
+    const tls_enabled = b.option(
+        bool,
+        "tls",
+        "Export http_tls and build TLS tests and examples",
+    ) orelse (b.pkg_hash.len == 0);
+    const tls_dep = if (tls_enabled) b.lazyDependency("tls", .{
         .target = target,
         .optimize = optimize,
-    });
-    const cli_dep = b.dependency("cli", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const http_tls_mod = b.addModule("http_tls", .{
+    }) else null;
+    const http_tls_mod = if (tls_enabled) b.addModule("http_tls", .{
         .root_source_file = b.path("src/http_tls.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{
-            .{ .name = "http", .module = mod },
-            .{ .name = "tls", .module = tls_dep.module("tls") },
-            .{ .name = "tls_nonblocking", .module = tls_dep.module("tls_nonblocking") },
-        },
-    });
-    http_tls_mod.link_libc = true;
-    http_tls_mod.linkSystemLibrary("crypto", .{});
+        .imports = &.{.{ .name = "http", .module = mod }},
+    }) else null;
+    if (http_tls_mod) |tls_mod| {
+        tls_mod.link_libc = true;
+        tls_mod.linkSystemLibrary("crypto", .{});
+    }
+    if (tls_dep) |dep| {
+        http_tls_mod.?.addImport("tls", dep.module("tls"));
+        http_tls_mod.?.addImport("tls_nonblocking", dep.module("tls_nonblocking"));
+    }
 
+    // Everything below is developer-only. Returning before CLI, the test
+    // runner, and benchmarks keeps them out of every consumer's fetch path.
     if (b.pkg_hash.len != 0) return;
+    // The first lazy pass only declares modules. The next pass has TLS and
+    // registers its tests and examples.
+    if (tls_enabled and tls_dep == null) return;
+
+    const cli_dep = b.lazyDependency("cli", .{
+        .target = target,
+        .optimize = optimize,
+    }) orelse return;
 
     // The bench suite runs ReleaseFast, but an imported module keeps its own
     // optimize mode. Build bench-specific copies so the suite does not call
@@ -83,74 +97,77 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the unit tests");
     test_step.dependOn(&run_tests.step);
 
-    // `http_tls` links libcrypto, so its tests are a separate artifact: the
-    // h2c `http` module must never link a crypto library. Rooted at the module
-    // so both the trust-anchor builder and the transport mapping are pinned.
-    const http_tls_tests_mod = b.addModule("http-tls-tests", .{
-        .root_source_file = b.path("src/http_tls.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "http", .module = mod },
-            .{ .name = "tls", .module = tls_dep.module("tls") },
-            .{ .name = "tls_nonblocking", .module = tls_dep.module("tls_nonblocking") },
-        },
-    });
-    http_tls_tests_mod.link_libc = true;
-    http_tls_tests_mod.linkSystemLibrary("crypto", .{});
-    const http_tls_tests = b.addTest(.{
-        .root_module = http_tls_tests_mod,
-        .test_runner = test_runner,
-    });
-    const run_http_tls_tests = b.addRunArtifact(http_tls_tests);
-    passthruArgs(b, run_http_tls_tests);
-    test_step.dependOn(&run_http_tls_tests.step);
+    if (tls_dep) |dep| {
+        const tls_mod = http_tls_mod.?;
+        // `http_tls` links libcrypto, so its tests are a separate artifact: the
+        // h2c `http` module must never link a crypto library. Rooted at the module
+        // so both the trust-anchor builder and the transport mapping are pinned.
+        const http_tls_tests_mod = b.addModule("http-tls-tests", .{
+            .root_source_file = b.path("src/http_tls.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "tls", .module = dep.module("tls") },
+                .{ .name = "tls_nonblocking", .module = dep.module("tls_nonblocking") },
+            },
+        });
+        http_tls_tests_mod.link_libc = true;
+        http_tls_tests_mod.linkSystemLibrary("crypto", .{});
+        const http_tls_tests = b.addTest(.{
+            .root_module = http_tls_tests_mod,
+            .test_runner = test_runner,
+        });
+        const run_http_tls_tests = b.addRunArtifact(http_tls_tests);
+        passthruArgs(b, run_http_tls_tests);
+        test_step.dependOn(&run_http_tls_tests.step);
 
-    // A consumer importing `http_tls` by module name, the way grpc does. This
-    // is the regression check for a file inside the module importing
-    // `@import("http_tls")`: that resolves only when the file is its own root.
-    const tls_consumer_mod = b.addModule("http-tls-consumer", .{
-        .root_source_file = b.path("tests/tls_consumer.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "http", .module = mod },
-            .{ .name = "http_tls", .module = http_tls_mod },
-            .{ .name = "tls", .module = tls_dep.module("tls") },
-        },
-    });
-    tls_consumer_mod.link_libc = true;
-    tls_consumer_mod.linkSystemLibrary("crypto", .{});
-    const tls_consumer_tests = b.addTest(.{
-        .root_module = tls_consumer_mod,
-        .test_runner = test_runner,
-    });
-    const run_tls_consumer = b.addRunArtifact(tls_consumer_tests);
-    passthruArgs(b, run_tls_consumer);
-    test_step.dependOn(&run_tls_consumer.step);
+        // A consumer importing `http_tls` by module name, the way grpc does. This
+        // is the regression check for a file inside the module importing
+        // `@import("http_tls")`: that resolves only when the file is its own root.
+        const tls_consumer_mod = b.addModule("http-tls-consumer", .{
+            .root_source_file = b.path("tests/tls_consumer.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "http_tls", .module = tls_mod },
+                .{ .name = "tls", .module = dep.module("tls") },
+            },
+        });
+        tls_consumer_mod.link_libc = true;
+        tls_consumer_mod.linkSystemLibrary("crypto", .{});
+        const tls_consumer_tests = b.addTest(.{
+            .root_module = tls_consumer_mod,
+            .test_runner = test_runner,
+        });
+        const run_tls_consumer = b.addRunArtifact(tls_consumer_tests);
+        passthruArgs(b, run_tls_consumer);
+        test_step.dependOn(&run_tls_consumer.step);
 
-    // The blocking TLS connection owns a socket, so its test needs a listener
-    // and a server transport on the other end.
-    const tls_conn_mod = b.addModule("http-tls-connection", .{
-        .root_source_file = b.path("tests/tls_connection.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "http", .module = mod },
-            .{ .name = "http_tls", .module = http_tls_mod },
-            .{ .name = "tls", .module = tls_dep.module("tls") },
-            .{ .name = "tls_nonblocking", .module = tls_dep.module("tls_nonblocking") },
-        },
-    });
-    tls_conn_mod.link_libc = true;
-    tls_conn_mod.linkSystemLibrary("crypto", .{});
-    const tls_conn_tests = b.addTest(.{
-        .root_module = tls_conn_mod,
-        .test_runner = test_runner,
-    });
-    const run_tls_conn = b.addRunArtifact(tls_conn_tests);
-    passthruArgs(b, run_tls_conn);
-    test_step.dependOn(&run_tls_conn.step);
+        // The blocking TLS connection owns a socket, so its test needs a listener
+        // and a server transport on the other end.
+        const tls_conn_mod = b.addModule("http-tls-connection", .{
+            .root_source_file = b.path("tests/tls_connection.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "http_tls", .module = tls_mod },
+                .{ .name = "tls", .module = dep.module("tls") },
+                .{ .name = "tls_nonblocking", .module = dep.module("tls_nonblocking") },
+            },
+        });
+        tls_conn_mod.link_libc = true;
+        tls_conn_mod.linkSystemLibrary("crypto", .{});
+        const tls_conn_tests = b.addTest(.{
+            .root_module = tls_conn_mod,
+            .test_runner = test_runner,
+        });
+        const run_tls_conn = b.addRunArtifact(tls_conn_tests);
+        passthruArgs(b, run_tls_conn);
+        test_step.dependOn(&run_tls_conn.step);
+    }
 
     // The interop fixture reads a txtar archive with testingx at compile time,
     // so it is a second test artifact with its own module. `http` itself never
@@ -522,28 +539,31 @@ pub fn build(b: *std.Build) void {
         "example-h2-tls-readiness",
         "Run the HTTP/2 TLS readiness example server",
     );
-    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
-        const h2_tls_readiness_mod = b.createModule(.{
-            .root_source_file = b.path("examples/http2_tls_readiness.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "http", .module = mod },
-                .{ .name = "http_tls", .module = http_tls_mod },
-                .{ .name = "tls", .module = tls_dep.module("tls") },
-            },
-        });
-        h2_tls_readiness_mod.link_libc = true;
-        h2_tls_readiness_mod.linkSystemLibrary("crypto", .{});
-        const h2_tls_readiness = b.addExecutable(.{
-            .name = "http2-tls-readiness",
-            .root_module = h2_tls_readiness_mod,
-        });
-        h2_tls_readiness_example_bin.dependOn(&h2_tls_readiness.step);
+    if (tls_dep) |dep| {
+        const tls_mod = http_tls_mod.?;
+        if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+            const h2_tls_readiness_mod = b.createModule(.{
+                .root_source_file = b.path("examples/http2_tls_readiness.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "http", .module = mod },
+                    .{ .name = "http_tls", .module = tls_mod },
+                    .{ .name = "tls", .module = dep.module("tls") },
+                },
+            });
+            h2_tls_readiness_mod.link_libc = true;
+            h2_tls_readiness_mod.linkSystemLibrary("crypto", .{});
+            const h2_tls_readiness = b.addExecutable(.{
+                .name = "http2-tls-readiness",
+                .root_module = h2_tls_readiness_mod,
+            });
+            h2_tls_readiness_example_bin.dependOn(&h2_tls_readiness.step);
 
-        const run_h2_tls_readiness = b.addRunArtifact(h2_tls_readiness);
-        passthruArgs(b, run_h2_tls_readiness);
-        h2_tls_readiness_example_run.dependOn(&run_h2_tls_readiness.step);
+            const run_h2_tls_readiness = b.addRunArtifact(h2_tls_readiness);
+            passthruArgs(b, run_h2_tls_readiness);
+            h2_tls_readiness_example_run.dependOn(&run_h2_tls_readiness.step);
+        }
     }
 
     // The TLS h2 example is Linux and macOS only. It imports tls and the
@@ -556,28 +576,30 @@ pub fn build(b: *std.Build) void {
         "example-h2-tls",
         "Run the HTTP/2 TLS example server",
     );
-    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
-        const h2_tls_mod = b.createModule(.{
-            .root_source_file = b.path("examples/http2_tls.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "http", .module = mod },
-                .{ .name = "tls", .module = tls_dep.module("tls") },
-                .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
-            },
-        });
-        h2_tls_mod.link_libc = true;
-        h2_tls_mod.linkSystemLibrary("crypto", .{});
-        const h2_tls = b.addExecutable(.{
-            .name = "http2-tls",
-            .root_module = h2_tls_mod,
-        });
-        h2_tls_example_bin.dependOn(&h2_tls.step);
+    if (tls_dep) |dep| {
+        if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+            const h2_tls_mod = b.createModule(.{
+                .root_source_file = b.path("examples/http2_tls.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "http", .module = mod },
+                    .{ .name = "tls", .module = dep.module("tls") },
+                    .{ .name = "tls_std", .module = dep.module("tls_std") },
+                },
+            });
+            h2_tls_mod.link_libc = true;
+            h2_tls_mod.linkSystemLibrary("crypto", .{});
+            const h2_tls = b.addExecutable(.{
+                .name = "http2-tls",
+                .root_module = h2_tls_mod,
+            });
+            h2_tls_example_bin.dependOn(&h2_tls.step);
 
-        const run_h2_tls = b.addRunArtifact(h2_tls);
-        passthruArgs(b, run_h2_tls);
-        h2_tls_example_run.dependOn(&run_h2_tls.step);
+            const run_h2_tls = b.addRunArtifact(h2_tls);
+            passthruArgs(b, run_h2_tls);
+            h2_tls_example_run.dependOn(&run_h2_tls.step);
+        }
     }
 
     // The HTTP/1 TLS examples use the blocking tls_std integration from
@@ -598,50 +620,52 @@ pub fn build(b: *std.Build) void {
         "example-h1-tls-client",
         "Run the HTTP/1.1 TLS example client",
     );
-    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
-        const h1_tls_mod = b.createModule(.{
-            .root_source_file = b.path("examples/http1_tls.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "http", .module = mod },
-                .{ .name = "tls", .module = tls_dep.module("tls") },
-                .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
-            },
-        });
-        h1_tls_mod.link_libc = true;
-        h1_tls_mod.linkSystemLibrary("crypto", .{});
-        const h1_tls = b.addExecutable(.{
-            .name = "http1-tls",
-            .root_module = h1_tls_mod,
-        });
-        h1_tls_example_bin.dependOn(&h1_tls.step);
+    if (tls_dep) |dep| {
+        if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+            const h1_tls_mod = b.createModule(.{
+                .root_source_file = b.path("examples/http1_tls.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "http", .module = mod },
+                    .{ .name = "tls", .module = dep.module("tls") },
+                    .{ .name = "tls_std", .module = dep.module("tls_std") },
+                },
+            });
+            h1_tls_mod.link_libc = true;
+            h1_tls_mod.linkSystemLibrary("crypto", .{});
+            const h1_tls = b.addExecutable(.{
+                .name = "http1-tls",
+                .root_module = h1_tls_mod,
+            });
+            h1_tls_example_bin.dependOn(&h1_tls.step);
 
-        const run_h1_tls = b.addRunArtifact(h1_tls);
-        passthruArgs(b, run_h1_tls);
-        h1_tls_example_run.dependOn(&run_h1_tls.step);
+            const run_h1_tls = b.addRunArtifact(h1_tls);
+            passthruArgs(b, run_h1_tls);
+            h1_tls_example_run.dependOn(&run_h1_tls.step);
 
-        const h1_tls_client_mod = b.createModule(.{
-            .root_source_file = b.path("examples/http1_tls_client.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "http", .module = mod },
-                .{ .name = "tls", .module = tls_dep.module("tls") },
-                .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
-            },
-        });
-        h1_tls_client_mod.link_libc = true;
-        h1_tls_client_mod.linkSystemLibrary("crypto", .{});
-        const h1_tls_client = b.addExecutable(.{
-            .name = "http1-tls-client",
-            .root_module = h1_tls_client_mod,
-        });
-        h1_tls_client_bin.dependOn(&h1_tls_client.step);
+            const h1_tls_client_mod = b.createModule(.{
+                .root_source_file = b.path("examples/http1_tls_client.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "http", .module = mod },
+                    .{ .name = "tls", .module = dep.module("tls") },
+                    .{ .name = "tls_std", .module = dep.module("tls_std") },
+                },
+            });
+            h1_tls_client_mod.link_libc = true;
+            h1_tls_client_mod.linkSystemLibrary("crypto", .{});
+            const h1_tls_client = b.addExecutable(.{
+                .name = "http1-tls-client",
+                .root_module = h1_tls_client_mod,
+            });
+            h1_tls_client_bin.dependOn(&h1_tls_client.step);
 
-        const run_h1_tls_client = b.addRunArtifact(h1_tls_client);
-        passthruArgs(b, run_h1_tls_client);
-        h1_tls_client_run.dependOn(&run_h1_tls_client.step);
+            const run_h1_tls_client = b.addRunArtifact(h1_tls_client);
+            passthruArgs(b, run_h1_tls_client);
+            h1_tls_client_run.dependOn(&run_h1_tls_client.step);
+        }
     }
 
     // One TLS port serving h1 and h2 by ALPN.
@@ -653,58 +677,62 @@ pub fn build(b: *std.Build) void {
         "example-unified",
         "Run the HTTP/1.1 and HTTP/2 TLS example server",
     );
-    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
-        const unified_mod = b.createModule(.{
-            .root_source_file = b.path("examples/http_unified_server.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "http", .module = mod },
-                .{ .name = "tls", .module = tls_dep.module("tls") },
-                .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
-            },
-        });
-        unified_mod.link_libc = true;
-        unified_mod.linkSystemLibrary("crypto", .{});
-        const unified = b.addExecutable(.{
-            .name = "http-unified-server",
-            .root_module = unified_mod,
-        });
-        unified_example_bin.dependOn(&unified.step);
+    if (tls_dep) |dep| {
+        if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+            const unified_mod = b.createModule(.{
+                .root_source_file = b.path("examples/http_unified_server.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "http", .module = mod },
+                    .{ .name = "tls", .module = dep.module("tls") },
+                    .{ .name = "tls_std", .module = dep.module("tls_std") },
+                },
+            });
+            unified_mod.link_libc = true;
+            unified_mod.linkSystemLibrary("crypto", .{});
+            const unified = b.addExecutable(.{
+                .name = "http-unified-server",
+                .root_module = unified_mod,
+            });
+            unified_example_bin.dependOn(&unified.step);
 
-        const run_unified = b.addRunArtifact(unified);
-        passthruArgs(b, run_unified);
-        unified_example_run.dependOn(&run_unified.step);
+            const run_unified = b.addRunArtifact(unified);
+            passthruArgs(b, run_unified);
+            unified_example_run.dependOn(&run_unified.step);
+        }
     }
 
     // The tiny curl example. HTTPS uses the same tls_std wrapper as the h1 TLS
     // examples; the HTTP layer still sees only reader and writer interfaces.
     const curl_example_bin = b.step("example-curl-bin", "Build the HTTP/1.1 curl example");
     const curl_example_run = b.step("example-curl", "Run the HTTP/1.1 curl example");
-    if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
-        const curl_mod = b.createModule(.{
-            .root_source_file = b.path("examples/curl.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "http", .module = mod },
-                .{ .name = "stdx", .module = stdx.module("stdx") },
-                .{ .name = "cli", .module = cli_dep.module("cli") },
-                .{ .name = "tls", .module = tls_dep.module("tls") },
-                .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
-            },
-        });
-        curl_mod.link_libc = true;
-        curl_mod.linkSystemLibrary("crypto", .{});
-        const curl = b.addExecutable(.{
-            .name = "http1-curl",
-            .root_module = curl_mod,
-        });
-        curl_example_bin.dependOn(&curl.step);
+    if (tls_dep) |dep| {
+        if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
+            const curl_mod = b.createModule(.{
+                .root_source_file = b.path("examples/curl.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "http", .module = mod },
+                    .{ .name = "stdx", .module = stdx.module("stdx") },
+                    .{ .name = "cli", .module = cli_dep.module("cli") },
+                    .{ .name = "tls", .module = dep.module("tls") },
+                    .{ .name = "tls_std", .module = dep.module("tls_std") },
+                },
+            });
+            curl_mod.link_libc = true;
+            curl_mod.linkSystemLibrary("crypto", .{});
+            const curl = b.addExecutable(.{
+                .name = "http1-curl",
+                .root_module = curl_mod,
+            });
+            curl_example_bin.dependOn(&curl.step);
 
-        const run_curl = b.addRunArtifact(curl);
-        passthruArgs(b, run_curl);
-        curl_example_run.dependOn(&run_curl.step);
+            const run_curl = b.addRunArtifact(curl);
+            passthruArgs(b, run_curl);
+            curl_example_run.dependOn(&run_curl.step);
+        }
     }
 
     // The poll example is Linux-only for now. The steps exist everywhere so
