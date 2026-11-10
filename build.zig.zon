@@ -47,8 +47,8 @@
             .lazy = true,
         },
         .stdx = .{
-            .url = "git+https://github.com/baskingspot/stdx#e47c4d0066b24d1f688707c931a60a885bc8af83",
-            .hash = "stdx-0.3.0-CcWegidUDwBcijISHtRGjWD1Cq9G4v6FPGnT0X565rRp",
+            .url = "git+https://github.com/baskingspot/stdx#7cfbca451ee4484e4c8d8d94f0498e73e4795295",
+            .hash = "stdx-0.3.0-CcWegl1ZDwC-ORF4Q4W3U0ROaZPmAEuyJLzL01AOQ35y",
         },
         .tls = .{
             .url = "https://baskingspot.dev/tls/v0.3.0.tar.gz",
