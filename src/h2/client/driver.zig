@@ -7,6 +7,7 @@
 const std = @import("std");
 const Io = std.Io;
 const assert = std.debug.assert;
+const time = @import("stdx").time;
 const Connection = @import("connection.zig").Connection;
 
 pub const Driver = struct {
@@ -38,7 +39,7 @@ pub const Driver = struct {
     /// The context remains valid for this driver's lifetime.
     pub const ReadDeadline = struct {
         context: *anyopaque,
-        set: *const fn (*anyopaque, ?i96) void,
+        set: *const fn (*anyopaque, time.OptionalTimestamp) void,
         cause: *const fn (*const anyopaque) ?anyerror,
     };
 
@@ -113,11 +114,11 @@ pub const Driver = struct {
     /// identify its timeout cause. Cancellation and other failures stay errors.
     /// A non-null reader deadline requires those hooks.
     /// A timeout without a supplied deadline is a terminal read failure.
-    pub fn read(self: *Driver, deadline_ns: ?i96) !ReadResult {
+    pub fn read(self: *Driver, deadline: time.OptionalTimestamp) !ReadResult {
         if (self.failure != null) return error.ConnectionClosed;
-        const result = self.readNext(deadline_ns) catch |err| switch (err) {
+        const result = self.readNext(deadline) catch |err| switch (err) {
             error.Timeout, error.TimedOut => {
-                if (deadline_ns != null) return .timeout;
+                if (deadline.get() != null) return .timeout;
                 self.failure = err;
                 return err;
             },
@@ -150,7 +151,7 @@ pub const Driver = struct {
         return self.wait == .socket or self.read_deadline != null;
     }
 
-    fn readNext(self: *Driver, deadline_ns: ?i96) !ReadResult {
+    fn readNext(self: *Driver, deadline: time.OptionalTimestamp) !ReadResult {
         if (self.pending_start < self.pending_end) {
             self.absorbPending();
             return .ready;
@@ -159,10 +160,10 @@ pub const Driver = struct {
         switch (self.wait) {
             .reader => {
                 const owner = self.read_deadline orelse {
-                    if (deadline_ns != null) return error.DeadlineUnsupported;
+                    if (deadline.get() != null) return error.DeadlineUnsupported;
                     return self.readPlaintext();
                 };
-                owner.set(owner.context, deadline_ns);
+                owner.set(owner.context, deadline);
                 return self.readPlaintext() catch |err| {
                     if (err == error.ReadFailed) return owner.cause(owner.context) orelse err;
                     return err;
@@ -170,7 +171,7 @@ pub const Driver = struct {
             },
             .socket => |wait| {
                 if (self.absorbBuffered()) return .ready;
-                return self.readSocket(wait.io, wait.fd, deadline_ns);
+                return self.readSocket(wait.io, wait.fd, deadline);
             },
         }
     }
@@ -205,8 +206,13 @@ pub const Driver = struct {
         return true;
     }
 
-    fn readSocket(self: *Driver, io: Io, fd: std.posix.fd_t, deadline: ?i96) !ReadResult {
-        const instant = deadline orelse {
+    fn readSocket(
+        self: *Driver,
+        io: Io,
+        fd: std.posix.fd_t,
+        deadline: time.OptionalTimestamp,
+    ) !ReadResult {
+        const instant = deadline.get() orelse {
             var data: [1][]u8 = .{self.read_buffer};
             const n = if (comptime @hasField(Io.VTable, "netRead"))
                 try io.vtable.netRead(io.userdata, fd, &data)
@@ -221,11 +227,11 @@ pub const Driver = struct {
             self.absorb(n);
             return .ready;
         };
-        const now = Io.Clock.now(.awake, io).nanoseconds;
-        if (now >= instant) return .timeout;
-        const timeout: Io.Timeout = .{ .deadline = Io.Timestamp
-            .fromNanoseconds(instant)
-            .withClock(Io.Clock.awake) };
+        const now: time.Timestamp = try .fromStd(Io.Clock.now(.awake, io));
+        if (now.compare(instant) != .lt) return .timeout;
+        const timeout: Io.Timeout = .{
+            .deadline = instant.toStd().withClock(.awake),
+        };
 
         if (comptime @hasField(Io.Operation, "net_read")) {
             return self.readSocket17(io, fd, timeout);
@@ -366,7 +372,7 @@ test "driver pending input yields before another transport read" {
     pendingSettingsDriver(&driver);
     // A driver that tried the empty reader here would report EOF and hide the
     // SETTINGS already waiting in its own buffer.
-    try testing.expectEqual(Driver.ReadResult.ready, try driver.read(null));
+    try testing.expectEqual(Driver.ReadResult.ready, try driver.read(.none));
     try testing.expect(!driver.hasPendingInput());
     _ = try conn.poll();
 }
@@ -394,11 +400,11 @@ test "driver retains input the connection did not accept" {
         .read_buffer = &read_buffer,
         .frame_buffer = &frame_buffer,
     });
-    try testing.expectEqual(Driver.ReadResult.ready, try driver.read(null));
+    try testing.expectEqual(Driver.ReadResult.ready, try driver.read(.none));
     try testing.expect(driver.hasPendingInput());
     const pending = driver.read_buffer[driver.pending_start..driver.pending_end];
     try testing.expectEqualStrings("tail", pending);
-    try testing.expectEqual(Driver.ReadResult.ready, try driver.read(null));
+    try testing.expectEqual(Driver.ReadResult.ready, try driver.read(.none));
 }
 
 test "driver timeout is an outcome without interpreting stream state" {
@@ -430,16 +436,22 @@ test "driver timeout is an outcome without interpreting stream state" {
         } },
     });
 
-    const past = Io.Clock.now(.awake, testing.io).nanoseconds - 1;
+    const past: time.OptionalTimestamp = try .init(
+        try .fromStd(Io.Clock.now(.awake, testing.io).subDuration(.fromNanoseconds(1))),
+    );
     try testing.expectEqual(Driver.ReadResult.timeout, try driver.read(past));
-    const soon = Io.Clock.now(.awake, testing.io).nanoseconds + std.time.ns_per_ms;
+    const soon: time.OptionalTimestamp = try .init(
+        try .fromStd(Io.Clock.now(.awake, testing.io).addDuration(.fromMilliseconds(1))),
+    );
     try testing.expectEqual(Driver.ReadResult.timeout, try driver.read(soon));
     try testing.expect(conn.wantsInput());
     try testing.expect(!conn.isPoisoned());
     var peer_writer = accepted.writer(testing.io, &.{});
     try peer_writer.interface.writeAll("\x00\x00\x00\x04\x00\x00\x00\x00\x00");
     try peer_writer.interface.flush();
-    const later = Io.Clock.now(.awake, testing.io).nanoseconds + std.time.ns_per_s;
+    const later: time.OptionalTimestamp = try .init(
+        try .fromStd(Io.Clock.now(.awake, testing.io).addDuration(.fromSeconds(1))),
+    );
     try testing.expectEqual(Driver.ReadResult.ready, try driver.read(later));
     _ = try conn.poll();
     try testing.expect(conn.session.settings_received);
@@ -555,7 +567,7 @@ test "driver reads a non-gRPC response with trailers" {
         .read_buffer = &read_buffer,
         .frame_buffer = &frame_buffer,
     });
-    try testing.expectEqual(Driver.ReadResult.ready, try driver.read(null));
+    try testing.expectEqual(Driver.ReadResult.ready, try driver.read(.none));
 
     var saw_head = false;
     var saw_data = false;
@@ -613,7 +625,7 @@ test "driver refuses all progress after a partial frame write fails" {
     }, true);
     writer.fail_after = null;
     try testing.expectError(error.ConnectionClosed, driver.flush());
-    try testing.expectError(error.ConnectionClosed, driver.read(null));
+    try testing.expectError(error.ConnectionClosed, driver.read(.none));
     try testing.expectEqual(written, writer.used);
 }
 
@@ -647,19 +659,19 @@ test "zero reader progress is not EOF" {
         .read_buffer = &read_buffer,
         .frame_buffer = &frame_buffer,
     });
-    try testing.expectEqual(Driver.ReadResult.ready, try driver.read(null));
+    try testing.expectEqual(Driver.ReadResult.ready, try driver.read(.none));
     try testing.expect(!driver.isClosed());
-    try testing.expectEqual(Driver.ReadResult.eof, try driver.read(null));
+    try testing.expectEqual(Driver.ReadResult.eof, try driver.read(.none));
     try testing.expect(driver.isClosed());
 }
 
 const ReadCauseProbe = struct {
-    observed: ?i96 = null,
+    observed: time.OptionalTimestamp = .none,
     read_error: anyerror,
 
-    fn set(context: *anyopaque, deadline_ns: ?i96) void {
+    fn set(context: *anyopaque, deadline: time.OptionalTimestamp) void {
         const self: *ReadCauseProbe = @ptrCast(@alignCast(context));
-        self.observed = deadline_ns;
+        self.observed = deadline;
     }
 
     fn cause(context: *const anyopaque) ?anyerror {
@@ -681,8 +693,9 @@ test "reader hooks preserve deadlines and classify recoverable and terminal fail
         error.PeerAlert,
         error.ConnectionResetByPeer,
     };
+    const armed: time.OptionalTimestamp = try .init(.fromNanoseconds(12345));
     for (failures) |failure| {
-        for ([_]?i96{ 12345, null }) |deadline_ns| {
+        for ([_]time.OptionalTimestamp{ armed, .none }) |deadline| {
             var conn: Connection = undefined;
             try conn.init(.{ .allocator = testing.allocator });
             defer conn.deinit();
@@ -695,25 +708,25 @@ test "reader hooks preserve deadlines and classify recoverable and terminal fail
                 .read_buffer = &read_buffer,
                 .frame_buffer = &frame_buffer,
             });
-            try testing.expectError(error.DeadlineUnsupported, driver.read(12345));
+            try testing.expectError(error.DeadlineUnsupported, driver.read(armed));
             var owner: ReadCauseProbe = .{ .read_error = failure };
             driver.read_deadline = .{
                 .context = &owner,
                 .set = ReadCauseProbe.set,
                 .cause = ReadCauseProbe.cause,
             };
-            const result = driver.read(deadline_ns);
+            const result = driver.read(deadline);
             switch (failure) {
-                error.Timeout, error.TimedOut => if (deadline_ns != null)
+                error.Timeout, error.TimedOut => if (deadline.get() != null)
                     try testing.expectEqual(Driver.ReadResult.timeout, try result)
                 else
                     try testing.expectError(failure, result),
                 error.WouldBlock => try testing.expectEqual(Driver.ReadResult.ready, try result),
                 else => try testing.expectError(failure, result),
             }
-            try testing.expectEqual(deadline_ns, owner.observed);
+            try testing.expectEqual(deadline, owner.observed);
             const terminal = switch (failure) {
-                error.Timeout, error.TimedOut => deadline_ns == null,
+                error.Timeout, error.TimedOut => deadline.get() == null,
                 error.Canceled,
                 error.WouldBlock,
                 error.DeadlineUnsupported,
@@ -724,7 +737,7 @@ test "reader hooks preserve deadlines and classify recoverable and terminal fail
             try testing.expectEqual(terminal, driver.isClosed());
             if (terminal) {
                 try testing.expectEqual(failure, driver.failureCause().?);
-                try testing.expectError(error.ConnectionClosed, driver.read(null));
+                try testing.expectError(error.ConnectionClosed, driver.read(.none));
                 try testing.expectError(error.ConnectionClosed, driver.flush());
             }
         }
@@ -781,13 +794,13 @@ test "untimed socket reads preserve reset and cancellation causes" {
             .frame_buffer = &frame_buffer,
             .wait = .{ .socket = .{ .io = io, .fd = -1 } },
         });
-        try testing.expectEqual(Driver.ReadResult.ready, try driver.read(null));
+        try testing.expectEqual(Driver.ReadResult.ready, try driver.read(.none));
         try testing.expectEqual(@as(usize, 0), probe.reads);
         try testing.expectEqual(@as(usize, 0), reader.bufferedLen());
         _ = try conn.poll();
         try testing.expect(conn.session.settings_received);
         const failure = if (canceled) error.Canceled else error.ConnectionResetByPeer;
-        try testing.expectError(failure, driver.read(null));
+        try testing.expectError(failure, driver.read(.none));
         try testing.expectEqual(@as(usize, 1), probe.reads);
         try testing.expectEqual(!canceled, driver.isClosed());
         if (!canceled) try testing.expectEqual(failure, driver.failureCause().?);

@@ -268,15 +268,15 @@ test "a passed deadline ends the wait and reports itself" {
     defer conn.deinit();
 
     // Nothing is in flight, so a read can only end by the deadline.
-    conn.setDeadline(0);
+    conn.setDeadline(try .init(.fromNanoseconds(0)));
     var buf: [8]u8 = undefined;
     try testing.expectError(error.ReadFailed, conn.reader().readSliceAll(&buf));
     // `Io.Reader` cannot report a timeout, so the connection remembers it.
     try testing.expect(conn.expired());
 
     // Clearing the deadline makes the connection usable again.
-    conn.setDeadline(null);
+    conn.setDeadline(.none);
     try conn.writer().writeAll("still here");
-    conn.setDeadline(0);
+    conn.setDeadline(try .init(.fromNanoseconds(0)));
     try testing.expectError(error.ReadFailed, conn.reader().readSliceAll(&buf));
 }

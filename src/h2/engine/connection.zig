@@ -19,6 +19,7 @@ const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const time = @import("stdx").time;
 
 const session_mod = @import("../session.zig");
 const Session = session_mod.Session;
@@ -81,8 +82,8 @@ const Slot = struct {
     handler_called: bool = false,
     /// `.stream`: the handler asked for another turn when something changes.
     parked: bool = false,
-    /// Absolute awake-clock nanoseconds armed by the handler, or null.
-    deadline_ns: ?i96 = null,
+    /// The handler's absolute awake-clock deadline, or `.none`.
+    deadline: time.OptionalTimestamp = .none,
     /// A response head is queued.
     response_started: bool = false,
     /// The response head and body are queued by `pumpAll`, not by the sink.
@@ -102,7 +103,7 @@ const Slot = struct {
     context: ?*anyopaque = null,
     sink: SlotSink = undefined,
     reader: SlotReader = undefined,
-    body_deadline: ?Io.Timestamp = null,
+    body_deadline: time.OptionalTimestamp = .none,
     exchange: Exchange = undefined,
 };
 
@@ -139,7 +140,7 @@ const SlotSink = struct {
         slot.response_started = true;
         // The response is under way. A handler that armed its own deadline
         // finishes it; the engine's body timeout must not reset it first.
-        slot.body_deadline = null;
+        slot.body_deadline = .none;
         slot.reply = .{ .options = options, .body = body };
     }
 
@@ -160,7 +161,7 @@ const SlotSink = struct {
         ) catch |err| return mapSession(err);
         slot.response_started = true;
         slot.headers_sent = true;
-        slot.body_deadline = null;
+        slot.body_deadline = .none;
     }
 
     fn write(ptr: *anyopaque, bytes: []const u8) common.Sink.SinkError!usize {
@@ -319,7 +320,9 @@ pub const Connection = struct {
         var at = self.head_deadline;
         for (self.slots) |*slot| {
             if (!slot.used) continue;
-            if (slot.body_deadline) |body_deadline| at = earliest(at, body_deadline);
+            if (slot.body_deadline.get()) |body_deadline| {
+                at = earliest(at, body_deadline.toStd());
+            }
         }
         return at;
     }
@@ -331,8 +334,8 @@ pub const Connection = struct {
         var at: ?Io.Timestamp = null;
         for (self.slots) |*slot| {
             if (!slot.used) continue;
-            const ns = slot.deadline_ns orelse continue;
-            const value = Io.Timestamp.fromNanoseconds(ns);
+            const wake_at = slot.deadline.get() orelse continue;
+            const value = wake_at.toStd();
             at = if (at) |current| earliest(current, value) else value;
         }
         return at;
@@ -381,7 +384,7 @@ pub const Connection = struct {
                 slot.request_complete = request.end_stream;
                 slot.handler_called = false;
                 slot.parked = false;
-                slot.deadline_ns = null;
+                slot.deadline = .none;
                 slot.response_started = false;
                 slot.reply = null;
                 slot.headers_sent = false;
@@ -393,10 +396,12 @@ pub const Connection = struct {
                 slot.reset_pending = false;
                 slot.reset_code = null;
                 slot.context = null;
-                slot.body_deadline = null;
+                slot.body_deadline = .none;
                 self.head_deadline = null;
                 if (!request.end_stream and self.body_timeout.nanoseconds > 0) {
-                    slot.body_deadline = now.addDuration(self.body_timeout);
+                    slot.body_deadline = try .init(
+                        try .fromStd(now.addDuration(self.body_timeout)),
+                    );
                 }
 
                 slot.request_head = copyHead(
@@ -525,7 +530,7 @@ pub const Connection = struct {
                 slot.received += data.bytes.len;
                 if (data.end_stream) {
                     slot.request_complete = true;
-                    slot.body_deadline = null;
+                    slot.body_deadline = .none;
                     slot.parked = false;
                 }
             },
@@ -546,7 +551,7 @@ pub const Connection = struct {
                 };
                 slot.request_complete = trailers.end_stream;
                 slot.parked = false;
-                if (trailers.end_stream) slot.body_deadline = null;
+                if (trailers.end_stream) slot.body_deadline = .none;
             },
 
             .reset => |reset| {
@@ -577,7 +582,10 @@ pub const Connection = struct {
                 if (!slot.request_complete or slot.handler_called) continue;
             } else if (slot.parked) {
                 // A parked handler waits for data, output, or its own deadline.
-                const due = if (slot.deadline_ns) |d| now.nanoseconds >= d else false;
+                const due = if (slot.deadline.get()) |wake_at|
+                    now.nanoseconds >= wake_at.nanoseconds
+                else
+                    false;
                 if (!due) continue;
             }
 
@@ -602,10 +610,13 @@ pub const Connection = struct {
             else
                 null;
 
-            const expired = if (slot.deadline_ns) |d| now.nanoseconds >= d else false;
+            const expired = if (slot.deadline.get()) |wake_at|
+                now.nanoseconds >= wake_at.nanoseconds
+            else
+                false;
             // Clearing before the call means a handler that parks without
             // re-arming cannot spin on a deadline that already passed.
-            if (expired) slot.deadline_ns = null;
+            if (expired) slot.deadline = .none;
 
             slot.exchange = .{
                 .id = index,
@@ -623,11 +634,11 @@ pub const Connection = struct {
                 .parked = false,
                 .context = slot.context,
                 .wake = if (expired) .expired else .progress,
-                .deadline_ns = slot.deadline_ns,
+                .deadline = slot.deadline,
             };
             slot.handler_called = true;
             slot.parked = false;
-            slot.deadline_ns = null;
+            slot.deadline = .none;
 
             var failed = false;
             self.handler.vtable.handle(self.handler.ptr, &slot.exchange) catch |err| {
@@ -636,7 +647,7 @@ pub const Connection = struct {
             };
             if (slot.exchange.parked) slot.parked = true;
             slot.context = slot.exchange.context;
-            slot.deadline_ns = slot.exchange.deadline_ns;
+            slot.deadline = slot.exchange.deadline;
             slot.response_started = slot.response_started or slot.exchange.response_started;
 
             if (slot.response_started or slot.response_ended or slot.reset_pending) continue;
@@ -861,7 +872,7 @@ pub const Connection = struct {
         slot.request_complete = false;
         slot.handler_called = false;
         slot.parked = false;
-        slot.deadline_ns = null;
+        slot.deadline = .none;
         slot.response_started = false;
         slot.reply = null;
         slot.headers_sent = false;
@@ -873,7 +884,7 @@ pub const Connection = struct {
         slot.reset_pending = false;
         slot.reset_code = null;
         slot.context = null;
-        slot.body_deadline = null;
+        slot.body_deadline = .none;
         slot.exchange = undefined;
     }
 
@@ -1181,7 +1192,7 @@ test "the stream engine answers twice before the request ends" {
 
 /// Arms a future deadline on its first turn and reports how it was woken.
 const DeadlineApp = struct {
-    deadline_ns: i96 = 1_000_000_000,
+    deadline: time.Timestamp = .fromNanoseconds(1_000_000_000),
     expiries: usize = 0,
     turns: usize = 0,
 
@@ -1205,7 +1216,7 @@ const DeadlineApp = struct {
             });
         }
         if (!exchange.response_started and self.expiries == 0) {
-            exchange.setDeadline(self.deadline_ns);
+            exchange.setDeadline(try .init(self.deadline));
         }
         exchange.waitForProgress();
     }
@@ -1467,7 +1478,7 @@ test "a zero-credit write keeps its tail and resumes on WINDOW_UPDATE" {
 const ResidentMemoryApp = struct {
     held: []const u8 = &.{},
     expected_byte: u8 = 0,
-    deadline_ns: i96 = 0,
+    deadline: time.Timestamp = .zero,
     received: usize = 0,
     expiries: usize = 0,
     ended: bool = false,
@@ -1500,7 +1511,7 @@ const ResidentMemoryApp = struct {
         };
         self.held = chunk.data;
         self.received += chunk.data.len;
-        exchange.setDeadline(self.deadline_ns);
+        exchange.setDeadline(try .init(self.deadline));
         exchange.waitForProgress();
     }
 };
@@ -1542,8 +1553,8 @@ test "resident memory plateaus across consume, park, and deadline" {
     var warm_live: usize = 0;
     var warm_capacity: usize = 0;
     for (0..32) |round| {
-        const now_ns: i96 = @intCast(round * 10);
-        app.deadline_ns = now_ns + 5;
+        const now_ns: u64 = @intCast(round * 10);
+        app.deadline = .fromNanoseconds(now_ns + 5);
         app.expected_byte = @truncate(round);
         const bytes: [4096]u8 = @splat(app.expected_byte);
         const accepted = try client.submitData(testing.allocator, id, &bytes, false);
@@ -1552,7 +1563,7 @@ test "resident memory plateaus across consume, park, and deadline" {
         try testing.expectEqual((round + 1) * bytes.len, app.received);
         try testing.expectEqual(bytes.len, app.held.len);
 
-        _ = try conn.drive(Io.Timestamp.fromNanoseconds(app.deadline_ns));
+        _ = try conn.drive(app.deadline.toStd());
         try testing.expectEqual(round + 1, app.expiries);
         try feedSession(&conn, &client);
         while (try client.nextEvent(testing.allocator)) |_| {}

@@ -36,6 +36,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const time = @import("stdx").time;
 
 const Header = @import("../../header.zig").Header;
 const Headers = @import("../../header.zig").Headers;
@@ -134,9 +135,9 @@ pub const Exchange = struct {
     context: ?*anyopaque,
     /// Why the engine invoked the handler this turn.
     wake: WakeReason,
-    /// Absolute awake-clock nanoseconds the handler armed, or null. On expiry
-    /// the engine clears it and invokes again with `wake = .expired`.
-    deadline_ns: ?i96,
+    /// The handler's absolute awake-clock deadline, or `.none`. On expiry the
+    /// engine clears it and invokes again with `wake = .expired`.
+    deadline: time.OptionalTimestamp,
 
     pub const Response = struct {
         options: ResponseOptions,
@@ -244,10 +245,10 @@ pub const Exchange = struct {
         return self.sink.vtable.reset(self.sink.ptr, code);
     }
 
-    /// Arm an absolute awake-clock deadline, or clear it with null. On expiry
+    /// Arm an absolute awake-clock deadline, or clear it with `.none`. On expiry
     /// the engine invokes the handler again with `wake = .expired`.
-    pub fn setDeadline(self: *Exchange, absolute_ns: ?i96) void {
-        self.deadline_ns = absolute_ns;
+    pub fn setDeadline(self: *Exchange, deadline: time.OptionalTimestamp) void {
+        self.deadline = deadline;
     }
 
     /// End this turn without a response. The engine calls `handle` again when

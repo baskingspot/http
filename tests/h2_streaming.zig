@@ -552,7 +552,7 @@ const DeadlineApp = struct {
                 });
                 self.started = true;
                 // Already in the past: the engine sees it on its next turn.
-                exchange.setDeadline(0);
+                exchange.setDeadline(try .init(.fromNanoseconds(0)));
                 return exchange.waitForProgress();
             },
         }

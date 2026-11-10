@@ -830,12 +830,12 @@ stream, including all trailer fields.
 
 `h2.client.Driver` owns the blocking byte pump around that connection. Its
 `flush` completes successful short writes and flushes complete frames, while
-`read(deadline_ns)` retains any input the connection did not accept. A call that
-absorbs retained input returns `.ready` before reading again, so the caller can
-poll. `.eof` and `.timeout` report transport outcomes; they do not cancel a
-stream or select an application error.
+`read(deadline)` takes an `stdx.time.OptionalTimestamp` and retains input the
+connection did not accept. A call that absorbs retained input returns `.ready`
+before reading again, so the caller can poll. `.eof` and `.timeout` report
+transport outcomes; they do not cancel a stream or select an application error.
 
-The deadline is absolute awake-monotonic nanoseconds. `Driver.Wait.socket`
+The deadline is an absolute awake-monotonic timestamp. Use `.none` for no deadline. `Driver.Wait.socket`
 reads raw socket bytes and requires an unbuffered raw reader.
 A TLS driver uses `.wait = .reader` and
 `.read_deadline = connection.readDeadline()` from `http_tls.client.Connection`.
@@ -996,8 +996,8 @@ handler asks for the next chunk, so a handler that stops reading stops the
 peer. `write` returns the accepted count and zero when the output budget is
 full; a WINDOW_UPDATE calls the handler again. `exchange.context` is an opaque
 `?*anyopaque` the engine carries across turns and never reads. Arm
-`exchange.setDeadline(ns)` to be called again with `exchange.wake == .expired`
-when the time passes; nothing else has to happen on the connection for that to
+`exchange.setDeadline(try .init(timestamp))` to be called again with
+`exchange.wake == .expired` when the time passes; nothing else has to happen on the connection for that to
 fire. `resetStream`
 is legal at any point. A peer reset makes the next read return
 `error.Canceled` and the unread balance returns to the connection window.

@@ -47,8 +47,8 @@
             .lazy = true,
         },
         .stdx = .{
-            .url = "https://baskingspot.dev/stdx/v0.3.0.tar.gz",
-            .hash = "stdx-0.3.0-CcWego4nDwC5PxPd4F-nlcOWXxAVCZ6MDI5f3YNVNSO7",
+            .url = "git+https://github.com/baskingspot/stdx#e47c4d0066b24d1f688707c931a60a885bc8af83",
+            .hash = "stdx-0.3.0-CcWegidUDwBcijISHtRGjWD1Cq9G4v6FPGnT0X565rRp",
         },
         .tls = .{
             .url = "https://baskingspot.dev/tls/v0.3.0.tar.gz",

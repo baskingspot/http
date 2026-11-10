@@ -35,7 +35,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/http_tls.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "http", .module = mod }},
+        .imports = &.{
+            .{ .name = "http", .module = mod },
+            .{ .name = "stdx", .module = stdx.module("stdx") },
+        },
     }) else null;
     if (http_tls_mod) |tls_mod| {
         tls_mod.link_libc = true;
@@ -264,6 +267,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "http", .module = mod },
+                .{ .name = "stdx", .module = stdx.module("stdx") },
                 .{ .name = "engine_options", .module = readiness_options.createModule() },
             },
         });
@@ -284,6 +288,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "http", .module = mod },
+                    .{ .name = "stdx", .module = stdx.module("stdx") },
                     .{ .name = "engine_options", .module = epoll_options.createModule() },
                 },
             });

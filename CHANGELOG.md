@@ -5,6 +5,11 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The h1 start line and field lines accept LF as a line end as well as CRLF, as RFC 9112 §2.2 permits. A bare CR is still `error.Invalid`, and chunk framing still requires CRLF.
+- `h2.client.Driver.read`, `ReadDeadline.set`, `Exchange.setDeadline`, and `http_tls.client.Connection.setDeadline` take `stdx.time.OptionalTimestamp`. Use `.none` to clear a deadline. `http_tls.client.Connection.Options.deadline` replaces `deadline_ns`. Per-stream deadlines store one `u64` instead of an optional `i96`.
+
 ## [0.3.0] - 2026-11-10
 
 ### Added

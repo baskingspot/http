@@ -8,6 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
 const Io = std.Io;
+const time = @import("stdx").time;
 
 const http = @import("http");
 const engine_options = @import("engine_options");
@@ -327,7 +328,7 @@ test "stop sends GOAWAY and drains the connection" {
 /// can only come from the poll timeout.
 const DeadlineApp = struct {
     io: Io,
-    wake_at: ?i96 = null,
+    wake_at: time.OptionalTimestamp = .none,
     turns: usize = 0,
     expiries: usize = 0,
 
@@ -352,9 +353,10 @@ const DeadlineApp = struct {
                 .{ .name = "x-deadline", .value = "expired" },
             });
         }
-        if (self.wake_at == null) {
-            self.wake_at = Io.Clock.awake.now(self.io).nanoseconds +
-                100 * std.time.ns_per_ms;
+        if (self.wake_at.get() == null) {
+            self.wake_at = try .init(try .fromStd(
+                Io.Clock.awake.now(self.io).addDuration(.fromMilliseconds(100)),
+            ));
             exchange.setDeadline(self.wake_at);
         }
         exchange.waitForProgress();

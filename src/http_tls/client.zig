@@ -11,6 +11,7 @@ const mem = std.mem;
 const tls = @import("tls");
 const tls_nonblocking = @import("tls_nonblocking");
 const http = @import("http");
+const time = @import("stdx").time;
 const Driver = http.h2.client.Driver;
 
 const SocketClient = tls_nonblocking.SocketClient;
@@ -47,7 +48,7 @@ pub const Connection = struct {
         /// The one ALPN protocol to offer and require.
         alpn: []const u8 = "h2",
         /// Absolute monotonic deadline for the handshake and subsequent reads.
-        deadline_ns: ?i96 = null,
+        deadline: time.OptionalTimestamp = .none,
     };
 
     /// Initialize in the final location. The socket stays caller-owned on
@@ -72,7 +73,7 @@ pub const Connection = struct {
             .host_name = options.host_name,
             .now_sec = options.now_sec,
             .alpn = &self.alpn_protocols,
-            .deadline_ns = options.deadline_ns,
+            .deadline_ns = if (options.deadline.get()) |deadline| deadline.nanoseconds else null,
         });
 
         const selected = self.inner.selectedAlpn() orelse return error.WrongAlpn;
@@ -111,8 +112,10 @@ pub const Connection = struct {
 
     /// Set the absolute monotonic deadline for subsequent read waits and clear
     /// the previous expiry. Socket writes are not deadline-bounded.
-    pub fn setDeadline(self: *Connection, absolute_ns: ?i96) void {
-        self.inner.setDeadline(absolute_ns);
+    pub fn setDeadline(self: *Connection, deadline: time.OptionalTimestamp) void {
+        // The released TLS adapter retains an optional i96. Widening a compact
+        // nonnegative timestamp is exact, and its public unit stays on stdx.
+        self.inner.setDeadline(if (deadline.get()) |at| at.nanoseconds else null);
     }
 
     /// True only when the latest deadline failure was `TimedOut`.
@@ -125,9 +128,9 @@ pub const Connection = struct {
         return .{ .context = self, .set = setReadDeadline, .cause = readCause };
     }
 
-    fn setReadDeadline(context: *anyopaque, deadline_ns: ?i96) void {
+    fn setReadDeadline(context: *anyopaque, deadline: time.OptionalTimestamp) void {
         const self: *Connection = @ptrCast(@alignCast(context));
-        self.setDeadline(deadline_ns);
+        self.setDeadline(deadline);
     }
 
     fn readCause(context: *const anyopaque) ?anyerror {
