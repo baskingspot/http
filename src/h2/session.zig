@@ -117,7 +117,9 @@ pub const Options = struct {
     header_table_size: u32 = 4096,
     /// Our stream receive window, advertised in SETTINGS.
     initial_window_size: u32 = 65_535,
-    /// Our decoded field-section limit, advertised in SETTINGS.
+    /// Our decoded field-section limit, advertised in SETTINGS. The session
+    /// holds any section within it. A larger one still updates the HPACK
+    /// table, then resets its stream with ENHANCE_YOUR_CALM.
     max_header_list_size: u32 = 16 * 1024,
     /// The assembled wire block we accept.
     max_in_header_block: u32 = 32 * 1024,
@@ -375,7 +377,14 @@ pub const Session = struct {
         errdefer allocator.free(send_block);
         const frame_buf = try allocator.alloc(u8, 9 + out_frame_payload);
         errdefer allocator.free(frame_buf);
-        const field_bytes = try allocator.alloc(u8, options.max_header_list_size);
+        // The decode storage holds any field section within the limit, so
+        // running out of it means the section is over the limit. It also
+        // holds the largest decoder table entry, which the decoder needs to
+        // keep the table in step when a section does not fit.
+        const field_bytes = try allocator.alloc(
+            u8,
+            @max(options.max_header_list_size, options.header_table_size),
+        );
         errdefer allocator.free(field_bytes);
         const max_fields = fieldCount(options.max_header_list_size);
         const field_headers = try allocator.alloc(Header, max_fields);
@@ -980,22 +989,21 @@ pub const Session = struct {
         end_stream: bool,
         discard: ?frame.ErrorCode,
     ) Error!?Event {
-        const fields = self.decoder.decode(
+        // Running out of the decode storage means the section is over the
+        // limit (see `init`). The decoder still works through the rest of the
+        // block, so its table stays in step and only this stream fails, as
+        // for a section over the limit that fits (RFC 9113 §10.5.1).
+        const decoded: ?Headers = self.decoder.decode(
             block,
             self.field_headers,
             self.field_bytes,
-        ) catch |err| {
-            return switch (err) {
-                error.TooManyHeaders, error.OutputTooSmall => self.failStream(
-                    allocator,
-                    id,
-                    .enhance_your_calm,
-                ),
-                else => self.connectionError(allocator, .compression_error),
-            };
+        ) catch |err| switch (err) {
+            error.TooManyHeaders, error.OutputTooSmall => null,
+            else => return self.connectionError(allocator, .compression_error),
         };
 
         if (discard) |code| return self.failStream(allocator, id, code);
+        const fields = decoded orelse return self.failStream(allocator, id, .enhance_your_calm);
 
         if (self.local.max_header_list_size) |limit| {
             var list_size: usize = 0;
@@ -1300,7 +1308,8 @@ pub const Session = struct {
             return error.SettingsTooLarge;
         }
         if (next.max_header_list_size) |limit| {
-            if (limit > self.field_bytes.len) return error.SettingsTooLarge;
+            // The decode storage holds a section within the limit `init` had.
+            if (limit > self.options.max_header_list_size) return error.SettingsTooLarge;
         }
         if (next.max_concurrent_streams) |limit| {
             if (limit > self.options.max_streams) return error.SettingsTooLarge;
@@ -1596,9 +1605,10 @@ fn headerFrameCount(n: usize) usize {
     return (n + out_frame_payload - 1) / out_frame_payload;
 }
 
+/// More fields than a section within the limit has: each costs at least 32
+/// bytes (RFC 9113 §6.5.2).
 fn fieldCount(max_header_list_size: u32) usize {
-    const count = @as(usize, max_header_list_size) / 32 + 1;
-    return @max(8, @min(count, 1024));
+    return @max(8, @as(usize, max_header_list_size) / 32 + 1);
 }
 
 fn validateOptions(options: Options) Error!void {
@@ -2247,6 +2257,248 @@ test "a late HEADERS on a locally reset stream still updates the HPACK table" {
 
 test "a late HEADERS and CONTINUATION on a reset stream still update the HPACK table" {
     try expectLateTrailersKeepTableInStep(20, 1000);
+}
+
+/// `count` fields, `x-field-N` with a run of one letter, each its own dynamic
+/// table entry.
+const TestFields = struct {
+    names: [][16]u8,
+    values: []u8,
+    items: []Header,
+
+    fn init(allocator: Allocator, count: usize, value_len: usize) !TestFields {
+        const names = try allocator.alloc([16]u8, count);
+        errdefer allocator.free(names);
+        const values = try allocator.alloc(u8, count * value_len);
+        errdefer allocator.free(values);
+        const items = try allocator.alloc(Header, count);
+        for (items, names, 0..) |*item, *name, index| {
+            const value = values[index * value_len ..][0..value_len];
+            @memset(value, 'a' + @as(u8, @intCast(index % 26)));
+            item.* = .{
+                .name = std.fmt.bufPrint(name, "x-field-{d}", .{index}) catch unreachable,
+                .value = value,
+            };
+        }
+        return .{ .names = names, .values = values, .items = items };
+    }
+
+    fn deinit(self: *TestFields, allocator: Allocator) void {
+        allocator.free(self.items);
+        allocator.free(self.values);
+        allocator.free(self.names);
+        self.* = undefined;
+    }
+};
+
+/// Open two client streams and give each a response head, so the client
+/// takes trailers on both.
+fn openTwoStreams(client: *Session, server: *Session, allocator: Allocator) ![2]u31 {
+    try handshake(client, server, allocator);
+    const first = try client.submitRequest(allocator, &request_fields, true);
+    const second = try client.submitRequest(allocator, &request_fields, true);
+    try transfer(client, server);
+    try drain(server, allocator);
+    try server.submitResponse(allocator, first, .{ .status = .ok }, false);
+    try server.submitResponse(allocator, second, .{ .status = .ok }, false);
+    try transfer(server, client);
+    try drain(client, allocator);
+    return .{ first, second };
+}
+
+/// Encode `fields` on the server's HPACK encoder and hand the block to the
+/// client as trailers: HEADERS with END_STREAM, then CONTINUATION frames, no
+/// fragment over `fragment` bytes. Returns the block.
+fn feedTrailers(
+    server: *Session,
+    client: *Session,
+    id: u31,
+    fields: []const Header,
+    fragment: usize,
+) ![]const u8 {
+    const block = try server.encoder.encode(fields, server.send_block);
+    var buf: [9 + out_frame_payload]u8 = undefined;
+    var offset: usize = 0;
+    while (true) {
+        const len = @min(fragment, block.len - offset);
+        var flags: u8 = 0;
+        if (offset == 0) flags |= frame.flags.end_stream;
+        if (offset + len == block.len) flags |= frame.flags.end_headers;
+        var writer = frame.Writer.init(&buf);
+        try writer.begin(if (offset == 0) .headers else .continuation, flags, id);
+        try writer.bytes(block[offset..][0..len]);
+        writer.end();
+        try testing.expectEqual(writer.written().len, client.receive(writer.written()));
+        offset += len;
+        if (offset == block.len) return block;
+        // The block is still open, so the frame makes no event.
+        try testing.expect((try client.nextEvent(testing.allocator)) == null);
+    }
+}
+
+/// The code of the next RST_STREAM the session queued for `id`.
+fn nextReset(session: *Session, id: u31) !frame.ErrorCode {
+    var buf: [9 + out_frame_payload]u8 = undefined;
+    while (true) {
+        const n = try session.sendFrame(&buf);
+        if (n == 0) return error.TestExpectedReset;
+        const parsed = try frame.parse(buf[0..n], frame.default_max_frame_size);
+        if (parsed.header.type != .rst_stream or parsed.header.stream_id != id) continue;
+        return (try frame.body(parsed.header, parsed.payload)).rst_stream.error_code;
+    }
+}
+
+/// Send the last of `fields` again on `id`. The server's encoder sends it as
+/// index 62, the newest dynamic entry, so the client decodes the right field
+/// only if its table matches the encoder's.
+fn expectLastFieldIndexed(
+    server: *Session,
+    client: *Session,
+    id: u31,
+    fields: []const Header,
+) !void {
+    const last = fields[fields.len - 1 ..];
+    const block = try feedTrailers(server, client, id, last, out_frame_payload);
+    try testing.expectEqualSlices(u8, "\xbe", block);
+    switch ((try client.nextEvent(testing.allocator)).?) {
+        .trailers => |t| {
+            try testing.expectEqual(id, t.stream_id);
+            try testing.expectEqual(@as(usize, 1), t.headers.items.len);
+            try testing.expectEqualStrings(last[0].name, t.headers.items[0].name);
+            try testing.expectEqualStrings(last[0].value, t.headers.items[0].value);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(State.open, client.state);
+}
+
+/// SETTINGS_MAX_HEADER_LIST_SIZE is advisory (RFC 9113 §6.5.2), and a larger
+/// field block must still be processed (§10.5.1). Whether the section runs
+/// out of the decode storage or only exceeds the limit, the client decodes
+/// the whole block, resets that one stream with ENHANCE_YOUR_CALM, and the
+/// next block decodes against the table the server's encoder has.
+fn expectOversizedTrailersReset(
+    client_options: Options,
+    field_count: usize,
+    value_len: usize,
+    fragment: usize,
+) !void {
+    const allocator = testing.allocator;
+    var client = try Session.init(allocator, client_options);
+    defer client.deinit(allocator);
+    var server = try Session.init(allocator, .{
+        .role = .server,
+        .max_send_header_block = 64 * 1024,
+    });
+    defer server.deinit(allocator);
+    // Raw strings, so the block size and the decoded size are exact.
+    server.encoder.huffman = false;
+    const ids = try openTwoStreams(&client, &server, allocator);
+
+    var fields = try TestFields.init(allocator, field_count, value_len);
+    defer fields.deinit(allocator);
+    _ = try feedTrailers(&server, &client, ids[0], fields.items, fragment);
+    switch ((try client.nextEvent(allocator)).?) {
+        .reset => |reset| {
+            try testing.expectEqual(ids[0], reset.stream_id);
+            try testing.expectEqual(frame.ErrorCode.enhance_your_calm, reset.code);
+            try testing.expectEqual(Origin.local, reset.origin);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try expectLastFieldIndexed(&server, &client, ids[1], fields.items);
+    try testing.expectEqual(frame.ErrorCode.enhance_your_calm, try nextReset(&client, ids[0]));
+}
+
+test "a field section that runs out of decode bytes resets one stream and keeps the HPACK table" {
+    // 20 fields of about 1,010 bytes outgrow the 16 KiB of decode bytes at
+    // the seventeenth; the block spans HEADERS and two CONTINUATION frames.
+    try expectOversizedTrailersReset(.{ .role = .client }, 20, 1000, 8192);
+}
+
+test "a field section that runs out of field slots resets one stream and keeps the HPACK table" {
+    // A 256-byte limit gives nine slots, and twelve short fields run past
+    // them. Seven-byte fragments split fields across CONTINUATION frames.
+    try expectOversizedTrailersReset(
+        .{ .role = .client, .max_header_list_size = 256 },
+        12,
+        3,
+        7,
+    );
+}
+
+test "a field section over the advertised limit that fits the storage resets one stream" {
+    // 20 fields count 1,030 bytes against a 1,024-byte limit, and fit both
+    // the field slots and the bytes: the limit check after decoding resets.
+    try expectOversizedTrailersReset(
+        .{ .role = .client, .max_header_list_size = 1024 },
+        20,
+        10,
+        out_frame_payload,
+    );
+}
+
+test "a field section within a large advertised limit is never cut short" {
+    const allocator = testing.allocator;
+    var client = try Session.init(allocator, .{
+        .role = .client,
+        .max_header_list_size = 64 * 1024,
+    });
+    defer client.deinit(allocator);
+    var server = try Session.init(allocator, .{
+        .role = .server,
+        .max_send_header_block = 64 * 1024,
+    });
+    defer server.deinit(allocator);
+    server.encoder.huffman = false;
+    const ids = try openTwoStreams(&client, &server, allocator);
+
+    // 1,300 fields count 59,990 bytes against the 65,536-byte limit: more
+    // fields than a fixed cap of 1,024 slots would hold.
+    var fields = try TestFields.init(allocator, 1300, 3);
+    defer fields.deinit(allocator);
+    _ = try feedTrailers(&server, &client, ids[0], fields.items, out_frame_payload);
+    switch ((try client.nextEvent(allocator)).?) {
+        .trailers => |t| {
+            try testing.expectEqual(ids[0], t.stream_id);
+            try testing.expectEqual(fields.items.len, t.headers.items.len);
+            for (fields.items, t.headers.items) |want, got| {
+                try testing.expectEqualStrings(want.name, got.name);
+                try testing.expectEqualStrings(want.value, got.value);
+            }
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try expectLastFieldIndexed(&server, &client, ids[1], fields.items);
+}
+
+test "a late HEADERS that runs out of decode bytes on a reset stream keeps the HPACK table" {
+    const allocator = testing.allocator;
+    var client = try Session.init(allocator, .{ .role = .client });
+    defer client.deinit(allocator);
+    var server = try Session.init(allocator, .{
+        .role = .server,
+        .max_send_header_block = 64 * 1024,
+    });
+    defer server.deinit(allocator);
+    server.encoder.huffman = false;
+    const ids = try openTwoStreams(&client, &server, allocator);
+
+    // The server has not seen this reset when it sends the trailers.
+    try client.submitReset(allocator, ids[0], .cancel);
+    try testing.expectEqual(frame.ErrorCode.cancel, try nextReset(&client, ids[0]));
+
+    var fields = try TestFields.init(allocator, 20, 1000);
+    defer fields.deinit(allocator);
+    _ = try feedTrailers(&server, &client, ids[0], fields.items, 8192);
+    // The stream is gone, so its reset makes no event.
+    try testing.expect((try client.nextEvent(allocator)) == null);
+
+    try expectLastFieldIndexed(&server, &client, ids[1], fields.items);
+    // The stream was refused before its block was decoded, and keeps that
+    // code however large the block is.
+    try testing.expectEqual(frame.ErrorCode.stream_closed, try nextReset(&client, ids[0]));
 }
 
 test "a PRIORITY self-dependency is a stream error" {

@@ -8,6 +8,7 @@ All notable changes to http are recorded here. The format follows
 ### Fixed
 
 - h2 `Session` decodes the field block of a HEADERS it rejects, including a late HEADERS or trailers on a stream it already reset, and across CONTINUATION, before it fails the stream (RFC 9113 §4.3). Dropping the block left the HPACK dynamic table behind the peer's, so a later block on another stream decoded wrong fields or closed the connection with a compression error.
+- `hpack.Decoder` returns the new `error.Desynchronized` for every block after one that ended early or was invalid, instead of decoding it against a table that no longer matches the peer's. A `TooManyHeaders` or `OutputTooSmall` error leaves the decoder usable only when the whole block was read with the table in step, which needs `out_bytes` to hold the largest table entry; with less, it ends the block early and poisons the decoder. h2 `Session` sizes its decode storage to hold the larger of `max_header_list_size` and `header_table_size`.
 
 ### Changed
 

@@ -371,6 +371,21 @@ const canonical: [257]u9 = blk: {
 
 /// Decode `encoded` into `out`, returning the number of bytes written.
 pub fn decode(encoded: []const u8, out: []u8) Error!usize {
+    return walk(true, encoded, out);
+}
+
+/// The number of bytes `encoded` decodes to, checked exactly as `decode`
+/// checks it, without writing them anywhere.
+pub fn decodedLen(encoded: []const u8) error{InvalidCode}!usize {
+    return walk(false, encoded, &.{}) catch |err| switch (err) {
+        error.InvalidCode => error.InvalidCode,
+        error.NoSpace => unreachable,
+    };
+}
+
+/// The decoding loop. Without `write` it only counts the symbols, so it never
+/// runs out of space.
+fn walk(comptime write: bool, encoded: []const u8, out: []u8) Error!usize {
     var bits: Bits = .{ .bytes = .init(encoded) };
     var written: usize = 0;
 
@@ -382,8 +397,10 @@ pub fn decode(encoded: []const u8, out: []u8) Error!usize {
         if (bits.len >= 8) {
             const short = root[@intCast(bits.peek(8))];
             if (short.len != 0) {
-                if (written == out.len) return error.NoSpace;
-                out[written] = @intCast(short.symbol);
+                if (write) {
+                    if (written == out.len) return error.NoSpace;
+                    out[written] = @intCast(short.symbol);
+                }
                 written += 1;
                 bits.drop(short.len);
                 continue;
@@ -397,8 +414,10 @@ pub fn decode(encoded: []const u8, out: []u8) Error!usize {
         const found = scan(bits);
         if (found) |at| {
             if (at.symbol == eos) return error.InvalidCode;
-            if (written == out.len) return error.NoSpace;
-            out[written] = @intCast(at.symbol);
+            if (write) {
+                if (written == out.len) return error.NoSpace;
+                out[written] = @intCast(at.symbol);
+            }
             written += 1;
             bits.drop(at.len);
             continue;
@@ -623,6 +642,24 @@ test "encode refuses a short destination" {
     try testing.expectError(error.NoSpace, encode("www.example.com", &out));
 }
 
+test "decodedLen counts what decode writes and rejects what it rejects (RFC 7541 §5.2)" {
+    var src: [256]u8 = undefined;
+    for (0..256) |byte| src[byte] = @intCast(byte);
+    var encoded: [1024]u8 = undefined;
+    const n = try encode(&src, &encoded);
+    try testing.expectEqual(@as(usize, 256), try decodedLen(encoded[0..n]));
+    try testing.expectEqual(@as(usize, 0), try decodedLen(""));
+
+    // EOS, padding past seven bits, and padding that is not EOS's prefix.
+    try testing.expectError(error.InvalidCode, decodedLen("\xff\xff\xff\xff"));
+    try testing.expectError(error.InvalidCode, decodedLen("\xff"));
+    try testing.expectError(error.InvalidCode, decodedLen("\x00"));
+    // Three '0' codes, then a zero bit of padding: decode runs out of room
+    // first, and the length check still sees the bad padding.
+    try testing.expectError(error.NoSpace, decode("\x00\x00", &.{}));
+    try testing.expectError(error.InvalidCode, decodedLen("\x00\x00"));
+}
+
 test "fuzz encoding round-trips" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *testing.Smith) anyerror!void {
@@ -647,9 +684,13 @@ test "fuzz decoding arbitrary bytes never overruns" {
             const text = src[0..smith.slice(&src)];
 
             var decoded: [256]u8 = undefined;
-            const m = decode(text, &decoded) catch return;
+            const m = decode(text, &decoded) catch {
+                try testing.expectError(error.InvalidCode, decodedLen(text));
+                return;
+            };
             // The shortest code is five bits, so the expansion is at most 8/5.
             try testing.expect(m <= text.len * 8 / 5 + 1);
+            try testing.expectEqual(m, try decodedLen(text));
         }
     }.run, .{
         .corpus = &.{
