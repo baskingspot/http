@@ -5,6 +5,10 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- h2 `Session` decodes the field block of a HEADERS it rejects, including a late HEADERS or trailers on a stream it already reset, and across CONTINUATION, before it fails the stream (RFC 9113 §4.3). Dropping the block left the HPACK dynamic table behind the peer's, so a later block on another stream decoded wrong fields or closed the connection with a compression error.
+
 ### Changed
 
 - The h1 start line and field lines accept LF as a line end as well as CRLF, as RFC 9112 §2.2 permits. A bare CR is still `error.Invalid`, and chunk framing still requires CRLF.

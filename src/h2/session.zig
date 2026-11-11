@@ -169,6 +169,9 @@ const Pending = struct {
     stream_id: u31,
     kind: EventKind,
     end_stream: bool,
+    /// Set when the head is already rejected: the block is still decoded so
+    /// the HPACK table stays in step, then the stream fails with this code.
+    discard: ?frame.ErrorCode = null,
 };
 
 const Closed = struct {
@@ -795,20 +798,22 @@ pub const Session = struct {
 
         if (headers_frame.priority) |priority| {
             if (priority.dependency == id) {
-                return self.failStream(allocator, id, .protocol_error);
+                return self.discardHeaders(allocator, header, headers_frame, .protocol_error);
             }
         }
 
         var state = self.streams.getPtr(id);
         if (state == null) {
             if (self.closedReason(id)) |reset| {
-                if (reset) return self.failStream(allocator, id, .stream_closed);
+                if (reset) {
+                    return self.discardHeaders(allocator, header, headers_frame, .stream_closed);
+                }
                 return self.connectionError(allocator, .stream_closed);
             }
             const local_parity: u31 = if (self.options.role == .client) 1 else 0;
             if (id & 1 == local_parity) {
                 if (id < self.ids.local_next) {
-                    return self.failStream(allocator, id, .stream_closed);
+                    return self.discardHeaders(allocator, header, headers_frame, .stream_closed);
                 }
                 return self.connectionError(allocator, .protocol_error);
             }
@@ -854,16 +859,17 @@ pub const Session = struct {
         else
             .response;
         if (kind == .trailers and !end_stream) {
-            return self.failStream(allocator, id, .protocol_error);
+            return self.discardHeaders(allocator, header, headers_frame, .protocol_error);
         }
         if (kind != .trailers) tracked.recv_head = true;
 
         tracked.state = stream.transition(tracked.state, .remote, .headers) catch |err| {
             return switch (err) {
                 error.IdleStream => self.connectionError(allocator, .protocol_error),
-                error.InvalidTransition => self.failStream(
+                error.InvalidTransition => self.discardHeaders(
                     allocator,
-                    id,
+                    header,
+                    headers_frame,
                     if (tracked.state == .half_closed_remote)
                         .stream_closed
                     else
@@ -875,10 +881,37 @@ pub const Session = struct {
 
         if (end_stream) {
             tracked.state = stream.transition(tracked.state, .remote, .end_stream) catch {
-                return self.failStream(allocator, id, .protocol_error);
+                return self.discardHeaders(allocator, header, headers_frame, .protocol_error);
             };
         }
 
+        return self.startBlock(allocator, header, headers_frame, kind, end_stream, null);
+    }
+
+    /// A rejected HEADERS still carries a field block. RFC 9113 §4.3 requires
+    /// the decoder to process it, or the peer's dynamic table updates are lost
+    /// and every later block decodes wrongly. The stream error follows the
+    /// decode.
+    fn discardHeaders(
+        self: *Session,
+        allocator: Allocator,
+        header: frame.Header,
+        headers_frame: frame.Headers,
+        code: frame.ErrorCode,
+    ) Error!?Event {
+        return self.startBlock(allocator, header, headers_frame, .request, false, code);
+    }
+
+    fn startBlock(
+        self: *Session,
+        allocator: Allocator,
+        header: frame.Header,
+        headers_frame: frame.Headers,
+        kind: EventKind,
+        end_stream: bool,
+        discard: ?frame.ErrorCode,
+    ) Error!?Event {
+        const id = header.stream_id;
         const block = self.block.start(
             id,
             headers_frame.block,
@@ -890,9 +923,14 @@ pub const Session = struct {
         };
 
         if (block) |complete| {
-            return self.processBlock(allocator, id, complete, kind, end_stream);
+            return self.processBlock(allocator, id, complete, kind, end_stream, discard);
         }
-        self.pending = .{ .stream_id = id, .kind = kind, .end_stream = end_stream };
+        self.pending = .{
+            .stream_id = id,
+            .kind = kind,
+            .end_stream = end_stream,
+            .discard = discard,
+        };
         return null;
     }
 
@@ -927,6 +965,7 @@ pub const Session = struct {
                 complete,
                 pending.kind,
                 pending.end_stream,
+                pending.discard,
             );
         }
         return null;
@@ -939,6 +978,7 @@ pub const Session = struct {
         block: []const u8,
         kind: EventKind,
         end_stream: bool,
+        discard: ?frame.ErrorCode,
     ) Error!?Event {
         const fields = self.decoder.decode(
             block,
@@ -954,6 +994,8 @@ pub const Session = struct {
                 else => self.connectionError(allocator, .compression_error),
             };
         };
+
+        if (discard) |code| return self.failStream(allocator, id, code);
 
         if (self.local.max_header_list_size) |limit| {
             var list_size: usize = 0;
@@ -2130,6 +2172,81 @@ test "a reset stream rejects HEADERS with STREAM_CLOSED" {
     const body = try frame.body(parsed.header, parsed.payload);
     try testing.expectEqual(frame.FrameType.rst_stream, parsed.header.type);
     try testing.expectEqual(frame.ErrorCode.stream_closed, body.rst_stream.error_code);
+}
+
+/// A peer that has not yet seen our RST_STREAM keeps sending on the stream.
+/// RFC 9113 §4.3 still requires the field block to reach the HPACK decoder, so
+/// the next block on another stream, which references the dynamic table
+/// entries the discarded block inserted, decodes correctly.
+fn expectLateTrailersKeepTableInStep(field_count: usize, value_len: usize) !void {
+    const allocator = testing.allocator;
+    var client = try Session.init(allocator, .{
+        .role = .client,
+        .max_header_list_size = 64 * 1024,
+    });
+    defer client.deinit(allocator);
+    var server = try Session.init(allocator, .{
+        .role = .server,
+        .max_send_header_block = 64 * 1024,
+    });
+    defer server.deinit(allocator);
+    try handshake(&client, &server, allocator);
+
+    const first = try client.submitRequest(allocator, &request_fields, true);
+    const second = try client.submitRequest(allocator, &request_fields, true);
+    try transfer(&client, &server);
+    try drain(&server, allocator);
+    try server.submitResponse(allocator, first, .{ .status = .ok }, false);
+    try server.submitResponse(allocator, second, .{ .status = .ok }, false);
+    try transfer(&server, &client);
+    try drain(&client, allocator);
+
+    try client.submitReset(allocator, first, .cancel);
+
+    const names = try allocator.alloc([16]u8, field_count);
+    defer allocator.free(names);
+    const values = try allocator.alloc([]u8, field_count);
+    defer allocator.free(values);
+    const fields = try allocator.alloc(Header, field_count);
+    defer allocator.free(fields);
+    var built: usize = 0;
+    defer for (values[0..built]) |slot| allocator.free(slot);
+    for (fields, names, values, 0..) |*field, *name, *slot, index| {
+        // Distinct values so each field is its own dynamic table entry.
+        slot.* = try allocator.alloc(u8, value_len);
+        built += 1;
+        @memset(slot.*, 'a' + @as(u8, @intCast(index % 26)));
+        field.* = .{
+            .name = try std.fmt.bufPrint(name, "x-field-{d}", .{index}),
+            .value = slot.*,
+        };
+    }
+
+    // The late block on the reset stream inserts entries; the block on the
+    // other stream repeats the last field, which the encoder sends as an index.
+    try server.submitTrailers(allocator, first, fields);
+    try server.submitTrailers(allocator, second, fields[field_count - 1 ..]);
+    try transfer(&server, &client);
+
+    const event = (try client.nextEvent(allocator)).?;
+    switch (event) {
+        .trailers => |t| {
+            try testing.expectEqual(second, t.stream_id);
+            try testing.expectEqual(@as(usize, 1), t.headers.items.len);
+            try testing.expectEqualStrings(fields[field_count - 1].name, t.headers.items[0].name);
+            try testing.expectEqualStrings(fields[field_count - 1].value, t.headers.items[0].value);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(State.open, client.state);
+}
+
+test "a late HEADERS on a locally reset stream still updates the HPACK table" {
+    try expectLateTrailersKeepTableInStep(1, 20);
+}
+
+test "a late HEADERS and CONTINUATION on a reset stream still update the HPACK table" {
+    try expectLateTrailersKeepTableInStep(20, 1000);
 }
 
 test "a PRIORITY self-dependency is a stream error" {
