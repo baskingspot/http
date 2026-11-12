@@ -173,7 +173,7 @@ fn serveCleartext(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
                 .allocator = gpa,
                 .read_buffer = &h2_read_buffer,
                 .write_buffer = &write_buffer,
-                .wait_fd = stream.socket.handle,
+                .wait_fd = .init(stream.socket.handle),
                 .common = .{},
             },
         );
@@ -261,7 +261,7 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
                 .allocator = gpa,
                 .read_buffer = &read_buffer,
                 .write_buffer = &write_buffer,
-                .wait_fd = conn.socketHandle(),
+                .wait_fd = .init(conn.socketHandle()),
                 .common = .{},
             },
         );

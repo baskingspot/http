@@ -9,7 +9,10 @@
 
 const std = @import("std");
 const Io = std.Io;
+const posix = std.posix;
 const Allocator = std.mem.Allocator;
+
+const OptionalFd = @import("stdx").posix.OptionalFd;
 
 const shared = @import("../../engine/common.zig");
 const session_mod = @import("../session.zig");
@@ -40,10 +43,10 @@ pub const Config = struct {
     /// The transport socket, when the engine can wait on it. A handler that
     /// parks with `Exchange.setDeadline` is woken at that time even if the
     /// peer sends nothing: the read waits on this fd only until the earliest
-    /// armed wake. Null keeps the plain blocking read, where a wake arrives
+    /// armed wake. `.none` keeps the plain blocking read, where a wake arrives
     /// together with the next input. `serve` sets it from the stream; a TLS
     /// caller passes the transport's socket handle.
-    wait_fd: ?std.posix.fd_t = null,
+    wait_fd: OptionalFd = .none,
 };
 
 /// Accept connections until an unrecoverable accept error.
@@ -91,7 +94,7 @@ pub fn serve(
     var reader = stream.reader(io, &.{});
     var writer = stream.writer(io, config.write_buffer);
     var waited = config;
-    waited.wait_fd = stream.socket.handle;
+    waited.wait_fd = .init(stream.socket.handle);
     try serveIo(io, &reader.interface, &writer.interface, handler, waited);
 }
 
@@ -126,7 +129,7 @@ pub fn serveIo(
     var out_buffer: [4096]u8 = undefined;
 
     while (true) {
-        const now = Io.Timestamp.now(io, .awake);
+        const now: Io.Timestamp = .now(io, .awake);
         _ = conn.drive(now) catch |err| {
             flush(&conn, writer, &out_buffer) catch |flush_err| {
                 _ = @errorName(flush_err);
@@ -179,10 +182,10 @@ pub fn serveIo(
 /// wait ended at the wake time, or the wake is already due: the caller loops
 /// and `drive` delivers it. False means input is waiting, or no wake is armed
 /// or no fd was given, and the caller takes the plain blocking read.
-fn waitOrWake(io: Io, conn: *Connection, fd: ?std.posix.fd_t) !bool {
+fn waitOrWake(io: Io, conn: *Connection, fd: OptionalFd) !bool {
     const wake_at = conn.wakeDeadline() orelse return false;
-    const fd_value = fd orelse return false;
-    const now = Io.Timestamp.now(io, .awake);
+    const fd_value = fd.get() orelse return false;
+    const now: Io.Timestamp = .now(io, .awake);
     if (now.nanoseconds >= wake_at.nanoseconds) return true;
 
     const remaining = wake_at.nanoseconds - now.nanoseconds;
@@ -191,15 +194,15 @@ fn waitOrWake(io: Io, conn: *Connection, fd: ?std.posix.fd_t) !bool {
         (bounded + std.time.ns_per_ms - 1) / std.time.ns_per_ms,
         std.math.maxInt(i32),
     ));
-    var fds = [_]std.posix.pollfd{.{
+    var fds = [_]posix.pollfd{.{
         .fd = fd_value,
-        .events = std.posix.POLL.IN,
+        .events = posix.POLL.IN,
         .revents = 0,
     }};
-    _ = try std.posix.poll(&fds, ms);
-    const input = fds[0].revents & (std.posix.POLL.IN |
-        std.posix.POLL.HUP |
-        std.posix.POLL.ERR) != 0;
+    _ = try posix.poll(&fds, ms);
+    const input = fds[0].revents & (posix.POLL.IN |
+        posix.POLL.HUP |
+        posix.POLL.ERR) != 0;
     return !input;
 }
 

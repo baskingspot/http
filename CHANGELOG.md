@@ -7,7 +7,7 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
-- h2 `engine.blocking.serveIo` takes `Io` as its first argument, matching the h1 engine and `serve`. Call sites pass `io` and, for a TLS transport, `wait_fd = conn.socketHandle()`.
+- h2 `engine.blocking.serveIo` takes `Io` as its first argument, matching the h1 engine and `serve`. Call sites pass `io` and, for a TLS transport, `wait_fd = .init(conn.socketHandle())`. `Config.wait_fd` is a `stdx.posix.OptionalFd`.
 
 ### Fixed
 

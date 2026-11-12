@@ -113,7 +113,7 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
             .read_buffer = &read_buffer,
             .write_buffer = &write_buffer,
             .max_streams = 128,
-            .wait_fd = conn.socketHandle(),
+            .wait_fd = .init(conn.socketHandle()),
             .common = .{},
         },
     );
