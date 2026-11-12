@@ -246,7 +246,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/h2_streaming.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "http", .module = mod }},
+        .imports = &.{
+            .{ .name = "http", .module = mod },
+            .{ .name = "stdx", .module = stdx.module("stdx") },
+        },
     });
     const h2_streaming_tests = b.addTest(.{
         .root_module = h2_streaming_tests_mod,

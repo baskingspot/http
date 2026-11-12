@@ -104,6 +104,7 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
     var read_buffer: [16 * 1024]u8 = undefined;
     var write_buffer: [1]u8 = undefined;
     try http.h2.engine.blocking.serveIo(
+        io,
         conn.reader(),
         conn.writer(),
         App.handler(),
@@ -112,6 +113,7 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
             .read_buffer = &read_buffer,
             .write_buffer = &write_buffer,
             .max_streams = 128,
+            .wait_fd = conn.socketHandle(),
             .common = .{},
         },
     );

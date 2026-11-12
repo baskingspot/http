@@ -165,6 +165,7 @@ fn serveCleartext(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
     if (maybe_h2 and prefix_len == h2_preface.len) {
         var h2_read_buffer: [16 * 1024]u8 = undefined;
         try http.h2.engine.blocking.serveIo(
+            io,
             &prefixed.interface,
             &writer.interface,
             H2App.handler(),
@@ -172,6 +173,7 @@ fn serveCleartext(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
                 .allocator = gpa,
                 .read_buffer = &h2_read_buffer,
                 .write_buffer = &write_buffer,
+                .wait_fd = stream.socket.handle,
                 .common = .{},
             },
         );
@@ -251,6 +253,7 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
         var read_buffer: [16 * 1024]u8 = undefined;
         var write_buffer: [4 * 1024]u8 = undefined;
         try http.h2.engine.blocking.serveIo(
+            io,
             conn.reader(),
             conn.writer(),
             H2App.handler(),
@@ -258,6 +261,7 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
                 .allocator = gpa,
                 .read_buffer = &read_buffer,
                 .write_buffer = &write_buffer,
+                .wait_fd = conn.socketHandle(),
                 .common = .{},
             },
         );

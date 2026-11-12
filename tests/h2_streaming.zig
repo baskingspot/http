@@ -11,6 +11,7 @@ const testing = std.testing;
 const Io = std.Io;
 
 const http = @import("http");
+const time = @import("stdx").time;
 const engine = http.h2.engine.blocking;
 const Handler = http.h2.engine.Handler;
 const Exchange = http.h2.engine.Exchange;
@@ -439,14 +440,14 @@ test "grpc full duplex: two echoes before END_STREAM (RFC 9113 5.1)" {
     };
 
     var app: EchoApp = .{};
-    var server = try http.h2.engine.Connection.init(.{
+    var server: http.h2.engine.Connection = try .init(.{
         .allocator = testing.allocator,
         .handler = app.handler(),
         .body_mode = .stream,
     });
     defer server.deinit();
 
-    var client = try http.h2.Session.init(testing.allocator, .{ .role = .client });
+    var client: http.h2.Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
 
     try pumpToConnection(&client, &server);
@@ -616,4 +617,113 @@ test "an expiry finishes the response it started, not a second one" {
     try testing.expectEqual(@as(usize, 1), app.expired_turns);
     try testing.expect(app.started);
     try testing.expect(app.ended);
+}
+
+/// Parks with a wake time in the future while the peer sends nothing, then
+/// answers from the wake. This is the gRPC timeout shape: a client sets
+/// grpc-timeout and waits, so only the engine's clock can end the turn.
+const FutureWakeApp = struct {
+    io: Io,
+    turns: usize = 0,
+    woke_by_timer: bool = false,
+    started: bool = false,
+    ended: bool = false,
+    failure: ?anyerror = null,
+
+    fn handler(self: *FutureWakeApp) Handler {
+        return .{ .ptr = self, .vtable = &.{
+            .handle = handle,
+            .complete = Handler.noopComplete,
+            .report_error = reportError,
+            .policy_response = Handler.defaultPolicyResponse,
+        } };
+    }
+
+    fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
+        const self: *FutureWakeApp = @ptrCast(@alignCast(ptr));
+        self.turns += 1;
+        if (self.ended) return;
+        if (!self.started) {
+            self.started = true;
+            try exchange.beginResponse(.{
+                .status = .ok,
+                .content_type = "application/grpc",
+            });
+            // A hundred milliseconds out, so only the timer, and not the
+            // input path, can produce the second turn.
+            const now = try time.Timestamp.fromStd(Io.Timestamp.now(self.io, .awake));
+            const wake = try now.add(try time.Duration.fromMilliseconds(100));
+            exchange.setDeadline(try .init(wake));
+            return exchange.waitForProgress();
+        }
+        // An input-driven turn proves nothing: the peer is silent by design.
+        if (exchange.wake != .expired) return;
+        self.woke_by_timer = true;
+        const trailers = [_]http.Header{
+            .{ .name = "grpc-status", .value = "0" },
+        };
+        try exchange.endResponse(&trailers);
+        self.ended = true;
+    }
+
+    fn reportError(ptr: *anyopaque, err: anyerror) void {
+        const self: *FutureWakeApp = @ptrCast(@alignCast(ptr));
+        self.failure = err;
+    }
+};
+
+test "a parked handler wakes at its future deadline with no input" {
+    const io = testing.io;
+
+    const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
+    var listener = try address.listen(io, .{ .mode = .stream, .reuse_address = true });
+    defer listener.deinit(io);
+    var bound = address;
+    bound.setPort(listener.socket.address.getPort());
+
+    var app: FutureWakeApp = .{ .io = io };
+    var server: Server = .{ .io = io, .listener = &listener, .handler = app.handler() };
+    const thread = try std.Thread.spawn(.{}, Server.run, .{&server});
+    defer thread.join();
+    defer if (server.result) |err| {
+        if (err != error.ReadFailed) std.debug.panic("server failed: {s}", .{@errorName(err)});
+    };
+
+    const stream = try bound.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var reader = stream.reader(io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(io, &write_buffer);
+
+    var client: Client = undefined;
+    try client.init(&reader.interface, &writer.interface, .{ .allocator = testing.allocator });
+    defer client.deinit();
+
+    // The request ends immediately. The peer then sends nothing, so the
+    // server's second turn can only come from the armed wake.
+    const body_writer = try client.begin(.{
+        .method_token = "POST",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/wake",
+        .headers = &fields,
+    });
+    try body_writer.write("done");
+    body_writer.close();
+
+    const response = try client.response();
+    defer response.body.close();
+    try testing.expectEqual(@as(u16, 200), response.head.status.code());
+
+    const result = response.body.read() catch |err| switch (err) {
+        error.EndOfStream => null,
+        else => return err,
+    };
+    try testing.expect(result == null);
+
+    try testing.expect(app.turns >= 2);
+    try testing.expect(app.woke_by_timer);
+    try testing.expect(app.ended);
+    try testing.expectEqual(@as(?anyerror, null), app.failure);
 }

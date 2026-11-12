@@ -5,7 +5,13 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- h2 `engine.blocking.serveIo` takes `Io` as its first argument, matching the h1 engine and `serve`. Call sites pass `io` and, for a TLS transport, `wait_fd = conn.socketHandle()`.
+
 ### Fixed
+
+- h2 `engine.blocking.serveIo` delivers a parked handler's `Exchange.setDeadline` wake at its time. The loop drove the connection with a stopped clock and read without a timeout, so a handler parked on a future wake slept until unrelated input arrived on the connection — a gRPC server enforcing `grpc-timeout` then never answered a silent client. The loop now drives on the awake clock and, with the new `Config.wait_fd`, waits on the socket only until the earliest wake. A red test parks with a wake a hundred milliseconds out while the client sends nothing; without the fix it hangs.
 
 - h2 `Session` decodes the field block of a HEADERS it rejects, including a late HEADERS or trailers on a stream it already reset, and across CONTINUATION, before it fails the stream (RFC 9113 §4.3). Dropping the block left the HPACK dynamic table behind the peer's, so a later block on another stream decoded wrong fields or closed the connection with a compression error.
 - A Zig 0.17 project that depends on http builds again. Zig 0.17 configures every package in the dependency graph, so tls 0.3.0's lazy `libxev` dependency failed to build even for a consumer that never enabled `http_tls`. The `tls` pin moves to v0.4.0, which dropped `tls_xev`.
