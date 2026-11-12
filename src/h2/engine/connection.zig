@@ -14,28 +14,30 @@
 //! rather than parked on a stack frame; see `h2.engine.common`.
 
 const std = @import("std");
-const compat = @import("../../compat.zig");
 const assert = std.debug.assert;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const testing = std.testing;
+
 const time = @import("stdx").time;
 
+const compat = @import("../../compat.zig");
+const shared = @import("../../engine/common.zig");
+const Header = @import("../../header.zig").Header;
+const Headers = @import("../../header.zig").Headers;
+const frame = @import("../frame.zig");
+const head = @import("../head.zig");
 const session_mod = @import("../session.zig");
 const Session = session_mod.Session;
 const SessionOptions = session_mod.Options;
 const Event = session_mod.Event;
-const head = @import("../head.zig");
-const frame = @import("../frame.zig");
-const Header = @import("../../header.zig").Header;
-const Headers = @import("../../header.zig").Headers;
-
 const common = @import("common.zig");
-const shared = @import("../../engine/common.zig");
 pub const Exchange = common.Exchange;
 pub const Handler = common.Handler;
 pub const Request = common.Request;
 pub const ResponseOptions = common.ResponseOptions;
+
 pub const BodyMode = enum {
     /// Run the handler once, with the whole request body.
     buffered,
@@ -243,7 +245,7 @@ pub const Connection = struct {
         session_options.role = .server;
         session_options.max_streams = options.max_streams;
 
-        var session = try Session.init(options.allocator, session_options);
+        var session: Session = try .init(options.allocator, session_options);
         errdefer session.deinit(options.allocator);
 
         const slots = try options.allocator.alloc(Slot, options.max_streams);
@@ -972,8 +974,6 @@ fn parseContentLength(headers: Headers) error{Invalid}!?u64 {
     return value;
 }
 
-const testing = std.testing;
-
 const stream_fields = [_]Header{
     .{ .name = ":method", .value = "POST" },
     .{ .name = ":scheme", .value = "http" },
@@ -1115,14 +1115,14 @@ test "the stream engine answers twice before the request ends" {
     // send HEADERS and DATA while the client still sends DATA.
     const allocator = testing.allocator;
     var app: StreamingApp = .{};
-    var conn = try Connection.init(.{
+    var conn: Connection = try .init(.{
         .allocator = allocator,
         .handler = app.handler(),
         .body_mode = .stream,
     });
     defer conn.deinit();
 
-    var client = try Session.init(allocator, .{ .role = .client });
+    var client: Session = try .init(allocator, .{ .role = .client });
     defer client.deinit(allocator);
 
     const now = Io.Timestamp.zero;
@@ -1225,14 +1225,14 @@ const DeadlineApp = struct {
 test "an application deadline survives progress and delivers expired once" {
     const allocator = testing.allocator;
     var app: DeadlineApp = .{};
-    var conn = try Connection.init(.{
+    var conn: Connection = try .init(.{
         .allocator = allocator,
         .handler = app.handler(),
         .body_mode = .stream,
     });
     defer conn.deinit();
 
-    var client = try Session.init(allocator, .{ .role = .client });
+    var client: Session = try .init(allocator, .{ .role = .client });
     defer client.deinit(allocator);
 
     const now = Io.Timestamp.zero;
@@ -1272,12 +1272,12 @@ test "an application deadline survives progress and delivers expired once" {
     try testing.expectEqual(@as(usize, 0), app.expiries);
 
     // Before the deadline the slot stays parked; after it, one expiry turn.
-    _ = try conn.drive(Io.Timestamp.fromNanoseconds(999_000_000));
+    _ = try conn.drive(.fromNanoseconds(999_000_000));
     try testing.expectEqual(@as(usize, 0), app.expiries);
-    _ = try conn.drive(Io.Timestamp.fromNanoseconds(1_001_000_000));
+    _ = try conn.drive(.fromNanoseconds(1_001_000_000));
     try testing.expectEqual(@as(usize, 1), app.expiries);
     try testing.expect(conn.wakeDeadline() == null);
-    _ = try conn.drive(Io.Timestamp.fromNanoseconds(2_000_000_000));
+    _ = try conn.drive(.fromNanoseconds(2_000_000_000));
     try testing.expectEqual(@as(usize, 1), app.expiries);
 
     try feedSession(&conn, &client);
@@ -1358,14 +1358,14 @@ test "a chunk's flow-control credit returns when the handler supersedes it" {
     // chunk is what the handler has finished with.
     const allocator = testing.allocator;
     var app: OneChunkApp = .{};
-    var conn = try Connection.init(.{
+    var conn: Connection = try .init(.{
         .allocator = allocator,
         .handler = app.handler(),
         .body_mode = .stream,
     });
     defer conn.deinit();
 
-    var client = try Session.init(allocator, .{ .role = .client });
+    var client: Session = try .init(allocator, .{ .role = .client });
     defer client.deinit(allocator);
 
     const now = Io.Timestamp.zero;
@@ -1404,7 +1404,7 @@ test "a zero-credit write keeps its tail and resumes on WINDOW_UPDATE" {
     // WINDOW_UPDATE that opens the window calls it again with its own state.
     const allocator = testing.allocator;
     var app: StreamingApp = .{};
-    var conn = try Connection.init(.{
+    var conn: Connection = try .init(.{
         .allocator = allocator,
         .handler = app.handler(),
         .body_mode = .stream,
@@ -1413,7 +1413,7 @@ test "a zero-credit write keeps its tail and resumes on WINDOW_UPDATE" {
 
     // A 3-byte receive window: the echo of a 6-byte chunk cannot fit in one
     // frame, so the handler hits a zero write mid-message.
-    var client = try Session.init(allocator, .{
+    var client: Session = try .init(allocator, .{
         .role = .client,
         .initial_window_size = 3,
     });
@@ -1530,7 +1530,7 @@ test "resident memory plateaus across consume, park, and deadline" {
     const allocator = counter.allocator();
 
     var app: ResidentMemoryApp = .{};
-    var conn = try Connection.init(.{
+    var conn: Connection = try .init(.{
         .allocator = allocator,
         .handler = app.handler(),
         .body_mode = .stream,
@@ -1539,7 +1539,7 @@ test "resident memory plateaus across consume, park, and deadline" {
     });
     defer conn.deinit();
 
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
 
     const now = Io.Timestamp.zero;
@@ -1599,14 +1599,14 @@ test "a peer reset returns unread body credit to the connection window" {
     // bytes can only be credited at the connection level.
     const allocator = testing.allocator;
     var app: ParkApp = .{};
-    var conn = try Connection.init(.{
+    var conn: Connection = try .init(.{
         .allocator = allocator,
         .handler = app.handler(),
         .body_mode = .stream,
     });
     defer conn.deinit();
 
-    var client = try Session.init(allocator, .{ .role = .client });
+    var client: Session = try .init(allocator, .{ .role = .client });
     defer client.deinit(allocator);
 
     const now = Io.Timestamp.zero;
@@ -1631,7 +1631,7 @@ test "a peer reset returns unread body credit to the connection window" {
 test "a request body over body_bytes is a reset, not growth" {
     const allocator = testing.allocator;
     var app: ParkApp = .{};
-    var conn = try Connection.init(.{
+    var conn: Connection = try .init(.{
         .allocator = allocator,
         .handler = app.handler(),
         .body_mode = .stream,
@@ -1639,7 +1639,7 @@ test "a request body over body_bytes is a reset, not growth" {
     });
     defer conn.deinit();
 
-    var client = try Session.init(allocator, .{ .role = .client });
+    var client: Session = try .init(allocator, .{ .role = .client });
     defer client.deinit(allocator);
 
     const now = Io.Timestamp.zero;
@@ -1684,7 +1684,7 @@ test "a streamed body is bounded by unconsumed bytes, not by its total" {
     // balance: the two slot buffers are reused, never accumulated.
     const allocator = testing.allocator;
     var app: StreamingApp = .{};
-    var conn = try Connection.init(.{
+    var conn: Connection = try .init(.{
         .allocator = allocator,
         .handler = app.handler(),
         .body_mode = .stream,
@@ -1692,7 +1692,7 @@ test "a streamed body is bounded by unconsumed bytes, not by its total" {
     });
     defer conn.deinit();
 
-    var client = try Session.init(allocator, .{ .role = .client });
+    var client: Session = try .init(allocator, .{ .role = .client });
     defer client.deinit(allocator);
 
     const now = Io.Timestamp.zero;

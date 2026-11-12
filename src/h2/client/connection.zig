@@ -12,17 +12,18 @@
 //! the caller. Headers and trailers are snapshots in the stream arena.
 
 const std = @import("std");
-const compat = @import("../../compat.zig");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const testing = std.testing;
 
+const shared = @import("../../client/root.zig");
+const compat = @import("../../compat.zig");
+const Header = @import("../../header.zig").Header;
+const Headers = @import("../../header.zig").Headers;
 const frame = @import("../frame.zig");
 const session_mod = @import("../session.zig");
 const Session = session_mod.Session;
 const SessionEvent = session_mod.Event;
-const shared = @import("../../client/root.zig");
-const Header = @import("../../header.zig").Header;
-const Headers = @import("../../header.zig").Headers;
 
 // ast-grep-ignore: public-struct-field-default -- request shape; headers are optional
 pub const Request = struct {
@@ -157,7 +158,7 @@ pub const Connection = struct {
         session_options.role = .client;
         session_options.max_streams = options.max_streams;
 
-        var session = try Session.init(options.allocator, session_options);
+        var session: Session = try .init(options.allocator, session_options);
         errdefer session.deinit(options.allocator);
         const slots = try options.allocator.alloc(Slot, options.max_streams);
         errdefer options.allocator.free(slots);
@@ -538,8 +539,6 @@ test {
     _ = Connection;
 }
 
-const testing = std.testing;
-
 fn transferConnection(conn: *Connection, server: *Session) !void {
     var buffer: [16 * 1024]u8 = undefined;
     while (true) {
@@ -590,7 +589,7 @@ test "a bidi stream carries request and response DATA and trailers" {
     });
     defer client.deinit();
 
-    var server = try Session.init(testing.allocator, .{
+    var server: Session = try .init(testing.allocator, .{
         .role = .server,
         .max_streams = 4,
     });
@@ -717,7 +716,7 @@ test "a gRPC trailers-only response arrives as a head with END_STREAM" {
     });
     defer client.deinit();
 
-    var server = try Session.init(testing.allocator, .{
+    var server: Session = try .init(testing.allocator, .{
         .role = .server,
         .max_streams = 4,
     });
@@ -803,7 +802,7 @@ test "a local cancel and a peer reset are distinguishable" {
     });
     defer client.deinit();
 
-    var server = try Session.init(testing.allocator, .{
+    var server: Session = try .init(testing.allocator, .{
         .role = .server,
         .max_streams = 4,
     });
@@ -938,7 +937,7 @@ test "GOAWAY keeps accepted streams readable and rejects new streams" {
     var client: Connection = undefined;
     try client.init(.{ .allocator = testing.allocator });
     defer client.deinit();
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     try transferServer(&server, &client);
     try transferConnection(&client, &server);

@@ -7,7 +7,14 @@
 const std = @import("std");
 const Io = std.Io;
 const assert = std.debug.assert;
+const testing = std.testing;
+
 const time = @import("stdx").time;
+
+const Header = @import("../../header.zig").Header;
+const frame = @import("../frame.zig");
+const session_mod = @import("../session.zig");
+const Session = session_mod.Session;
 const Connection = @import("connection.zig").Connection;
 
 pub const Driver = struct {
@@ -314,12 +321,6 @@ pub const Driver = struct {
     }
 };
 
-const testing = std.testing;
-const frame = @import("../frame.zig");
-const session_mod = @import("../session.zig");
-const Session = session_mod.Session;
-const Header = @import("../../header.zig").Header;
-
 fn transferToServer(conn: *Connection, server: *Session, out: []u8) !void {
     while (true) {
         const n = try conn.nextFrame(out);
@@ -524,7 +525,7 @@ test "driver reads a non-gRPC response with trailers" {
     var conn: Connection = undefined;
     try conn.init(.{ .allocator = testing.allocator });
     defer conn.deinit();
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     var exchange: [16 * 1024]u8 = undefined;
     try transferToClient(&server, &conn, &exchange);

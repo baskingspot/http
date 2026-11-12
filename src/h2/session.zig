@@ -12,23 +12,23 @@
 //! `std.heap.FixedBufferAllocator`; the pools reuse records and chunks.
 
 const std = @import("std");
-const compat = @import("../compat.zig");
 const testing = std.testing;
 const assert = std.debug.assert;
 const mem = std.mem;
 const Allocator = mem.Allocator;
 
-const frame = @import("frame.zig");
-const settings = @import("settings.zig");
-const flow = @import("flow.zig");
-const stream = @import("stream.zig");
-const header_block = @import("header_block.zig");
-const hpack = @import("../hpack/root.zig");
+const compat = @import("../compat.zig");
 const Headers = @import("../header.zig").Headers;
 const Header = @import("../header.zig").Header;
-const head = @import("head.zig");
+const hpack = @import("../hpack/root.zig");
 const response_mod = @import("../response.zig");
 const Response = response_mod.Response;
+const flow = @import("flow.zig");
+const frame = @import("frame.zig");
+const head = @import("head.zig");
+const header_block = @import("header_block.zig");
+const settings = @import("settings.zig");
+const stream = @import("stream.zig");
 
 /// The largest frame payload this session writes. The peer must accept at
 /// least this much, and it keeps the queue's frame buffer small.
@@ -1659,9 +1659,9 @@ const request_fields = [_]Header{
 };
 
 test "a client and server complete the settings handshake" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
 
     try handshake(&client, &server, testing.allocator);
@@ -1672,7 +1672,7 @@ test "a client and server complete the settings handshake" {
 }
 
 test "a bad preface is a connection error" {
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
 
     var bad = frame.preface.*;
@@ -1692,7 +1692,7 @@ test "a bad preface is a connection error" {
 }
 
 test "the first frame must be SETTINGS" {
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
 
     _ = server.receive(frame.preface);
@@ -1715,9 +1715,9 @@ test "the first frame must be SETTINGS" {
 }
 
 test "a request and response cross the session" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     try handshake(&client, &server, testing.allocator);
 
@@ -1753,9 +1753,9 @@ test "a request and response cross the session" {
 }
 
 test "DATA respects flow control and carries END_STREAM" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     try handshake(&client, &server, testing.allocator);
 
@@ -1784,9 +1784,9 @@ test "DATA respects flow control and carries END_STREAM" {
 }
 
 test "trailers end the response" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     try handshake(&client, &server, testing.allocator);
 
@@ -1813,9 +1813,9 @@ test "trailers end the response" {
 }
 
 test "RST_STREAM reaches the peer as a reset event" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     try handshake(&client, &server, testing.allocator);
 
@@ -1837,9 +1837,9 @@ test "RST_STREAM reaches the peer as a reset event" {
 }
 
 test "release returns DATA bytes to both windows" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     try handshake(&client, &server, testing.allocator);
 
@@ -1880,9 +1880,9 @@ test "a WouldBlock response leaves the encoder and stream untouched" {
     // runs, so a full queue cannot advance the dynamic table. If it could, the
     // next block on another stream would reference entries the peer never saw
     // and decode as garbage or a compression error (RFC 7541 §2.3.3).
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{
+    var server: Session = try .init(testing.allocator, .{
         .role = .server,
         .max_out_bytes = 1024,
     });
@@ -1961,9 +1961,9 @@ test "the output queue reserves capacity without skipping the write cursor" {
 }
 
 test "PING is acknowledged and GOAWAY is delivered" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     try handshake(&client, &server, testing.allocator);
 
@@ -1990,12 +1990,12 @@ test "PING is acknowledged and GOAWAY is delivered" {
 }
 
 test "a small initial window makes submitData accept a prefix" {
-    var client = try Session.init(testing.allocator, .{
+    var client: Session = try .init(testing.allocator, .{
         .role = .client,
         .initial_window_size = 10,
     });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{
+    var server: Session = try .init(testing.allocator, .{
         .role = .server,
         .initial_window_size = 10,
     });
@@ -2045,9 +2045,9 @@ fn takeFrame(session: *Session, buf: []u8) !frame.Parsed {
 }
 
 test "a closed stream rejects DATA with STREAM_CLOSED" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     try handshake(&client, &server, testing.allocator);
 
@@ -2081,12 +2081,12 @@ test "a closed stream rejects DATA with STREAM_CLOSED" {
 }
 
 test "a refused stream keeps its DATA out of the connection" {
-    var client = try Session.init(testing.allocator, .{
+    var client: Session = try .init(testing.allocator, .{
         .role = .client,
         .max_streams = 1,
     });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{
+    var server: Session = try .init(testing.allocator, .{
         .role = .server,
         .max_streams = 1,
     });
@@ -2130,9 +2130,9 @@ test "a refused stream keeps its DATA out of the connection" {
 }
 
 test "a normal closed stream rejects HEADERS as a connection error" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     try handshake(&client, &server, testing.allocator);
 
@@ -2157,9 +2157,9 @@ test "a normal closed stream rejects HEADERS as a connection error" {
 }
 
 test "a reset stream rejects HEADERS with STREAM_CLOSED" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     try handshake(&client, &server, testing.allocator);
 
@@ -2190,12 +2190,12 @@ test "a reset stream rejects HEADERS with STREAM_CLOSED" {
 /// entries the discarded block inserted, decodes correctly.
 fn expectLateTrailersKeepTableInStep(field_count: usize, value_len: usize) !void {
     const allocator = testing.allocator;
-    var client = try Session.init(allocator, .{
+    var client: Session = try .init(allocator, .{
         .role = .client,
         .max_header_list_size = 64 * 1024,
     });
     defer client.deinit(allocator);
-    var server = try Session.init(allocator, .{
+    var server: Session = try .init(allocator, .{
         .role = .server,
         .max_send_header_block = 64 * 1024,
     });
@@ -2384,9 +2384,9 @@ fn expectOversizedTrailersReset(
     fragment: usize,
 ) !void {
     const allocator = testing.allocator;
-    var client = try Session.init(allocator, client_options);
+    var client: Session = try .init(allocator, client_options);
     defer client.deinit(allocator);
-    var server = try Session.init(allocator, .{
+    var server: Session = try .init(allocator, .{
         .role = .server,
         .max_send_header_block = 64 * 1024,
     });
@@ -2441,12 +2441,12 @@ test "a field section over the advertised limit that fits the storage resets one
 
 test "a field section within a large advertised limit is never cut short" {
     const allocator = testing.allocator;
-    var client = try Session.init(allocator, .{
+    var client: Session = try .init(allocator, .{
         .role = .client,
         .max_header_list_size = 64 * 1024,
     });
     defer client.deinit(allocator);
-    var server = try Session.init(allocator, .{
+    var server: Session = try .init(allocator, .{
         .role = .server,
         .max_send_header_block = 64 * 1024,
     });
@@ -2475,9 +2475,9 @@ test "a field section within a large advertised limit is never cut short" {
 
 test "a late HEADERS that runs out of decode bytes on a reset stream keeps the HPACK table" {
     const allocator = testing.allocator;
-    var client = try Session.init(allocator, .{ .role = .client });
+    var client: Session = try .init(allocator, .{ .role = .client });
     defer client.deinit(allocator);
-    var server = try Session.init(allocator, .{
+    var server: Session = try .init(allocator, .{
         .role = .server,
         .max_send_header_block = 64 * 1024,
     });
@@ -2502,9 +2502,9 @@ test "a late HEADERS that runs out of decode bytes on a reset stream keeps the H
 }
 
 test "a PRIORITY self-dependency is a stream error" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     try handshake(&client, &server, testing.allocator);
 
@@ -2528,9 +2528,9 @@ test "a PRIORITY self-dependency is a stream error" {
 }
 
 test "trailers without END_STREAM are a stream error" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     try handshake(&client, &server, testing.allocator);
 
@@ -2552,9 +2552,9 @@ test "trailers without END_STREAM are a stream error" {
 }
 
 test "a SETTINGS update is visible to the application" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     try handshake(&client, &server, testing.allocator);
 
@@ -2574,7 +2574,7 @@ test "a SETTINGS update is visible to the application" {
 }
 
 test "a local SETTINGS change adjusts receive windows and sends a frame" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
 
     const id = try client.submitRequest(testing.allocator, &request_fields, true);
@@ -2599,7 +2599,7 @@ test "a local SETTINGS change adjusts receive windows and sends a frame" {
 }
 
 test "local SETTINGS cannot exceed the allocated resources" {
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
 
     try testing.expectError(error.InvalidSetting, server.submitSettings(
@@ -2615,7 +2615,7 @@ test "local SETTINGS cannot exceed the allocated resources" {
         &.{.{ .id = .header_table_size, .value = 4097 }},
     ));
 
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
     const id = try client.submitRequest(testing.allocator, &request_fields, true);
     client.streams.getPtr(id).?.recv.increase(0x7fff_ffff - 65_535) catch unreachable;
@@ -2627,9 +2627,9 @@ test "local SETTINGS cannot exceed the allocated resources" {
 }
 
 test "a malformed HPACK block is a connection error" {
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
     try handshake(&client, &server, testing.allocator);
 
@@ -2689,9 +2689,9 @@ test "fuzz session input never panics" {
 test "fuzz session submissions never panic" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *testing.Smith) anyerror!void {
-            var client = try Session.init(testing.allocator, .{ .role = .client });
+            var client: Session = try .init(testing.allocator, .{ .role = .client });
             defer client.deinit(testing.allocator);
-            var server = try Session.init(testing.allocator, .{ .role = .server });
+            var server: Session = try .init(testing.allocator, .{ .role = .server });
             defer server.deinit(testing.allocator);
             try handshake(&client, &server, testing.allocator);
 
@@ -2760,9 +2760,9 @@ test "fuzz session submissions never panic" {
 }
 
 test "HEADERS on a half-closed remote stream is STREAM_CLOSED" {
-    var client = try Session.init(testing.allocator, .{ .role = .client });
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
-    var server = try Session.init(testing.allocator, .{ .role = .server });
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
     defer server.deinit(testing.allocator);
     try handshake(&client, &server, testing.allocator);
 

@@ -18,24 +18,14 @@
 //! contract; `h1.client.streaming` implements the same contract.
 
 const std = @import("std");
-const compat = @import("../../compat.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
 const ascii = std.ascii;
 const assert = std.debug.assert;
-
-const Header = @import("../../header.zig").Header;
-const Headers = @import("../../header.zig").Headers;
-const Status = @import("../../status.zig").Status;
-const session_mod = @import("../session.zig");
-const Session = session_mod.Session;
-const Event = session_mod.Event;
-const frame = @import("../frame.zig");
-const hpack = @import("../../hpack/root.zig");
+const testing = std.testing;
 
 const shared = @import("../../client/root.zig");
-
 pub const Protocol = shared.Protocol;
 pub const Scheme = shared.Scheme;
 pub const Request = shared.Request;
@@ -44,6 +34,16 @@ pub const Body = shared.Body;
 pub const BodyWriter = shared.BodyWriter;
 pub const Response = shared.Response;
 pub const Config = shared.Config;
+const compat = @import("../../compat.zig");
+const Header = @import("../../header.zig").Header;
+const Headers = @import("../../header.zig").Headers;
+const hpack = @import("../../hpack/root.zig");
+const Status = @import("../../status.zig").Status;
+const engine = @import("../engine/blocking.zig");
+const frame = @import("../frame.zig");
+const session_mod = @import("../session.zig");
+const Session = session_mod.Session;
+const Event = session_mod.Event;
 
 pub const RequestState = enum { idle, staged, in_flight, committed };
 
@@ -127,7 +127,7 @@ pub const Client = struct {
             .arena = .init(config.allocator),
             .max_header_bytes = config.max_header_bytes,
             .max_headers = config.max_headers,
-            .session = try Session.init(config.allocator, session_options),
+            .session = try .init(config.allocator, session_options),
         };
         errdefer self.session.deinit(self.allocator);
         errdefer self.arena.deinit();
@@ -915,9 +915,6 @@ fn bodyWriterClose(ptr: *anyopaque) void {
     const self: *Client = @ptrCast(@alignCast(ptr));
     self.closeRequestBody();
 }
-
-const testing = std.testing;
-const engine = @import("../engine/blocking.zig");
 
 const TestApp = struct {
     body: []const u8,
