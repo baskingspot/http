@@ -73,12 +73,13 @@ pub fn targetStop(byte: u8) bool {
     return !isTargetByte(byte);
 }
 
-/// A true lane on CR, for the head-terminator search.
-pub fn crMask(lanes: simd.Block.Vec) simd.Block.BoolVec {
-    return lanes == @as(simd.Block.Vec, @splat('\r'));
+/// A true lane on LF, for the head-terminator search. Every line end contains
+/// an LF, whether or not a CR precedes it.
+pub fn lfMask(lanes: simd.Block.Vec) simd.Block.BoolVec {
+    return lanes == @as(simd.Block.Vec, @splat('\n'));
 }
 
-/// The scalar form of `crMask`.
-pub fn crStop(byte: u8) bool {
-    return byte == '\r';
+/// The scalar form of `lfMask`.
+pub fn lfStop(byte: u8) bool {
+    return byte == '\n';
 }

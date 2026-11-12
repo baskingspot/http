@@ -947,12 +947,21 @@ fn completeRequest(self: *ServerConn) Event {
     } };
 }
 
-/// True while the input is only complete or partial empty lines. A bare CR is
-/// a possible CRLF prefix; it is not yet a request-line byte.
+/// True while the input is only complete or partial empty lines. An empty
+/// line is LF or CRLF, so a lone LF is a whole line and a lone CR is a CRLF
+/// prefix.
 fn onlyBlankLines(bytes: []const u8) bool {
-    for (bytes, 0..) |byte, index| {
-        const expected: u8 = if (index % 2 == 0) '\r' else '\n';
-        if (byte != expected) return false;
+    var index: usize = 0;
+    while (index < bytes.len) {
+        switch (bytes[index]) {
+            '\n' => index += 1,
+            '\r' => {
+                if (index + 1 == bytes.len) return true;
+                if (bytes[index + 1] != '\n') return false;
+                index += 2;
+            },
+            else => return false,
+        }
     }
     return true;
 }
@@ -1870,6 +1879,34 @@ test "CRLF followed by a request works normally" {
     const request = try expectRequest(try t.feed("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
     try testing.expectEqualStrings("/", request.head.target);
     try testing.expect(t.conn.deadline().?.nanoseconds > t.clock.now.nanoseconds);
+}
+
+test "an LF-only request is served (RFC 9112 §2.2)" {
+    var t: TestConn = undefined;
+    t.init(.{});
+    t.conn.start(t.clock.now);
+
+    const request = try expectRequest(try t.feed("GET /xh HTTP/1.1\nHost: x\n\n"));
+    try testing.expectEqualStrings("/xh", request.head.target);
+    try testing.expectEqualStrings("x", request.head.headers.items[0].value);
+
+    try t.conn.respond(.{ .status = .ok }, "");
+    try testing.expectEqual(.keep_alive, std.meta.activeTag(try t.drain()));
+    try testing.expect(mem.startsWith(u8, t.out(), "HTTP/1.1 200 OK\r\n"));
+}
+
+test "an LF-only blank line keeps the connection idle" {
+    var t: TestConn = undefined;
+    t.init(.{ .idle_timeout = .fromSeconds(60), .head_timeout = .fromSeconds(5) });
+    t.conn.start(t.clock.now);
+
+    _ = try expectRequest(try t.feed("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
+    try t.conn.respond(.{ .status = .ok }, "");
+    try testing.expectEqual(.keep_alive, std.meta.activeTag(try t.drain()));
+
+    try testing.expectEqual(.need_more, std.meta.activeTag(try t.feed("\n")));
+    try testing.expectEqual(60 * std.time.ns_per_s, t.conn.deadline().?.nanoseconds);
+    try testing.expectEqual(.closed, std.meta.activeTag(t.conn.eof(t.clock.now)));
 }
 
 fn expectRejectReason(

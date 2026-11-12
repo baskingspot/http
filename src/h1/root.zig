@@ -11,13 +11,19 @@
 //! reader may move its bytes when it refills, so copy the fields that must
 //! outlive the head before the next read or rebase.
 //!
-//! Chooses strict behavior where RFC 9112 permits leniency:
-//! - Bare LF is rejected. RFC 9112 §2.2 says a recipient MAY recognize it.
+//! Where RFC 9112 permits more than one behavior, this parser picks one and
+//! keeps it:
+//! - A line end is LF or CRLF. RFC 9112 §2.2 permits recognizing a single LF
+//!   as a line terminator, and deployed servers do. A bare CR is invalid.
 //! - Start lines require exactly one SP between components. RFC 9112 §3 and
 //!   §4 permit whitespace-delimited parsing but warn about smuggling.
 //! - obs-fold is rejected. RFC 9112 §5.2 permits reject-or-unfold.
 //! - A line before the first field that starts with SP/HTAB is rejected.
 //!   RFC 9112 §2.2 permits rejecting or consuming it.
+//!
+//! The line-ending rule covers the start line and field lines. Framing in the
+//! body is strict: `chunked` requires CRLF around a chunk, because those bytes
+//! decide where the next message starts.
 //!
 //! `SearchState` carries the number of bytes already searched for the end of
 //! the head. Keep one per connection buffer. The parser records the search
@@ -243,7 +249,7 @@ fn parseRequestInner(buf: []const u8, storage: []Header) Error!ParsedRequest {
     try expect(&cursor, ' ');
     const wire_version = try parseVersion(&cursor);
     const version = try effectiveVersion(wire_version);
-    try expectCrlf(&cursor);
+    try expectLineEnd(&cursor);
 
     const headers = try parseHeaders(&cursor, storage);
     return .{
@@ -294,7 +300,7 @@ fn parseResponseInner(buf: []const u8, storage: []Header) Error!ParsedResponse {
     // RFC 9112 §4: the space is required even when the reason is absent.
     try expect(&cursor, ' ');
     const reason = try scanReason(&cursor);
-    try expectCrlf(&cursor);
+    try expectLineEnd(&cursor);
 
     const headers = try parseHeaders(&cursor, storage);
     return .{
@@ -348,9 +354,11 @@ pub fn parseFieldSection(
 /// empty line alone, which the head terminator search does not catch.
 fn fieldSectionComplete(buf: []const u8, last_len: u32) bool {
     assert(@as(usize, last_len) <= buf.len);
+    // One line end with nothing behind it ends the section.
+    if (buf.len >= 1 and buf[0] == '\n') return true;
     if (buf.len >= 2 and buf[0] == '\r' and buf[1] == '\n') return true;
     const start: u32 = if (last_len > 4) last_len - 4 else 0;
-    return findHeadEnd(buf, start) != null;
+    return hasHeadEnd(buf, start);
 }
 
 /// Consume `byte`, or report why not. The shared cursor is infallible; this
@@ -367,66 +375,73 @@ fn expectDigit(cursor: *Cursor) Error!u8 {
     return got - '0';
 }
 
-/// CRLF, and only CRLF. A bare LF is rejected even though RFC 9112 §2.2
-/// permits recognizing one.
-fn expectCrlf(cursor: *Cursor) Error!void {
+/// A line end: LF, or CR LF. RFC 9112 §2.2 permits a recipient to recognize
+/// a single LF as a line terminator and ignore a preceding CR; this parser
+/// does. A bare CR is invalid, as §2.2 requires.
+fn expectLineEnd(cursor: *Cursor) Error!void {
     const first = cursor.next() orelse return error.Incomplete;
-    if (first == '\n') return error.Invalid;
+    if (first == '\n') return;
     if (first != '\r') return error.Invalid;
 
     const second = cursor.next() orelse return error.Incomplete;
     if (second != '\n') return error.Invalid;
 }
 
-/// Whether a complete head terminator is present. Starts at `last_len - 4`
-/// because a terminator completed by the newest bytes can begin no earlier.
+/// Whether a complete head terminator is present. A terminator is two line
+/// ends in a row, each LF or CRLF, so the shortest is `LF LF`. Starts at
+/// `last_len - 4` because a terminator completed by the newest bytes can begin
+/// no earlier.
 fn headComplete(buf: []const u8, last_len: u32) bool {
     assert(@as(usize, last_len) <= buf.len);
     const start: u32 = if (last_len > 4) last_len - 4 else 0;
-    return findHeadEnd(buf, start) != null;
+    return hasHeadEnd(buf, start);
 }
 
-/// The first index of `CRLF CRLF` at or after `start`, or null. The vector
-/// path finds CR candidates; the scalar reference is kept for the tests.
-fn findHeadEnd(buf: []const u8, start: u32) ?u32 {
+/// Whether a line end that is immediately followed by another line end starts
+/// at or after `start`. Every line end contains an LF, so the vector path finds
+/// LF candidates. The scalar reference is kept for the tests.
+fn hasHeadEnd(buf: []const u8, start: u32) bool {
     var index: usize = start;
-    while (simd.first(buf, index, syntax.crMask, syntax.crStop)) |at| {
-        if (at + 4 <= buf.len and
-            buf[at + 1] == '\n' and
-            buf[at + 2] == '\r' and
-            buf[at + 3] == '\n')
-        {
-            return @intCast(at);
-        }
+    while (simd.first(buf, index, syntax.lfMask, syntax.lfStop)) |at| {
+        if (lineEndsAt(buf, at + 1)) return true;
         index = at + 1;
     }
-    return null;
+    return false;
 }
 
-fn findHeadEndScalar(buf: []const u8, start: usize) ?u32 {
+fn hasHeadEndScalar(buf: []const u8, start: usize) bool {
     var index = start;
-    while (index + 4 <= buf.len) : (index += 1) {
-        if (buf[index] == '\r' and
-            buf[index + 1] == '\n' and
-            buf[index + 2] == '\r' and
-            buf[index + 3] == '\n')
-        {
-            return @intCast(index);
-        }
+    while (index < buf.len) : (index += 1) {
+        if (buf[index] != '\n') continue;
+        if (lineEndsAt(buf, index + 1)) return true;
     }
-    return null;
+    return false;
+}
+
+/// Whether a line end starts at `at`: LF, or CR LF. `at` may be the end of the
+/// buffer, which is not a line end yet.
+fn lineEndsAt(buf: []const u8, at: usize) bool {
+    assert(at <= buf.len);
+    if (at == buf.len) return false;
+    if (buf[at] == '\n') return true;
+    return buf[at] == '\r' and at + 1 < buf.len and buf[at + 1] == '\n';
 }
 
 /// RFC 9112 §2.2: a server SHOULD ignore at least one empty line before the
-/// request-line. More than one is tolerated; a flood is bounded by the
-/// caller's buffer limit.
+/// request-line. An empty line is a line end on its own. More than one is
+/// tolerated; a flood is bounded by the caller's buffer limit.
 fn skipLeadingEmptyLines(cursor: *Cursor) Error!void {
     while (true) {
         if (cursor.atEnd()) return error.Incomplete;
-        if (cursor.at(cursor.pos) != '\r') return;
-        if (@as(usize, cursor.pos) + 1 == cursor.buf.len) return error.Incomplete;
-        if (cursor.at(cursor.pos + 1) != '\n') return error.Invalid;
-        cursor.pos += 2;
+        switch (cursor.at(cursor.pos)) {
+            '\n' => cursor.pos += 1,
+            '\r' => {
+                if (!cursor.has(2)) return error.Incomplete;
+                if (cursor.at(cursor.pos + 1) != '\n') return error.Invalid;
+                cursor.pos += 2;
+            },
+            else => return,
+        }
     }
 }
 
@@ -466,15 +481,17 @@ fn scanTarget(cursor: *Cursor) Error![]const u8 {
     return cursor.slice(start, @intCast(at));
 }
 
-/// One line up to, but not including, its CR. A bare LF is not a terminator
-/// and is rejected. Validation is the field-value or reason-phrase character
-/// set; the caller decides whether to trim OWS. The scan stops at CR and
-/// rejects an invalid byte in the same pass.
+/// One line up to, but not including, its line end. The line end is LF or
+/// CRLF and the caller consumes it with `expectLineEnd`, so a CR is never part
+/// of the returned slice. Validation is the field-value or reason-phrase
+/// character set; the caller decides whether to trim OWS. The scan stops at CR
+/// or LF and rejects any other invalid byte in the same pass.
 inline fn scanLine(cursor: *Cursor) Error![]const u8 {
     const start = cursor.pos;
     const at = simd.first(cursor.buf, start, syntax.lineMask, syntax.lineStop) orelse
         return error.Incomplete;
-    if (cursor.buf[at] != '\r') return error.Invalid;
+    const byte = cursor.buf[at];
+    if (byte != '\r' and byte != '\n') return error.Invalid;
     cursor.pos = @intCast(at);
     return cursor.slice(start, @intCast(at));
 }
@@ -557,14 +574,13 @@ fn parseHeaders(cursor: *Cursor, storage: []Header) Error!Headers {
         if (cursor.atEnd()) return error.Incomplete;
         const first = cursor.buf[cursor.pos];
 
-        if (first == '\r') {
-            try expectCrlf(cursor);
+        if (first == '\r' or first == '\n') {
+            try expectLineEnd(cursor);
             return .{ .items = storage[0..@intCast(count)] };
         }
-        // A leading bare LF is not an empty line, and a line beginning with
-        // SP/HTAB is obs-fold or whitespace before the first field. RFC 9112
-        // §2.2 and §5.2 let a server reject both; this parser does.
-        if (first == '\n') return error.Invalid;
+        // A line beginning with SP/HTAB is obs-fold or whitespace before the
+        // first field. RFC 9112 §2.2 and §5.2 let a server reject both; this
+        // parser does.
         if (first == ' ' or first == '\t') return error.Invalid;
 
         const name = try scanToken(cursor, ':');
@@ -588,7 +604,7 @@ fn parseHeaders(cursor: *Cursor, storage: []Header) Error!Headers {
             if (byte != ' ' and byte != '\t') break;
         }
 
-        try expectCrlf(cursor);
+        try expectLineEnd(cursor);
 
         if (@as(usize, count) == storage.len) return error.TooManyHeaders;
         storage[@intCast(count)] = .{ .name = name, .value = raw[0..@intCast(value_end)] };
@@ -776,6 +792,13 @@ test "request: leading empty lines are skipped (RFC 9112 §2.2)" {
     const parsed = try parseRequestOnce(buf, &storage);
     try testing.expectEqual(buf.len, parsed.consumed);
     try testing.expectEqualStrings("GET", parsed.head.method_token);
+
+    // An empty line is LF or CRLF, on its own and mixed.
+    const lf = try parseRequestOnce("\n\nGET / HTTP/1.1\n\n", &storage);
+    try testing.expectEqual(18, lf.consumed);
+    const mixed = try parseRequestOnce("\r\n\nGET / HTTP/1.1\n\n", &storage);
+    try testing.expectEqual(19, mixed.consumed);
+    try testing.expectEqualStrings("GET", mixed.head.method_token);
 }
 
 test "field-line: name colon OWS value OWS (RFC 9112 §5, §5.1)" {
@@ -822,34 +845,55 @@ test "field-line: obs-fold is rejected (RFC 9112 §5.2)" {
     );
 }
 
-test "field-line: bare LF is rejected; bare CR is invalid (RFC 9112 §2.2)" {
+test "line endings: a bare LF ends a line (RFC 9112 §2.2)" {
     var storage: [2]Header = undefined;
-    // RFC 9112 §2.2 permits recognizing bare LF; this parser does not.
-    try testing.expectError(
-        error.Invalid,
-        parseRequestOnce("GET / HTTP/1.1\nHost: x\n\n", &storage),
-    );
-    // A bare CR not followed by LF must be treated as invalid.
+    const parsed = try parseRequestOnce("GET / HTTP/1.1\nHost: x\n\n", &storage);
+    try testing.expectEqualStrings("GET", parsed.head.method_token);
+    try testing.expectEqual(@as(usize, 1), parsed.head.headers.len());
+    try testing.expectEqualStrings("Host", parsed.head.headers.items[0].name);
+    try testing.expectEqualStrings("x", parsed.head.headers.items[0].value);
+    try testing.expectEqual(24, parsed.consumed);
+
+    // Line ends stand alone: CRLF on one line and LF on the next is not a
+    // mixed message, it is two line ends.
+    const mixed = try parseRequestOnce("GET / HTTP/1.1\r\nHost: x\n\r\n", &storage);
+    try testing.expectEqual(@as(usize, 1), mixed.head.headers.len());
+
+    const response = try parseResponseOnce("HTTP/1.1 200 OK\nA: 1\n\n", &storage);
+    try testing.expectEqualStrings("OK", response.head.reason);
+    try testing.expectEqualStrings("1", response.head.headers.items[0].value);
+
+    // A field section on its own, which is also the trailer parser.
+    var section_state: SearchState = .init;
+    const section = try parseFieldSection("A: 1\n\n", &section_state, &storage);
+    try testing.expectEqualStrings("1", section.headers.items[0].value);
+    try testing.expectEqual(6, section.consumed);
+}
+
+test "line endings: a bare CR is invalid (RFC 9112 §2.2)" {
+    var storage: [2]Header = undefined;
     try testing.expectError(
         error.Invalid,
         parseRequestOnce("GET / HTTP/1.1\rHost: x\r\n\r\n", &storage),
     );
+    try testing.expectError(
+        error.Invalid,
+        parseRequestOnce("GET / HTTP/1.1\r\nX: a\rb\r\n\r\n", &storage),
+    );
+    try testing.expectError(
+        error.Invalid,
+        parseRequestOnce("GET / HTTP/1.1\r\nX: a\r\r\n\r\n", &storage),
+    );
+    try testing.expectError(error.Invalid, parseResponseOnce("HTTP/1.1 200 OK\r\r\n", &storage));
 }
 
-test "field value and reason: a bare LF is rejected without waiting for CR" {
+test "line endings: a truncated line end is incomplete" {
     var storage: [1]Header = undefined;
+    try testing.expectError(error.Incomplete, parseResponseOnce("HTTP/1.1 200 OK\n", &storage));
+    try testing.expectError(error.Incomplete, parseResponseOnce("HTTP/1.1 200 OK\r", &storage));
     try testing.expectError(
-        error.Invalid,
-        parseRequestOnce("GET / HTTP/1.1\r\nX: a\n\r\n", &storage),
-    );
-    try testing.expectError(
-        error.Invalid,
-        parseResponseOnce("HTTP/1.1 200 OK\n\r\n", &storage),
-    );
-    // No CR anywhere: still invalid, not `error.Incomplete`.
-    try testing.expectError(
-        error.Invalid,
-        parseResponseOnce("HTTP/1.1 200 OK\n", &storage),
+        error.Incomplete,
+        parseRequestOnce("GET / HTTP/1.1\nHost: x\n", &storage),
     );
 }
 
@@ -893,6 +937,18 @@ test "fields: storage exhaustion is distinct from invalid syntax" {
         error.TooManyHeaders,
         parseRequestOnce("GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\n\r\n", &storage),
     );
+}
+
+test "SearchState: an LF-terminated head is found before the last byte (RFC 9112 §2.2)" {
+    var storage: [8]Header = undefined;
+    var state: SearchState = .init;
+    const buf = "GET / HTTP/1.1\nHost: x\n\n";
+
+    for (0..buf.len) |len| {
+        try testing.expectError(error.Incomplete, parseRequest(buf[0..len], &state, &storage));
+    }
+    const parsed = try parseRequest(buf, &state, &storage);
+    try testing.expectEqual(buf.len, parsed.consumed);
 }
 
 test "incomplete: every strict prefix of a valid request" {
@@ -976,21 +1032,43 @@ test "head terminator: every placement, vector and scalar (RFC 9112 §2.1)" {
         @memset(&buf, 'a');
         @memcpy(buf[at..][0..4], "\r\n\r\n");
 
-        const want: ?u32 = @intCast(at);
-        try testing.expectEqual(want, findHeadEnd(&buf, 0));
-        try testing.expectEqual(want, findHeadEnd(&buf, @intCast(at)));
-        try testing.expectEqual(want, findHeadEndScalar(&buf, 0));
+        try testing.expect(hasHeadEnd(&buf, 0));
+        try testing.expect(hasHeadEnd(&buf, @intCast(at)));
+        try testing.expect(hasHeadEndScalar(&buf, 0));
+
+        // Two bare LFs are the shortest terminator.
+        @memset(&buf, 'a');
+        @memcpy(buf[at..][0..2], "\n\n");
+        try testing.expect(hasHeadEnd(&buf, 0));
+        try testing.expect(hasHeadEndScalar(&buf, 0));
+
+        // The line ends may differ from each other.
+        @memset(&buf, 'a');
+        @memcpy(buf[at..][0..3], "\r\n\n");
+        try testing.expect(hasHeadEnd(&buf, 0));
+        try testing.expect(hasHeadEndScalar(&buf, 0));
+
+        @memset(&buf, 'a');
+        @memcpy(buf[at..][0..3], "\n\r\n");
+        try testing.expect(hasHeadEnd(&buf, 0));
+        try testing.expect(hasHeadEndScalar(&buf, 0));
     }
 
     @memset(&buf, 'a');
-    try testing.expect(findHeadEnd(&buf, 0) == null);
-    try testing.expect(findHeadEndScalar(&buf, 0) == null);
+    try testing.expect(!hasHeadEnd(&buf, 0));
+    try testing.expect(!hasHeadEndScalar(&buf, 0));
 
-    // One CRLF is not the end of the head.
+    // One CRLF is not the end of the head, and neither is one bare LF.
     @memset(&buf, 'a');
     buf[3] = '\r';
     buf[4] = '\n';
-    try testing.expect(findHeadEnd(&buf, 0) == null);
+    try testing.expect(!hasHeadEnd(&buf, 0));
+    try testing.expect(!hasHeadEndScalar(&buf, 0));
+
+    @memset(&buf, 'a');
+    buf[3] = '\n';
+    try testing.expect(!hasHeadEnd(&buf, 0));
+    try testing.expect(!hasHeadEndScalar(&buf, 0));
 }
 
 test "target scanner: every byte at every position (RFC 9112 §3.2)" {
@@ -1030,7 +1108,7 @@ test "line scanner: every byte at every position (RFC 9110 §5.5)" {
             var cursor: Cursor = .init(&buf);
             const byte: u8 = @intCast(value);
 
-            if (byte == '\r') {
+            if (byte == '\r' or byte == '\n') {
                 const line = try scanLine(&cursor);
                 try testing.expectEqual(at, line.len);
                 try testing.expectEqual(at, @as(usize, cursor.pos));
@@ -1043,25 +1121,39 @@ test "line scanner: every byte at every position (RFC 9110 §5.5)" {
     }
 }
 
-test "fuzz head terminator against std" {
+test "fuzz head terminator against a model" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *testing.Smith) anyerror!void {
             var buf: [256]u8 = undefined;
             const input = buf[0..smith.slice(&buf)];
 
-            const want: ?u32 = if (mem.findPos(u8, input, 0, "\r\n\r\n")) |at|
-                @intCast(at)
-            else
-                null;
-            try testing.expectEqual(want, findHeadEnd(input, 0));
+            const want: bool = blk: {
+                var index: usize = 0;
+                while (index + 1 < input.len) : (index += 1) {
+                    if (input[index] != '\n') continue;
+                    const next = input[index + 1];
+                    if (next == '\n' or
+                        (next == '\r' and index + 2 < input.len and input[index + 2] == '\n'))
+                    {
+                        break :blk true;
+                    }
+                }
+                break :blk false;
+            };
+            try testing.expectEqual(want, hasHeadEnd(input, 0));
+            try testing.expectEqual(want, hasHeadEndScalar(input, 0));
         }
     }.run, .{
         .corpus = &.{
             "",
             "\r\n\r\n",
+            "\n\n",
+            "\n\r\n",
+            "\r\n\n",
             "abc\r\n\r\ndef",
             "\r\r\n\r\n",
             "GET / HTTP/1.1\r\n\r\n",
+            "GET / HTTP/1.1\n\n",
         },
     });
 }

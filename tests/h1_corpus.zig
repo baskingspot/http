@@ -148,8 +148,8 @@ const response_cases = [_]HeadCase{
     .{
         .kind = .response,
         .input = "HTTP/1.1 200 OK\n",
-        .outcome = .invalid,
-        .note = "pico waits for more; a bare LF is invalid here",
+        .outcome = .incomplete,
+        .note = "pico waits for more; so do we: one line end is not the head",
     },
     .{ .kind = .response, .input = "HTTP/1.1 200 OK\r\nA: 1\r", .outcome = .incomplete },
     .{ .kind = .response, .input = "HTTP/1.1 200 OK\r\nA: 1\r\n", .outcome = .incomplete },
@@ -344,8 +344,8 @@ const chunk_cases = [_]ChunkCase{
             "hello world\r\n" ++
             "0\r\n" ++
             "\n",
-        .expected = .invalid,
-        .note = "pico accepts bare LF in trailers; we reject",
+        .expected = .{ .body = "hello world" },
+        .note = "a trailer section is field lines, so a bare LF is a line end",
     },
     .{
         .input = "6\r\n" ++
@@ -354,8 +354,8 @@ const chunk_cases = [_]ChunkCase{
             "world\r\n" ++
             "0\r\n" ++
             "a: b\nc: d\n\n",
-        .expected = .invalid,
-        .note = "pico accepts bare LF in trailers; we reject",
+        .expected = .{ .body = "hello world" },
+        .note = "a trailer section is field lines, so a bare LF is a line end",
     },
 };
 

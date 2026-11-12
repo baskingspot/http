@@ -278,13 +278,20 @@ state, so one `SearchState` serves every request on a connection, and a client
 that trickles one octet at a time cannot force a full rescan per read.
 
 `h1.parseFieldSection` takes the same state and has to find an empty section,
-which is a single CRLF with no `CRLF CRLF` behind it.
+which is a single line end with nothing behind it.
+
+## Line endings
+
+A line end is LF or CRLF. RFC 9112 §2.2 permits recognizing a single LF, and
+deployed servers do; the start line and every field line take either. A bare CR
+is `error.Invalid`, as §2.2 requires. Chunk framing is the exception and stays
+CRLF-only: the size line, the CRLF after chunk data, and the last chunk decide
+where the next message starts.
 
 ## Where the parser is strict
 
 Where RFC 9112 permits either behavior, this parser rejects:
 
-- bare LF as a line terminator, which §2.2 permits recognizing
 - more than one SP between start-line components, which §3 and §4 permit parsing on whitespace
 - obs-fold, which §5.2 permits rejecting or unfolding
 - SP or HTAB before the first field, which §2.2 permits rejecting or consuming
