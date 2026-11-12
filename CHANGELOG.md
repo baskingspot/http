@@ -5,6 +5,13 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-12
+
+### Changed
+
+- The `tls` pin is v0.4.1, which carries the stdx v0.4.0 alignment, so one
+  tls instance serves every graph that also holds tls directly.
+
 ## [0.4.1] - 2026-11-12
 
 ### Changed
