@@ -5,6 +5,14 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-12
+
+### Changed
+
+- The `stdx` pin is v0.4.0, so one stdx instance serves every graph that also
+  holds stdx directly. Additive on top of the commit 0.3.0 shipped: no API
+  change for http.
+
 ## [0.4.0] - 2026-11-12
 
 ### Changed
