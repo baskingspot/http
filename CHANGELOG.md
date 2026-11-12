@@ -5,9 +5,13 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-12
+
 ### Changed
 
 - h2 `engine.blocking.serveIo` takes `Io` as its first argument, matching the h1 engine and `serve`. Call sites pass `io` and, for a TLS transport, `wait_fd = .init(conn.socketHandle())`. `Config.wait_fd` is a `stdx.posix.OptionalFd`.
+- The h1 start line and field lines accept LF as a line end as well as CRLF, as RFC 9112 §2.2 permits. A bare CR is still `error.Invalid`, and chunk framing still requires CRLF.
+- `h2.client.Driver.read`, `ReadDeadline.set`, `Exchange.setDeadline`, and `http_tls.client.Connection.setDeadline` take `stdx.time.OptionalTimestamp`. Use `.none` to clear a deadline. `http_tls.client.Connection.Options.deadline` replaces `deadline_ns`. Per-stream deadlines store one `u64` instead of an optional `i96`.
 
 ### Fixed
 
@@ -16,11 +20,6 @@ All notable changes to http are recorded here. The format follows
 - h2 `Session` decodes the field block of a HEADERS it rejects, including a late HEADERS or trailers on a stream it already reset, and across CONTINUATION, before it fails the stream (RFC 9113 §4.3). Dropping the block left the HPACK dynamic table behind the peer's, so a later block on another stream decoded wrong fields or closed the connection with a compression error.
 - A Zig 0.17 project that depends on http builds again. Zig 0.17 configures every package in the dependency graph, so tls 0.3.0's lazy `libxev` dependency failed to build even for a consumer that never enabled `http_tls`. The `tls` pin moves to v0.4.0, which dropped `tls_xev`.
 - `hpack.Decoder` returns the new `error.Desynchronized` for every block after one that ended early or was invalid, instead of decoding it against a table that no longer matches the peer's. A `TooManyHeaders` or `OutputTooSmall` error leaves the decoder usable only when the whole block was read with the table in step, which needs `out_bytes` to hold the largest table entry; with less, it ends the block early and poisons the decoder. h2 `Session` sizes its decode storage to hold the larger of `max_header_list_size` and `header_table_size`.
-
-### Changed
-
-- The h1 start line and field lines accept LF as a line end as well as CRLF, as RFC 9112 §2.2 permits. A bare CR is still `error.Invalid`, and chunk framing still requires CRLF.
-- `h2.client.Driver.read`, `ReadDeadline.set`, `Exchange.setDeadline`, and `http_tls.client.Connection.setDeadline` take `stdx.time.OptionalTimestamp`. Use `.none` to clear a deadline. `http_tls.client.Connection.Options.deadline` replaces `deadline_ns`. Per-stream deadlines store one `u64` instead of an optional `i96`.
 
 ## [0.3.0] - 2026-11-10
 
