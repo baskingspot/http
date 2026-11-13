@@ -1,8 +1,11 @@
 //! A blocking HTTP/1 client with a streaming response body.
 //!
 //! The client writes one request, parses the response head into a per-response
-//! arena, and exposes body bytes through the shared client `Body` interface.
-//! It does not own the transport; the caller closes the stream.
+//! arena, and exposes body bytes through a `std.Io.Reader` on the shared client
+//! `Body`. Framing is decoded here: whether the response is delimited by
+//! Content-Length, by chunked framing, or by the close of the connection never
+//! reaches the caller. It does not own the transport; the caller closes the
+//! stream.
 
 const std = @import("std");
 const Io = std.Io;
@@ -19,17 +22,21 @@ const h1 = @import("../root.zig");
 pub const Request = common.Request;
 pub const ResponseHead = common.ResponseHead;
 pub const Body = common.Body;
-pub const BodyResult = common.BodyResult;
-pub const BodyError = common.BodyError;
+pub const Outcome = common.Outcome;
+pub const ReadCause = common.ReadCause;
 pub const Local = common.Local;
 pub const Response = common.Response;
 pub const Config = common.Config;
 
 const body_vtable: Body.VTable = .{
-    .read = Client.bodyRead,
-    .resetCode = Client.bodyResetCode,
-    .localCause = Client.bodyLocalCause,
+    .outcome = Client.bodyOutcome,
     .close = Client.bodyClose,
+};
+
+/// The body stream. `Client.bodyReader` is the field this vtable is looked up
+/// from, and the client never moves after `init`.
+const body_reader_vtable: Io.Reader.VTable = .{
+    .stream = Client.bodyStream,
 };
 
 pub const Client = struct {
@@ -42,10 +49,17 @@ pub const Client = struct {
     header_storage: []Header,
     max_header_bytes: usize,
     max_headers: usize,
+    read_cause: ?ReadCause,
     active: bool,
     body_eof: bool,
-    body_local: ?Local,
+    body_outcome: ?Outcome,
+    /// The response byte stream. `request` hands out a `Body` holding a pointer
+    /// here, so the client must stay put for the life of that body.
+    body_reader: Io.Reader,
     dirty: bool,
+    /// Body bytes the machine delivered that the writer has not taken yet. The
+    /// slice borrows `recv`, and no advancing operation runs while it is
+    /// non-empty, so a writer that accepts a prefix never loses bytes.
     pending: []const u8,
 
     pub fn init(
@@ -68,9 +82,16 @@ pub const Client = struct {
             .header_storage = header_storage,
             .max_header_bytes = config.max_header_bytes,
             .max_headers = config.max_headers,
+            .read_cause = config.read_cause,
             .active = false,
             .body_eof = false,
-            .body_local = null,
+            .body_outcome = null,
+            .body_reader = .{
+                .vtable = &body_reader_vtable,
+                .buffer = &.{},
+                .seek = 0,
+                .end = 0,
+            },
             .dirty = false,
             .pending = &.{},
         };
@@ -95,7 +116,7 @@ pub const Client = struct {
 
         _ = self.arena.reset(.free_all);
         self.body_eof = false;
-        self.body_local = null;
+        self.body_outcome = null;
         self.pending = &.{};
 
         const method = Method.parse(value.method_token);
@@ -136,7 +157,11 @@ pub const Client = struct {
                     self.active = true;
                     return .{
                         .head = head,
-                        .body = .{ .ptr = self, .vtable = &body_vtable },
+                        .body = .{
+                            .ptr = self,
+                            .vtable = &body_vtable,
+                            .reader = &self.body_reader,
+                        },
                     };
                 },
                 .body, .done => return error.UnexpectedBody,
@@ -193,89 +218,109 @@ pub const Client = struct {
         return self.conn.received(take);
     }
 
-    fn bodyRead(ptr: *anyopaque) BodyError!BodyResult {
-        const self: *Client = @ptrCast(@alignCast(ptr));
-        return self.readBody();
+    fn bodyStream(erased: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+        const self: *Client = @fieldParentPtr("body_reader", erased);
+        return self.streamBody(w, limit);
     }
 
-    fn readBody(self: *Client) BodyError!BodyResult {
+    /// Pump body bytes into `w`. Returns the count written, which is never
+    /// more than `limit`, and reports a clean end as `error.EndOfStream`. A
+    /// writer that accepts a prefix keeps the rest in `pending` for the next
+    /// call; nothing advances the connection while `pending` holds bytes.
+    fn streamBody(self: *Client, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
         if (!self.active) return error.EndOfStream;
-        while (true) {
-            // A slice returned on the previous call is still the current
-            // slice. The next read releases it and advances the connection.
-            if (self.pending.len != 0) self.pending = &.{};
-            if (self.body_eof) return error.EndOfStream;
 
-            var event = self.conn.next() catch |err| return self.bodyFailure(err);
+        var written: usize = 0;
+        const cap = limit.minInt(std.math.maxInt(usize));
+        if (cap == 0) return 0;
+        while (written < cap) {
+            if (self.pending.len != 0) {
+                const take = self.pending[0..@min(self.pending.len, cap - written)];
+                const n = w.write(take) catch return error.WriteFailed;
+                self.pending = self.pending[n..];
+                written += n;
+                if (n != take.len) return written;
+                continue;
+            }
+            if (self.body_eof) break;
+            // Never block for more bytes once this call has some. The reader is
+            // free to hand back a short count.
+            if (written != 0) return written;
+
+            var event = self.conn.next() catch |err| return self.failBody(err);
             while (true) {
                 switch (event) {
                     .body => |bytes| {
-                        if (bytes.len == 0) {
-                            self.dirty = true;
-                            return error.Protocol;
-                        }
+                        if (bytes.len == 0) return self.failBody(error.EmptyBody);
                         self.pending = bytes;
-                        return .{ .data = bytes };
+                        break;
                     },
                     .done => {
                         self.body_eof = true;
-                        return error.EndOfStream;
+                        break;
                     },
-                    .need_more => event = self.readEvent() catch |err| return self.bodyFailure(err),
-                    .response => {
-                        self.dirty = true;
-                        return error.Protocol;
-                    },
-                    .closed => {
-                        self.dirty = true;
-                        return error.Truncated;
-                    },
+                    .need_more => event = self.readEvent() catch |err| return self.failBody(err),
+                    .response => return self.failBody(error.UnexpectedResponse),
+                    .closed => return self.failBody(error.Truncated),
                 }
             }
         }
+
+        if (written == 0) return error.EndOfStream;
+        return written;
     }
 
-    fn bodyFailure(self: *Client, err: anyerror) BodyError {
+    /// Classify a reading failure, latch the cause on the body, and report it
+    /// as `error.ReadFailed`, which is the only failure `Io.Reader` has room
+    /// for.
+    fn failBody(self: *Client, err: anyerror) error{ReadFailed} {
+        const outcome = self.classify(err);
+        self.body_outcome = outcome;
+        switch (outcome) {
+            .local => |local| switch (local) {
+                .canceled, .capacity => {},
+                else => self.dirty = true,
+            },
+            .truncated, .protocol_error, .reset => self.dirty = true,
+        }
+        return error.ReadFailed;
+    }
+
+    fn classify(self: *const Client, err: anyerror) Outcome {
         return switch (err) {
-            error.Canceled => blk: {
-                self.body_local = .canceled;
-                break :blk error.LocalCanceled;
-            },
-            error.OutOfMemory => blk: {
-                self.body_local = .out_of_memory;
-                self.dirty = true;
-                break :blk error.LocalOutOfMemory;
-            },
-            error.BufferTooSmall => blk: {
-                self.body_local = .capacity;
-                break :blk error.LocalCapacity;
-            },
-            error.WouldBlock => blk: {
-                self.body_local = .unusable;
-                self.dirty = true;
-                break :blk error.LocalUnusable;
-            },
+            // The reader reports `error.ReadFailed` for every failure of its
+            // own and keeps the cause, so ask it rather than guess. A reader
+            // that keeps no cause latches nothing and reads as a truncation.
+            error.ReadFailed => if (self.read_cause) |latched| blk: {
+                const cause = latched.get() orelse break :blk Outcome.truncated;
+                break :blk common.localFromCause(cause);
+            } else Outcome.truncated,
+            error.Canceled => .{ .local = .canceled },
+            error.OutOfMemory => .{ .local = .out_of_memory },
+            error.BufferTooSmall => .{ .local = .capacity },
+            error.WouldBlock => .{ .local = .unusable },
             error.Incomplete,
             error.EndOfStream,
-            error.ReadFailed,
-            => blk: {
-                self.dirty = true;
-                break :blk error.Truncated;
-            },
-            else => blk: {
-                self.dirty = true;
-                break :blk error.Protocol;
-            },
+            error.Truncated,
+            => .truncated,
+            error.EmptyBody => .protocol_error,
+            else => .protocol_error,
         };
     }
 
-    fn bodyResetCode(_: *anyopaque) ?u32 {
-        return null;
+    /// True when the last failure left the response recoverable: our own
+    /// cancellation, or a local capacity limit.
+    fn recoverable(self: *const Client) bool {
+        const local = switch (self.body_outcome orelse return false) {
+            .local => |local| local,
+            else => return false,
+        };
+        return local == .canceled or local == .capacity;
     }
 
-    fn bodyLocalCause(ptr: *anyopaque) ?Local {
+    fn bodyOutcome(ptr: *anyopaque) ?Outcome {
         const self: *Client = @ptrCast(@alignCast(ptr));
-        return self.body_local;
+        return self.body_outcome;
     }
 
     fn bodyClose(ptr: *anyopaque) void {
@@ -289,23 +334,30 @@ pub const Client = struct {
             // h1 cannot reset a stream. Drain a bounded amount so the
             // connection can be reused; a larger or failed drain leaves the
             // connection dirty for the caller to close.
-            const max_drain_bytes = 1024 * 1024;
-            var drained: usize = 0;
-            while (drained < max_drain_bytes) {
-                const result = self.readBody() catch |err| switch (err) {
+            const max_drain_bytes: usize = 1024 * 1024;
+            var buffer: [4096]u8 = undefined;
+            var discarding: Io.Writer.Discarding = .init(&buffer);
+            while (discarding.count < max_drain_bytes) {
+                const used: usize = @intCast(discarding.count);
+                const limit: Io.Limit = .limited(max_drain_bytes - used);
+                const outcome = self.streamBody(&discarding.writer, limit);
+                if (outcome) |_| continue else |err| switch (err) {
                     error.EndOfStream => break,
-                    error.LocalCanceled, error.LocalCapacity => break,
-                    else => {
+                    error.WriteFailed => {
                         self.dirty = true;
                         break;
                     },
-                };
-                drained += result.data.len;
+                    error.ReadFailed => {
+                        if (!self.recoverable()) self.dirty = true;
+                        break;
+                    },
+                }
             }
             if (!self.body_eof) self.dirty = true;
         }
         self.active = false;
         self.body_eof = false;
+        self.body_outcome = null;
         self.pending = &.{};
     }
 };
@@ -407,17 +459,10 @@ test "streaming client copies a body that arrives after the head" {
     try testing.expectEqual(common.Protocol.h1, response.head.protocol);
 
     var got: [11]u8 = undefined;
-    var used: usize = 0;
-    while (true) {
-        const result = response.body.read() catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
-        };
-        try testing.expect(result.data.len != 0);
-        @memcpy(got[used..][0..result.data.len], result.data);
-        used += result.data.len;
-    }
+    var writer = Io.Writer.fixed(&got);
+    const used = try response.body.reader.streamRemaining(&writer);
     try testing.expectEqualStrings("hello world", got[0..used]);
+    try testing.expect(response.body.outcome() == null);
     response.body.close();
 }
 
@@ -447,15 +492,8 @@ test "streaming client sends a static request body" {
     });
     try testing.expectEqual(.ok, response.head.status);
     var got: [2]u8 = undefined;
-    var used: usize = 0;
-    while (true) {
-        const result = response.body.read() catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
-        };
-        @memcpy(got[used..][0..result.data.len], result.data);
-        used += result.data.len;
-    }
+    var writer = Io.Writer.fixed(&got);
+    const used = try response.body.reader.streamRemaining(&writer);
     try testing.expectEqualStrings("ok", got[0..used]);
     response.body.close();
 }
@@ -482,4 +520,240 @@ test "request with a body reaches the response read" {
         .target = "/",
         .headers = &.{.{ .name = "host", .value = "example.com" }},
     }));
+}
+
+/// Serve `text` on one connection and hand the body to `body_fn`. This is the
+/// setup one response needs, so the tests below differ only in their framing.
+fn withBody(
+    fixture: *Fixture,
+    context: anytype,
+    comptime body_fn: fn (@TypeOf(context), Body) anyerror!void,
+) !void {
+    const stream = try fixture.address.connect(fixture.io, .{ .mode = .stream });
+    defer stream.close(fixture.io);
+
+    var write_buffer: [256]u8 = undefined;
+    var stream_writer = stream.writer(fixture.io, &write_buffer);
+    var stream_reader = stream.reader(fixture.io, &.{});
+    var client: Client = undefined;
+    try client.init(&stream_reader.interface, &stream_writer.interface, .{
+        .allocator = testing.allocator,
+    });
+    defer client.deinit();
+
+    const response = try client.request(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+    });
+    defer response.body.close();
+    try body_fn(context, response.body);
+}
+
+fn expectSameBytes(expected: []const u8, body: Body) !void {
+    var got: [64]u8 = undefined;
+    var writer = Io.Writer.fixed(&got);
+    const used = try body.reader.streamRemaining(&writer);
+    try testing.expectEqualStrings(expected, got[0..used]);
+    try testing.expect(body.outcome() == null);
+}
+
+test "a streaming body is framing-blind" {
+    const payload: []const u8 = "the same bytes every time";
+    const responses = [_][]const u8{
+        "HTTP/1.1 200 OK\r\nContent-Length: 25\r\nConnection: close\r\n\r\n" ++
+            "the same bytes every time",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" ++
+            "19\r\nthe same bytes every time\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nthe same bytes every time",
+    };
+    try testing.expectEqual(25, payload.len);
+
+    for (responses) |text| {
+        var fixture: Fixture = undefined;
+        try fixture.init(text);
+        defer fixture.deinit();
+        try withBody(&fixture, payload, expectSameBytes);
+    }
+}
+
+fn countBytes(expected: u64, body: Body) !void {
+    var buffer: [4096]u8 = undefined;
+    var discarding: Io.Writer.Discarding = .init(&buffer);
+    _ = try body.reader.streamRemaining(&discarding.writer);
+    try testing.expectEqual(expected, discarding.fullCount());
+    try testing.expect(body.outcome() == null);
+}
+
+// The cap this used to hit was 16 MiB in `h1.ClientConn`, counted over the
+// whole response. A streaming caller has no such bound: the machine buffers
+// one receive window and the reader hands its bytes on.
+test "a streaming body has no total-size cap" {
+    const total: usize = 17 * 1024 * 1024;
+    const gpa = testing.allocator;
+
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(gpa);
+    var chunk: [64 * 1024]u8 = undefined;
+    @memset(&chunk, 'x');
+    var remaining = total;
+    while (remaining > 0) {
+        const n = @min(remaining, chunk.len);
+        var size_buf: [32]u8 = undefined;
+        try body.appendSlice(gpa, try std.fmt.bufPrint(&size_buf, "{x}\r\n", .{n}));
+        try body.appendSlice(gpa, chunk[0..n]);
+        try body.appendSlice(gpa, "\r\n");
+        remaining -= n;
+    }
+    try body.appendSlice(gpa, "0\r\n\r\n");
+
+    const response = try std.fmt.allocPrint(
+        gpa,
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{s}",
+        .{body.items},
+    );
+    defer gpa.free(response);
+
+    var fixture: Fixture = undefined;
+    try fixture.init(response);
+    defer fixture.deinit();
+    try withBody(&fixture, @as(u64, total), countBytes);
+}
+
+/// A writer that accepts at most `step` bytes per call, so every write into it
+/// is short. The body must keep the remainder rather than drop it.
+const Trickle = struct {
+    out: [64]u8 = undefined,
+    used: usize = 0,
+    step: usize = 3,
+    writer: Io.Writer,
+
+    fn init(self: *Trickle) void {
+        self.* = .{ .writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} } };
+    }
+
+    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        _ = splat;
+        const self: *Trickle = @fieldParentPtr("writer", w);
+        if (data.len == 0) return 0;
+        const take = @min(data[0].len, self.step);
+        @memcpy(self.out[self.used..][0..take], data[0][0..take]);
+        self.used += take;
+        return take;
+    }
+};
+
+fn trickleBody(_: void, body: Body) !void {
+    var trickle: Trickle = undefined;
+    trickle.init();
+    _ = try body.reader.streamRemaining(&trickle.writer);
+    try testing.expectEqualStrings("hello world", trickle.out[0..trickle.used]);
+}
+
+test "a short write keeps the rest of the body" {
+    var fixture: Fixture = undefined;
+    try fixture.init(
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" ++
+            "b\r\nhello world\r\n0\r\n\r\n",
+    );
+    defer fixture.deinit();
+    try withBody(&fixture, @as(void, {}), trickleBody);
+}
+
+fn expectTruncated(_: void, body: Body) !void {
+    var buffer: [64]u8 = undefined;
+    var discarding: Io.Writer.Discarding = .init(&buffer);
+    try testing.expectError(error.ReadFailed, body.reader.streamRemaining(&discarding.writer));
+    try testing.expectEqual(Outcome.truncated, body.outcome().?);
+}
+
+test "a peer that stops mid-body is a truncation" {
+    var fixture: Fixture = undefined;
+    try fixture.init("HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort");
+    defer fixture.deinit();
+    try withBody(&fixture, @as(void, {}), expectTruncated);
+}
+
+/// A reader that serves `head` and then fails every read with
+/// `error.ReadFailed`, latching a cause the way a TLS connection does.
+const LatchReader = struct {
+    head: []const u8,
+    pos: usize = 0,
+    latched: ?anyerror = null,
+    reader: Io.Reader,
+
+    fn init(self: *LatchReader, head: []const u8) void {
+        self.* = .{
+            .head = head,
+            .reader = .{ .vtable = &.{ .stream = stream }, .buffer = &.{}, .seek = 0, .end = 0 },
+        };
+    }
+
+    fn stream(erased: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+        const self: *LatchReader = @fieldParentPtr("reader", erased);
+        const rest = self.head[self.pos..];
+        if (rest.len == 0) return error.ReadFailed;
+        const take = rest[0..limit.minInt(rest.len)];
+        const n = try w.write(take);
+        self.pos += n;
+        return n;
+    }
+
+    fn cause(context: *const anyopaque) ?anyerror {
+        const self: *const LatchReader = @ptrCast(@alignCast(context));
+        return self.latched;
+    }
+};
+
+test "a latched read cause reaches the body instead of reading as a truncation" {
+    var source: LatchReader = undefined;
+    source.init("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n");
+    source.latched = error.TimedOut;
+
+    var out: [256]u8 = undefined;
+    var out_writer = Io.Writer.fixed(&out);
+    var client: Client = undefined;
+    try client.init(&source.reader, &out_writer, .{
+        .allocator = testing.allocator,
+        .read_cause = .{ .context = &source, .cause = LatchReader.cause },
+    });
+    defer client.deinit();
+
+    const response = try client.request(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+    });
+    defer response.body.close();
+
+    var got: [16]u8 = undefined;
+    var got_writer = Io.Writer.fixed(&got);
+    try testing.expectError(error.ReadFailed, response.body.reader.streamRemaining(&got_writer));
+    try testing.expectEqual(Outcome{ .local = .timed_out }, response.body.outcome().?);
+}
+
+/// The reader has no internal buffer, so the `Reader` surface that needs one
+/// (`peek`, `take`, `takeArray`) is out. Everything that writes into a caller
+/// buffer is in, and that is what a body is for.
+fn readWithStdHelpers(_: void, body: Body) !void {
+    const head = "the same bytes";
+    try testing.expectEqual(8 + 6, head.len);
+    var prefix: [8]u8 = undefined;
+    try body.reader.readSliceAll(prefix[0..]);
+    try testing.expectEqualStrings(head[0..8], &prefix);
+
+    const rest = try body.reader.allocRemaining(testing.allocator, .limited(1024));
+    defer testing.allocator.free(rest);
+    try testing.expectEqualStrings(head[8..], rest);
+}
+
+test "a body reader serves readSliceAll and allocRemaining" {
+    var fixture: Fixture = undefined;
+    try fixture.init(
+        "HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\nthe same bytes",
+    );
+    defer fixture.deinit();
+    try withBody(&fixture, @as(void, {}), readWithStdHelpers);
 }

@@ -309,17 +309,19 @@ fn printResponse(response: client.Response, silent: bool, verbose: bool) !void {
 }
 
 fn drain(body: http.client.Body, w: *Io.Writer) !void {
-    while (true) {
-        const result = body.read() catch |e| return switch (e) {
-            error.EndOfStream => {},
-            error.Reset => error.StreamReset,
-            error.Truncated => error.TruncatedBody,
-            error.Protocol => error.ProtocolError,
-            error.LocalCanceled => error.Canceled,
-            error.LocalCapacity => error.LocalCapacity,
-            error.LocalOutOfMemory => error.OutOfMemory,
-            error.LocalUnusable => error.ConnectionUnusable,
-        };
-        try w.writeAll(result.data);
-    }
+    _ = body.reader.streamRemaining(w) catch |failure| switch (failure) {
+        error.ReadFailed => return switch (body.outcome() orelse .truncated) {
+            .truncated => error.TruncatedBody,
+            .protocol_error => error.ProtocolError,
+            .reset => error.StreamReset,
+            .local => |local| switch (local) {
+                .canceled => error.Canceled,
+                .capacity => error.LocalCapacity,
+                .out_of_memory => error.OutOfMemory,
+                .unusable => error.ConnectionUnusable,
+                .timed_out => error.DeadlineExpired,
+            },
+        },
+        error.WriteFailed => return error.WriteFailed,
+    };
 }

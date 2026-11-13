@@ -80,11 +80,13 @@ pub fn fetchIo(
     if (request.body.len != 0) try w.body(request.body);
     try writer.flush();
 
+    // This adapter materializes the whole body into a caller-owned buffer, so
+    // it states the cap the caller actually has instead of inheriting one.
     var conn: h1.ClientConn = .init(.{
         .recv_buffer = config.recv_buffer,
         .headers = config.headers,
         .trailers = config.trailers,
-        .body_bytes = config.body_buffer.len,
+        .body_bytes = @intCast(config.body_buffer.len),
     });
     conn.start(request.method);
 

@@ -747,23 +747,34 @@ pseudo-field.
 
 `client.ResponseHead` is a `protocol`, a `Status`, and a `Headers` snapshot the
 client owns until the body closes or the next request starts. `client.Config`
-holds the allocator, `max_header_bytes` (16 KiB), and `max_headers` (128).
+holds the allocator, `max_header_bytes` (16 KiB), `max_headers` (128), and an
+optional `read_cause` for a reader that latches why a read failed.
 
 ## Read a body
 
-`client.Body` is a vtable with `read` and `close`. `read` returns a `BodyRead`:
-`.data` with a borrowed slice, `.eof`, `.reset` with the RST_STREAM code,
-`.truncated`, `.protocol`, or `.local` with a `Local` value.
+`client.Body.reader` is a `std.Io.Reader`, so a response body goes anywhere a
+reader goes: `streamRemaining`, `allocRemaining`, `take`, or your own parser.
+Framing is decoded beneath it. Whether the response is delimited by
+`Content-Length`, by chunked framing, or by the close of the connection is
+never visible to the caller, and neither is the code that decodes it.
 
-Data is never empty and stays valid until the next operation that advances the
-connection, so a caller that keeps bytes across a read must copy them. An h2
-slice pins the connection-level flow-control window until the next read or
-close, and four 16 KiB slices exhaust the default 65,535-byte window.
+`error.EndOfStream` is the only clean end. Every other read outcome is
+`error.ReadFailed`, and `body.outcome()` says why: `.truncated` when the peer
+stopped early, `.protocol_error` when it broke a rule, `.reset` carrying the
+RST_STREAM code, or `.local` with a `Local` value. `Local.timed_out` is a read
+deadline you set. A reader that latches its own failure cause is wired in with
+`client.Config.read_cause`, which is what
+`http_tls.client.Connection.readCause()` provides.
 
-`Local` says whether the connection survives. `canceled` and `capacity` keep
-it; `out_of_memory` and `unusable` close it. `BodyStep` is the same shape with
-`would_block` for an evented client, and a blocking `Body` never returns
-`would_block`.
+There is no total-size bound. A caller that wants one wraps the reader in
+`Io.Reader.limited`. The reader hands out borrowed slices, so holding one pins
+the connection the way an h2 DATA slice pins the window; a caller that keeps
+the bytes must copy them or exhaust them before the next read.
+
+`Local` says whether the connection survives. `canceled`, `capacity`, and
+`timed_out` leave it unusable for this response; `out_of_memory` and `unusable`
+close it. `BodyStep` is the older non-blocking shape, with `would_block` for an
+evented client, and a blocking body never returns `would_block`.
 
 ## Dispatch on the protocol
 
@@ -780,7 +791,8 @@ belongs above this layer, where the connection is opened.
 
 `h1.client.streaming.Client` implements the shared contract over
 `h1.ClientConn`, with a streaming response body and a per-response arena for
-the head.
+the head. It hands the body back as the `std.Io.Reader` above, and the framing
+decoders behind it are `h1.ClientConn`'s.
 
 `h1.client.blocking.fetch` is the one-request adapter with no allocator and no
 connection reuse. It takes an `h1.client.blocking.Request` and a `Config` of
@@ -811,14 +823,17 @@ const writer = try client.begin(.{
 });
 try writer.write("first message");
 const response = try client.response();
-_ = try response.body.read();
+var scratch: [4096]u8 = undefined;
+var writer_fixed = .fixed(&scratch);
+_ = try response.body.reader.stream(&writer_fixed, .unlimited);
 try writer.write("second message");
 try writer.close();
 ```
 
 The two directions are independent. A write may block until the peer opens the
 flow-control window, and response bytes that arrive during a write are held for
-`Body.read`. Flow-control credit for held bytes returns as they are consumed,
+the body reader. A read never blocks for more bytes once it has some, so a
+duplex caller keeps its turn. Flow-control credit for held bytes returns as they are consumed,
 so the buffer is bounded by the connection window. `request` is the
 static-body convenience over the same two calls.
 

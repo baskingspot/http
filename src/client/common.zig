@@ -32,6 +32,7 @@
 //! on those names and must not alias them.
 
 const std = @import("std");
+const Io = std.Io;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
@@ -84,7 +85,7 @@ pub const ResponseHead = struct {
 };
 
 /// A local failure, not a peer outcome. The enum is closed: a new local
-/// failure adds a variant rather than reusing `protocol`.
+/// failure adds a variant rather than reusing another.
 pub const Local = enum {
     /// Our cancellation. The stream is unfinished; close or reset the stream
     /// and keep the connection.
@@ -97,6 +98,9 @@ pub const Local = enum {
     /// A local failure left a partial frame on the wire. The connection is not
     /// usable; close it. A blocking adapter must not produce this.
     unusable,
+    /// A read deadline the caller set expired. The stream is unfinished, so
+    /// the connection is not reusable.
+    timed_out,
 };
 
 /// The request body of an in-flight request. The caller owns the bytes it
@@ -145,8 +149,8 @@ pub const BodyResult = struct {
     data: []const u8,
 };
 
-/// Body failures carry no payload. A reset code or local cause is available
-/// from the Body that returned the error.
+/// The non-blocking body error set. A blocking body reports the same failures
+/// as `error.ReadFailed` with the cause on `Body.outcome`.
 pub const BodyError = error{
     EndOfStream,
     Truncated,
@@ -191,44 +195,88 @@ pub const BodyStepError = BodyError || error{WouldBlock};
 
 /// The blocking-client body contract.
 ///
-/// `read` may block, never returns `error.WouldBlock`, never returns empty
-/// data, and reports completion with `eof`. Holding four 16 KiB slices
-/// exhausts the default 65,535-byte h2 connection window.
+/// The bytes are a `std.Io.Reader`, so a body goes anywhere a reader goes.
+/// Framing is decoded beneath it, and a caller cannot observe whether the
+/// response was delimited by Content-Length, by chunked framing, or by the
+/// close of the connection.
+///
+/// `error.EndOfStream` is the only clean end. Every other read outcome is
+/// `error.ReadFailed`, and `outcome` names the cause: a peer truncation, an h2
+/// reset, a peer protocol fault, or a local failure. `Local.timed_out` is a
+/// read deadline the caller set.
+///
+/// The reader has no internal buffer, so body bytes go straight from the
+/// connection into the caller's writer. That rules out the `std.Io.Reader`
+/// calls that require one — `peek`, `take`, and `takeArray` — and permits
+/// everything that writes into a caller buffer: `stream`, `streamRemaining`,
+/// `readVec`, `readSliceAll`, `allocRemaining`. Holding a borrowed slice pins
+/// the connection the way an h2 DATA slice pins the window.
 pub const Body = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
+    /// The body byte stream. Pass it to anything that takes a `*Io.Reader`.
+    /// Every read after `close` is `error.EndOfStream`.
+    reader: *Io.Reader,
 
     pub const VTable = struct {
-        /// Return the next body bytes or `eof`. The borrowed slice is valid
-        /// until any operation that advances the connection; a caller that
-        /// holds it across another read must copy. Holding an h2 slice pins
-        /// the connection window for every stream.
-        read: *const fn (ptr: *anyopaque) BodyError!BodyResult,
-        /// The RST_STREAM code when `read` returned `error.Reset`.
-        resetCode: *const fn (ptr: *anyopaque) ?u32,
-        /// The local cause when `read` returned a `Local*` error.
-        localCause: *const fn (ptr: *anyopaque) ?Local,
+        /// Why the last `error.ReadFailed` happened. Null before the first
+        /// failure and after a clean end.
+        outcome: *const fn (ptr: *anyopaque) ?Outcome,
         /// Finish the response. Idempotent. Releases unread flow control and
         /// resets an incomplete stream where the protocol supports it.
         close: *const fn (ptr: *anyopaque) void,
     };
 
-    pub fn read(self: Body) BodyError!BodyResult {
-        return self.vtable.read(self.ptr);
-    }
-
-    pub fn resetCode(self: Body) ?u32 {
-        return self.vtable.resetCode(self.ptr);
-    }
-
-    pub fn localCause(self: Body) ?Local {
-        return self.vtable.localCause(self.ptr);
+    pub fn outcome(self: Body) ?Outcome {
+        return self.vtable.outcome(self.ptr);
     }
 
     pub fn close(self: Body) void {
         self.vtable.close(self.ptr);
     }
 };
+
+/// Why a body read failed. `error.ReadFailed` carries no detail because
+/// `Io.Reader.StreamError` has no room for one, so the body keeps it.
+pub const Outcome = union(enum) {
+    /// The peer stopped before the response ended. On h2, nothing above the
+    /// connection's GOAWAY boundary was processed.
+    truncated,
+    /// The peer broke a framing or stream rule.
+    protocol_error,
+    /// The peer reset the stream. The connection survives on h2.
+    reset: u32,
+    /// Our own failure.
+    local: Local,
+};
+
+/// Why a read on the caller's `*Io.Reader` failed.
+///
+/// `Io.Reader.StreamError` reports `error.ReadFailed` and nothing else, so an
+/// adapter cannot recover the cause from the error. A caller whose reader has
+/// a latch — `http_tls.client.Connection.readError` is the one in this repo —
+/// supplies this, and the body reports the cause instead of guessing from the
+/// error alone.
+pub const ReadCause = struct {
+    context: *const anyopaque,
+    cause: *const fn (context: *const anyopaque) ?anyerror,
+
+    pub fn get(self: ReadCause) ?anyerror {
+        return self.cause(self.context);
+    }
+};
+
+/// The local outcome for a latched reader cause. A cause this function does not
+/// name leaves the connection unusable, which is what an unclassified local
+/// failure means.
+pub fn localFromCause(cause: anyerror) Outcome {
+    return .{ .local = switch (cause) {
+        error.TimedOut => .timed_out,
+        error.Canceled => .canceled,
+        error.OutOfMemory => .out_of_memory,
+        else => .unusable,
+    } };
+}
 
 pub const Response = struct {
     head: ResponseHead,
@@ -249,6 +297,9 @@ pub const Config = struct {
     max_header_bytes: usize = 16 * 1024,
     /// Maximum response field records.
     max_headers: usize = 128,
+    /// Why a read on the caller's reader failed, when the reader latches one.
+    /// Null classifies a failure from the error alone.
+    read_cause: ?ReadCause = null,
 };
 
 test "scheme tokens and body vtable" {

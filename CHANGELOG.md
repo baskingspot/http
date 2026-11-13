@@ -5,6 +5,39 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `client.Body.reader` is a `std.Io.Reader`, so a response body goes anywhere a
+  reader goes: `streamRemaining`, `allocRemaining`, `take`, or a caller's own
+  parser. Framing is decoded beneath it, and a caller cannot observe whether the
+  response was delimited by Content-Length, by chunked framing, or by the close
+  of the connection. `client.Config.read_cause` binds a reader that latches why
+  a read failed, and `http_tls.client.Connection.readCause()` provides one.
+
+### Changed
+
+- `client.Body` is `reader`, `outcome()`, and `close()`. Read it with
+  `body.reader` and name a failure with `body.outcome()`, which is `.truncated`,
+  `.protocol_error`, `.reset` with the RST_STREAM code, or `.local` with a
+  `Local` value. The old `read()` and `BodyResult` are gone from the blocking
+  body, and `resetCode()` and `localCause()` are replaced by `outcome()`.
+- A clean body end is `error.EndOfStream` from the reader. Every other outcome
+  is `error.ReadFailed`, including an h2 reset, which used to arrive as
+  `error.Reset`.
+- `Local` gains `timed_out` for a read deadline the caller set. Without
+  `Config.read_cause` such a failure reads as a truncation.
+
+### Fixed
+
+- An h1 streaming response body is no longer capped at 16 MiB, or at any size.
+  `h1.ClientConn.Config.body_bytes` is `?u64` and defaults to null, meaning
+  unbounded, because the machine buffers one receive window and never the whole
+  body. `h1.client.blocking.fetch` passes its `body_buffer` length as before.
+- A response body over a caller's cap can no longer be reported as
+  `error.Protocol`. It is a local capacity limit, and `outcome()` says so.
+- A read never blocks for more bytes once it has some, so a duplex h2 caller
+  that writes between reads keeps its turn.
+
 ## [0.4.2] - 2026-11-12
 
 ### Changed

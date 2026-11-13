@@ -18,6 +18,16 @@ const Exchange = http.h2.engine.Exchange;
 const client_mod = http.h2.client.blocking;
 const Client = client_mod.Client;
 
+/// Read the next piece of a response body, or null at a clean end.
+fn readBody(body: http.client.Body, buffer: []u8) !?[]const u8 {
+    var writer = Io.Writer.fixed(buffer);
+    const n = body.reader.stream(&writer, .limited(buffer.len)) catch |err| switch (err) {
+        error.EndOfStream => return null,
+        else => return err,
+    };
+    return buffer[0..n];
+}
+
 /// Echo every request chunk as a response chunk, before END_STREAM. The
 /// response head goes out with the first chunk and the trailers with the last.
 const EchoApp = struct {
@@ -241,16 +251,17 @@ test "two request and response messages cross before END_STREAM (RFC 9113 §5.1)
         "application/grpc",
         response.head.headers.get("content-type").?,
     );
-    try testing.expectEqualStrings("one", (try response.body.read()).data);
+    var scratch: [256]u8 = undefined;
+    try testing.expectEqualStrings("one", (try readBody(response.body, &scratch)).?);
     try testing.expect(!harness.app.saw_end);
 
     // Pair two: the response body is still open, and so is the request.
     try body_writer.write("two");
-    try testing.expectEqualStrings("two", (try response.body.read()).data);
+    try testing.expectEqualStrings("two", (try readBody(response.body, &scratch)).?);
 
     // Now end the request. The server ends its response with trailers.
     body_writer.close();
-    try testing.expectError(error.EndOfStream, response.body.read());
+    try testing.expect((try readBody(response.body, &scratch)) == null);
 
     try testing.expectEqual(@as(usize, 2), harness.app.chunks);
     try testing.expectEqual(@as(usize, 6), harness.app.bytes);
@@ -305,11 +316,16 @@ test "a peer that outruns the handler past body_bytes is reset (RFC 9113 §5.4.2
     var refused_outcome = refused;
     if (client.response()) |response| {
         defer response.body.close();
+        var scratch: [256]u8 = undefined;
         while (true) {
-            _ = response.body.read() catch {
+            const piece = readBody(response.body, &scratch) catch {
                 refused_outcome = true;
                 break;
             };
+            if (piece == null) {
+                refused_outcome = true;
+                break;
+            }
         }
     } else |err| {
         try testing.expectEqual(error.StreamReset, err);
@@ -608,11 +624,8 @@ test "an expiry finishes the response it started, not a second one" {
     try testing.expectEqual(@as(u16, 200), response.head.status.code());
 
     // The response ends with no data, because the expiry finished it.
-    const result = response.body.read() catch |err| switch (err) {
-        error.EndOfStream => null,
-        else => return err,
-    };
-    try testing.expect(result == null);
+    var scratch: [256]u8 = undefined;
+    try testing.expect((try readBody(response.body, &scratch)) == null);
 
     try testing.expectEqual(@as(usize, 1), app.expired_turns);
     try testing.expect(app.started);
@@ -716,11 +729,8 @@ test "a parked handler wakes at its future deadline with no input" {
     defer response.body.close();
     try testing.expectEqual(@as(u16, 200), response.head.status.code());
 
-    const result = response.body.read() catch |err| switch (err) {
-        error.EndOfStream => null,
-        else => return err,
-    };
-    try testing.expect(result == null);
+    var scratch: [256]u8 = undefined;
+    try testing.expect((try readBody(response.body, &scratch)) == null);
 
     try testing.expect(app.turns >= 2);
     try testing.expect(app.woke_by_timer);

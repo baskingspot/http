@@ -76,9 +76,14 @@ pub const Client = struct {
     inbox: std.ArrayList(u8) = .empty,
     /// Flow-control charge for `inbox`, including padding.
     inbox_flow: u32 = 0,
-    /// Response bytes handed to the caller. Released on the next read.
+    /// Response bytes handed to the caller. Held until the reader has taken
+    /// all of it, then released.
     chunk: std.ArrayList(u8) = .empty,
-    /// Flow-control charge for `chunk`.
+    /// Bytes of `chunk` the caller's writer has already taken. A short write
+    /// resumes here instead of dropping the tail.
+    chunk_consumed: usize = 0,
+    /// Flow-control charge for `chunk`. Released only once the chunk is fully
+    /// handed over.
     chunk_flow: u32 = 0,
     /// Unfed transport bytes, kept when the session input buffer is full.
     net_buffer: [4096]u8 = undefined,
@@ -86,6 +91,11 @@ pub const Client = struct {
     net_end: usize = 0,
     body: Body = undefined,
     body_writer: BodyWriter = undefined,
+    /// The response byte stream `body.reader` points at. The client must stay
+    /// put for the life of the body.
+    body_reader: Io.Reader = undefined,
+    /// Why a read on the caller's reader failed, when the reader latches one.
+    read_cause: ?shared.ReadCause = null,
     goaway: ?shared.GoAway = null,
     /// Response head received while the request body was still being written.
     early_head: ?ResponseHead = null,
@@ -97,8 +107,8 @@ pub const Client = struct {
     response_taken: bool = false,
     /// RST_STREAM code when the last read returned error.Reset.
     body_reset_code: ?u32 = null,
-    /// Local cause when the last read returned a Local* error.
-    body_local: ?shared.Local = null,
+    /// Why the last `error.ReadFailed` happened.
+    body_outcome: ?shared.Outcome = null,
 
     /// Initialize in its final location. The caller owns the reader, writer,
     /// header storage, and allocator.
@@ -131,7 +141,14 @@ pub const Client = struct {
         };
         errdefer self.session.deinit(self.allocator);
         errdefer self.arena.deinit();
-        self.body = .{ .ptr = self, .vtable = &body_vtable };
+        self.body = .{ .ptr = self, .vtable = &body_vtable, .reader = &self.body_reader };
+        self.body_reader = .{
+            .vtable = &body_reader_vtable,
+            .buffer = &.{},
+            .seek = 0,
+            .end = 0,
+        };
+        self.read_cause = config.read_cause;
         self.body_writer = .{ .ptr = self, .vtable = &body_writer_vtable };
 
         // Flush the client preface and initial SETTINGS. sendFrame starts at a
@@ -363,7 +380,7 @@ pub const Client = struct {
         self.remote_end = false;
         self.body_eof = false;
         self.body_reset_code = null;
-        self.body_local = null;
+        self.body_outcome = null;
         self.reset_sent = false;
         self.request_closed = end_stream;
         self.pending_body = &.{};
@@ -371,6 +388,7 @@ pub const Client = struct {
         self.chunk_flow = 0;
         self.inbox.clearRetainingCapacity();
         self.chunk.clearRetainingCapacity();
+        self.chunk_consumed = 0;
         self.net_start = 0;
         self.net_end = 0;
 
@@ -503,34 +521,38 @@ pub const Client = struct {
         self.inbox_flow += @intCast(bytes.len);
     }
 
-    fn readBody(self: *Client) shared.BodyError!shared.BodyResult {
+    /// Make the next chunk of response bytes current, or report the end of the
+    /// stream. The current chunk must be handed out first: its window credit is
+    /// released here, so a caller that stops reading stops the peer.
+    fn advanceBody(self: *Client) anyerror!void {
         if (!self.active) return error.EndOfStream;
+        if (self.body_eof) return error.EndOfStream;
+
+        if (self.chunk.items.len != 0) {
+            self.chunk.clearRetainingCapacity();
+            self.chunk_consumed = 0;
+            try self.releaseChunk();
+        }
 
         while (true) {
-            if (self.chunk.items.len != 0) {
-                // The previous read returned this slice. Release its flow
-                // before advancing; the caller is done with it by contract.
-                self.chunk.clearRetainingCapacity();
-                self.releaseChunk() catch |err| return self.bodyFailure(err);
-            }
-
             if (self.inbox.items.len != 0) {
                 mem.swap(std.ArrayList(u8), &self.chunk, &self.inbox);
                 self.chunk_flow = self.inbox_flow;
                 self.inbox_flow = 0;
-                return .{ .data = self.chunk.items };
+                self.chunk_consumed = 0;
+                return;
             }
 
             if (self.pending_body.len != 0) {
-                const accepted = self.session.submitData(
+                const accepted = try self.session.submitData(
                     self.allocator,
                     self.stream_id,
                     self.pending_body,
                     true,
-                ) catch |err| return self.bodyFailure(err);
+                );
                 if (accepted != 0) {
                     self.pending_body = self.pending_body[accepted..];
-                    self.flushFrames() catch |err| return self.bodyFailure(err);
+                    try self.flushFrames();
                     if (self.pending_body.len != 0) continue;
                 }
                 // No window. Read an event; response bytes are the
@@ -543,54 +565,38 @@ pub const Client = struct {
                 return error.EndOfStream;
             }
 
-            const event = self.nextEvent() catch |err| return self.bodyFailure(err);
+            const event = try self.nextEvent();
             switch (event) {
                 .data => |data| {
-                    if (data.stream_id != self.stream_id) {
-                        self.connection_poisoned = true;
-                        return error.Protocol;
-                    }
+                    if (data.stream_id != self.stream_id) return error.UnexpectedData;
                     // Padding was already returned by Session.onData; only the
                     // application bytes are still charged to the windows.
-                    self.buffer(data.bytes) catch |err| return self.bodyFailure(err);
+                    try self.buffer(data.bytes);
                     if (data.end_stream) self.remote_end = true;
                 },
                 .trailers => |trailers| {
-                    if (trailers.stream_id != self.stream_id) {
-                        self.connection_poisoned = true;
-                        return error.Protocol;
-                    }
+                    if (trailers.stream_id != self.stream_id) return error.UnexpectedTrailers;
                     if (trailers.end_stream) self.remote_end = true;
                 },
                 .response => |head_event| {
-                    if (head_event.stream_id != self.stream_id) {
-                        self.connection_poisoned = true;
-                        return error.Protocol;
-                    }
+                    if (head_event.stream_id != self.stream_id) return error.UnexpectedResponse;
                     if (head_event.head.status.class() == .informational) {
-                        if (head_event.end_stream) return error.Protocol;
+                        if (head_event.end_stream) return error.ProtocolError;
                         continue;
                     }
                     // A second final response head is a protocol violation.
-                    self.connection_poisoned = true;
-                    return error.Protocol;
+                    return error.UnexpectedResponse;
                 },
-                .settings => self.flushFrames() catch |err| return self.bodyFailure(err),
+                .settings => try self.flushFrames(),
                 .window_update => {},
                 .goaway => |goaway| {
                     self.goaway = .{
                         .last_stream_id = goaway.last_stream_id,
                         .code = compat.enumToInt(goaway.code),
                     };
-                    if (self.stream_id > goaway.last_stream_id) {
-                        self.connection_poisoned = true;
-                        return error.Truncated;
-                    }
+                    if (self.stream_id > goaway.last_stream_id) return error.Truncated;
                 },
-                .connection_error => {
-                    self.connection_poisoned = true;
-                    return error.Protocol;
-                },
+                .connection_error => return error.ConnectionError,
                 .reset => |reset| {
                     if (reset.code == .no_error and self.remote_end) {
                         self.body_eof = true;
@@ -599,47 +605,87 @@ pub const Client = struct {
                     self.body_reset_code = compat.enumToInt(reset.code);
                     return error.Reset;
                 },
-                .request => {
-                    self.connection_poisoned = true;
-                    return error.Protocol;
-                },
+                .request => return error.UnexpectedRequest,
             }
         }
     }
 
-    fn bodyFailure(self: *Client, err: anyerror) shared.BodyError {
-        const outcome: shared.BodyError = switch (err) {
+    fn bodyStream(erased: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+        const self: *Client = @fieldParentPtr("body_reader", erased);
+        return self.streamBody(w, limit);
+    }
+
+    /// Pump body bytes into `w`. Returns the count written, which is never more
+    /// than `limit`, and reports a clean end as `error.EndOfStream`. A writer
+    /// that accepts a prefix leaves the rest in `chunk`, where the next call
+    /// resumes without releasing window credit it has not handed over.
+    fn streamBody(self: *Client, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+        if (!self.active) return error.EndOfStream;
+
+        var written: usize = 0;
+        const cap = limit.minInt(std.math.maxInt(usize));
+        if (cap == 0) return 0;
+        while (written < cap) {
+            const available = self.chunk.items[self.chunk_consumed..];
+            if (available.len != 0) {
+                const take = available[0..@min(available.len, cap - written)];
+                const n = w.write(take) catch return error.WriteFailed;
+                self.chunk_consumed += n;
+                written += n;
+                if (n != take.len) return written;
+                continue;
+            }
+            // Never block for more bytes once this call has some. A duplex
+            // caller writes between reads, and waiting here would deadlock it.
+            if (written != 0) return written;
+            if (self.advanceBody()) |_| {} else |err| {
+                if (err == error.EndOfStream) break;
+                return self.failBody(err);
+            }
+        }
+
+        if (written == 0) return error.EndOfStream;
+        return written;
+    }
+
+    /// Classify a reading failure, latch the cause on the body, and report it
+    /// as `error.ReadFailed`, which is the only failure `Io.Reader` has room
+    /// for.
+    fn failBody(self: *Client, err: anyerror) error{ReadFailed} {
+        const outcome = self.classify(err);
+        self.body_outcome = outcome;
+        switch (outcome) {
+            .truncated, .protocol_error => self.connection_poisoned = true,
+            .reset => {},
+            .local => |local| switch (local) {
+                .canceled, .capacity => {},
+                else => self.connection_poisoned = true,
+            },
+        }
+        return error.ReadFailed;
+    }
+
+    fn classify(self: *const Client, err: anyerror) shared.Outcome {
+        return switch (err) {
+            error.Reset => .{ .reset = self.body_reset_code orelse 0 },
+            error.Canceled => .{ .local = .canceled },
+            error.OutOfMemory => .{ .local = .out_of_memory },
+            error.InputFull, error.BufferTooSmall => .{ .local = .capacity },
+            error.WouldBlock => .{ .local = .unusable },
+            // The reader reports `error.ReadFailed` for every failure of its
+            // own and keeps the cause, so ask it rather than guess.
+            error.ReadFailed => if (self.read_cause) |latched| blk: {
+                const cause = latched.get() orelse break :blk shared.Outcome.truncated;
+                break :blk shared.common.localFromCause(cause);
+            } else shared.Outcome.truncated,
             error.EndOfStream,
             error.ConnectionClosed,
-            error.ReadFailed,
             error.WriteFailed,
             error.BrokenPipe,
-            => error.Truncated,
-            error.Canceled => blk: {
-                self.body_local = .canceled;
-                break :blk error.LocalCanceled;
-            },
-            error.InputFull, error.BufferTooSmall => blk: {
-                self.body_local = .capacity;
-                break :blk error.LocalCapacity;
-            },
-            error.WouldBlock => blk: {
-                assert(false);
-                self.body_local = .unusable;
-                break :blk error.LocalUnusable;
-            },
-            error.OutOfMemory => blk: {
-                self.body_local = .out_of_memory;
-                break :blk error.LocalOutOfMemory;
-            },
-            else => error.Protocol,
+            error.Truncated,
+            => shared.Outcome.truncated,
+            else => shared.Outcome.protocol_error,
         };
-        switch (outcome) {
-            error.Truncated, error.Protocol => self.connection_poisoned = true,
-            error.LocalOutOfMemory, error.LocalUnusable => self.connection_poisoned = true,
-            else => {},
-        }
-        return outcome;
     }
 
     fn writeFailure(self: *Client, err: anyerror) shared.BodyWriteError {
@@ -667,14 +713,9 @@ pub const Client = struct {
         return outcome;
     }
 
-    fn bodyResetCode(ptr: *anyopaque) ?u32 {
+    fn bodyOutcome(ptr: *anyopaque) ?shared.Outcome {
         const self: *Client = @ptrCast(@alignCast(ptr));
-        return self.body_reset_code;
-    }
-
-    fn bodyLocalCause(ptr: *anyopaque) ?shared.Local {
-        const self: *Client = @ptrCast(@alignCast(ptr));
-        return self.body_local;
+        return self.body_outcome;
     }
 
     /// Return the flow-control credit for the chunk the caller finished with.
@@ -877,24 +918,31 @@ pub const Client = struct {
 
 fn ignoreError(_: anyerror) void {}
 
-fn nextBody(body: Body) !?shared.BodyResult {
-    return body.read() catch |err| switch (err) {
+/// Test-only: write the next piece of the body into `out`, or return null at a
+/// clean end. The writer never short-writes because each destination here is
+/// exactly the size of the response.
+fn readInto(body: Body, out: []u8) !?usize {
+    // A fixed writer errors when it is full, so the room left is the limit.
+    // Null means the body ended, or `out` had no room; every caller here sizes
+    // `out` to what is left of the response, so the two coincide.
+    if (out.len == 0) return null;
+    var writer = Io.Writer.fixed(out);
+    return body.reader.stream(&writer, .limited(out.len)) catch |err| switch (err) {
         error.EndOfStream => null,
         else => return err,
     };
 }
 
-const body_vtable: Body.VTable = .{
-    .read = bodyRead,
-    .resetCode = Client.bodyResetCode,
-    .localCause = Client.bodyLocalCause,
-    .close = bodyClose,
+/// The body stream. `Client.bodyReader` is the field this vtable is looked up
+/// from, and the client never moves after `init`.
+const body_reader_vtable: Io.Reader.VTable = .{
+    .stream = Client.bodyStream,
 };
 
-fn bodyRead(ptr: *anyopaque) shared.BodyError!shared.BodyResult {
-    const self: *Client = @ptrCast(@alignCast(ptr));
-    return self.readBody();
-}
+const body_vtable: Body.VTable = .{
+    .outcome = Client.bodyOutcome,
+    .close = bodyClose,
+};
 
 fn bodyClose(ptr: *anyopaque) void {
     const self: *Client = @ptrCast(@alignCast(ptr));
@@ -1054,11 +1102,7 @@ test "the blocking client streams a response body" {
 
     var received: [expected.len]u8 = undefined;
     var used: usize = 0;
-    while (try nextBody(response.body)) |result| {
-        const bytes = result.data;
-        @memcpy(received[used..][0..bytes.len], bytes);
-        used += bytes.len;
-    }
+    while (try readInto(response.body, received[used..])) |n| used += n;
     try testing.expectEqual(@as(usize, expected.len), used);
     try testing.expectEqualStrings(expected, &received);
     try testing.expectEqualStrings(
@@ -1099,12 +1143,12 @@ test "the blocking client releases flow control while streaming" {
     });
     defer response.body.close();
 
+    var scratch: [64 * 1024]u8 = undefined;
     var offset: usize = 0;
-    while (try nextBody(response.body)) |result| {
-        const bytes = result.data;
-        try testing.expect(offset + bytes.len <= big.len);
-        try testing.expectEqualSlices(u8, big[offset..][0..bytes.len], bytes);
-        offset += bytes.len;
+    while (try readInto(response.body, &scratch)) |n| {
+        try testing.expect(offset + n <= big.len);
+        try testing.expectEqualSlices(u8, big[offset..][0..n], scratch[0..n]);
+        offset += n;
     }
     try testing.expectEqual(big.len, offset);
 }
@@ -1141,11 +1185,7 @@ test "the blocking client sends a request body" {
 
     var received: [payload.len]u8 = undefined;
     var used: usize = 0;
-    while (try nextBody(response.body)) |result| {
-        const bytes = result.data;
-        @memcpy(received[used..][0..bytes.len], bytes);
-        used += bytes.len;
-    }
+    while (try readInto(response.body, received[used..])) |n| used += n;
     try testing.expectEqualStrings(payload, received[0..used]);
 }
 
@@ -1180,11 +1220,11 @@ test "the blocking client sends a request body through flow control" {
     });
     defer response.body.close();
 
+    var scratch: [64 * 1024]u8 = undefined;
     var offset: usize = 0;
-    while (try nextBody(response.body)) |result| {
-        const bytes = result.data;
-        try testing.expectEqualSlices(u8, payload[offset..][0..bytes.len], bytes);
-        offset += bytes.len;
+    while (try readInto(response.body, &scratch)) |n| {
+        try testing.expectEqualSlices(u8, payload[offset..][0..n], scratch[0..n]);
+        offset += n;
     }
     try testing.expectEqual(payload.len, offset);
 }
@@ -1220,15 +1260,15 @@ test "closing an incomplete response resets the stream and is idempotent" {
         .target = "/",
     });
 
-    const first = try response.body.read();
-    try testing.expect(first.data.len > 0);
+    var scratch: [4096]u8 = undefined;
+    try testing.expect((try readInto(response.body, &scratch)).? > 0);
     const stream_id = client.streamId();
     try testing.expect(stream_id != 0);
     response.body.close();
     try testing.expectEqual(stream_id, client.streamId());
     try testing.expect(client.reset_sent);
     response.body.close();
-    try testing.expectError(error.EndOfStream, response.body.read());
+    try testing.expectEqual(@as(?usize, null), try readInto(response.body, &scratch));
 }
 
 test "connection poison is separate from request commit" {
@@ -1287,7 +1327,8 @@ test "a no-body response can be followed by another request" {
             .authority = "example.com",
             .target = "/",
         });
-        try testing.expectError(error.EndOfStream, response.body.read());
+        var scratch: [16]u8 = undefined;
+        try testing.expectEqual(@as(?usize, null), try readInto(response.body, &scratch));
         response.body.close();
     }
     try testing.expectEqual(@as(usize, 2), harness.app.seen);
@@ -1359,11 +1400,11 @@ test "closing after remote END_STREAM releases without resetting" {
         .authority = "example.com",
         .target = "/",
     });
-    const first = try response.body.read();
-    try testing.expect(first.data.len > 0);
+    var scratch: [4096]u8 = undefined;
+    try testing.expect((try readInto(response.body, &scratch)).? > 0);
     response.body.close();
     try testing.expect(!client.reset_sent);
-    try testing.expectError(error.EndOfStream, response.body.read());
+    try testing.expectEqual(@as(?usize, null), try readInto(response.body, &scratch));
 }
 
 test "the blocking client sends a static request body" {
@@ -1396,11 +1437,7 @@ test "the blocking client sends a static request body" {
     try testing.expectEqual(Protocol.h2, response.head.protocol);
     var got: [13]u8 = undefined;
     var used: usize = 0;
-    while (try nextBody(response.body)) |result| {
-        const bytes = result.data;
-        @memcpy(got[used..][0..bytes.len], bytes);
-        used += bytes.len;
-    }
+    while (try readInto(response.body, got[used..])) |n| used += n;
     try testing.expectEqualStrings("body response", got[0..used]);
     response.body.close();
 }

@@ -28,8 +28,12 @@ pub const Config = struct {
     headers: []Header,
     /// Caller-owned storage for chunked trailers. Empty rejects trailers.
     trailers: []Header = &.{},
-    /// Maximum body bytes delivered to the caller.
-    body_bytes: u64 = 16 * 1024 * 1024,
+    /// Maximum body bytes delivered to the caller. Null is unbounded, which is
+    /// what a streaming caller wants: this machine buffers only the current
+    /// receive window, so the cap protects a caller that accumulates, not this
+    /// machine. A caller that needs a bound passes one; `Io.Reader.limited`
+    /// bounds a reader instead.
+    body_bytes: ?u64 = null,
 };
 
 pub const Response = struct {
@@ -60,7 +64,7 @@ const Phase = enum { head, body, done, closed };
 recv_buffer: []u8,
 headers: []Header,
 trailers: []Header,
-body_bytes: u64,
+body_bytes: ?u64,
 
 phase: Phase,
 used: usize,
@@ -206,7 +210,9 @@ fn parseHead(self: *ClientConn) Error!Event {
     switch (self.framing) {
         .none => self.phase = .done,
         .length => |length| {
-            if (length > self.body_bytes) return error.BodyTooLarge;
+            if (self.body_bytes) |cap| {
+                if (length > cap) return error.BodyTooLarge;
+            }
             self.body_remaining = length;
             self.phase = if (length == 0) .done else .body;
         },
@@ -300,7 +306,9 @@ fn chunkedBody(self: *ClientConn) Error!Event {
 }
 
 fn deliver(self: *ClientConn, n: usize) Error!void {
-    if (n > self.body_bytes - self.delivered) return error.BodyTooLarge;
+    if (self.body_bytes) |cap| {
+        if (n > cap - self.delivered) return error.BodyTooLarge;
+    }
     self.delivered += n;
 }
 

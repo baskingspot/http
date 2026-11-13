@@ -12,6 +12,7 @@ const tls = @import("tls");
 const tls_nonblocking = @import("tls_nonblocking");
 const http = @import("http");
 const time = @import("stdx").time;
+const client = http.client;
 const Driver = http.h2.client.Driver;
 
 const SocketClient = tls_nonblocking.SocketClient;
@@ -125,7 +126,14 @@ pub const Connection = struct {
 
     /// Bind the HTTP driver to this plaintext reader's deadline and cause.
     pub fn readDeadline(self: *Connection) Driver.ReadDeadline {
-        return .{ .context = self, .set = setReadDeadline, .cause = readCause };
+        return .{ .context = self, .set = setReadDeadline, .cause = latchedReadCause };
+    }
+
+    /// Bind a client body to this reader's latched failure cause. Without it a
+    /// body read that the deadline ended is indistinguishable from a peer
+    /// that closed, and `client.Body.outcome` reports a truncation.
+    pub fn readCause(self: *Connection) client.ReadCause {
+        return .{ .context = self, .cause = latchedReadCause };
     }
 
     fn setReadDeadline(context: *anyopaque, deadline: time.OptionalTimestamp) void {
@@ -133,7 +141,7 @@ pub const Connection = struct {
         self.setDeadline(deadline);
     }
 
-    fn readCause(context: *const anyopaque) ?anyerror {
+    fn latchedReadCause(context: *const anyopaque) ?anyerror {
         const self: *const Connection = @ptrCast(@alignCast(context));
         return self.readError();
     }
