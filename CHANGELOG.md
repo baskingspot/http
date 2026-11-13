@@ -5,6 +5,14 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `h2` engine connections track live streams through a used list instead of
+  scanning the whole slot array. A pass that visited every configured slot —
+  a cache line each, a thousand slots when a handful of streams were live —
+  now visits only the live ones, in arrival order. Per-request server cycles
+  drop accordingly under load.
+
 ### Fixed
 
 - `h2.Session` rebuilds its stream table once removed streams outnumber
