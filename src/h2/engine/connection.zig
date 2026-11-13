@@ -961,31 +961,57 @@ fn earliest(a: ?Io.Timestamp, b: Io.Timestamp) Io.Timestamp {
 }
 
 fn copyHead(arena: Allocator, source: head.RequestHead) !head.RequestHead {
-    const items = try arena.alloc(Header, source.headers.items.len);
-    for (source.headers.items, 0..) |header, index| {
-        items[index] = .{
-            .name = try arena.dupe(u8, header.name),
-            .value = try arena.dupe(u8, header.value),
-        };
-    }
+    const headers = try copyHeaders(arena, source.headers);
+
+    // The scalar slices ride one block. Everything a head owns shares the
+    // arena's lifetime, so two bumps serve what per-field dupes paid six
+    // for, plus the `copyHeaders` block below for the fields.
+    const empty: []const u8 = "";
+    const scalars_len = source.method_token.len +
+        (source.scheme orelse empty).len + (source.authority orelse empty).len +
+        (source.path orelse empty).len + (source.protocol orelse empty).len;
+    const scalars = try arena.alloc(u8, scalars_len);
+    var at: usize = 0;
+    const method_token = carve(scalars, &at, source.method_token);
+    const scheme = if (source.scheme) |value| carve(scalars, &at, value) else null;
+    const authority = if (source.authority) |value| carve(scalars, &at, value) else null;
+    const path = if (source.path) |value| carve(scalars, &at, value) else null;
+    const protocol = if (source.protocol) |value| carve(scalars, &at, value) else null;
+
     return .{
         .method = source.method,
-        .method_token = try arena.dupe(u8, source.method_token),
-        .scheme = if (source.scheme) |value| try arena.dupe(u8, value) else null,
-        .authority = if (source.authority) |value| try arena.dupe(u8, value) else null,
-        .path = if (source.path) |value| try arena.dupe(u8, value) else null,
-        .protocol = if (source.protocol) |value| try arena.dupe(u8, value) else null,
-        .headers = .{ .items = items },
+        .method_token = method_token,
+        .scheme = scheme,
+        .authority = authority,
+        .path = path,
+        .protocol = protocol,
+        .headers = headers,
     };
 }
 
+/// Copy `slice` into `block` at `at`, advancing past it.
+fn carve(block: []u8, at: *usize, slice: []const u8) []const u8 {
+    @memcpy(block[at.*..][0..slice.len], slice);
+    const carved = block[at.*..][0..slice.len];
+    at.* += slice.len;
+    return carved;
+}
+
 fn copyHeaders(arena: Allocator, source: Headers) !Headers {
+    // One block for every name and value, one for the array: two bumps
+    // where per-field dupes paid 2N+1. All of it shares the arena's
+    // lifetime, so carving the block into slices loses nothing.
+    var names_and_values_len: usize = 0;
+    for (source.items) |header| {
+        names_and_values_len += header.name.len + header.value.len;
+    }
+    const block = try arena.alloc(u8, names_and_values_len);
     const items = try arena.alloc(Header, source.items.len);
+    var at: usize = 0;
     for (source.items, 0..) |header, index| {
-        items[index] = .{
-            .name = try arena.dupe(u8, header.name),
-            .value = try arena.dupe(u8, header.value),
-        };
+        const name = carve(block, &at, header.name);
+        const value = carve(block, &at, header.value);
+        items[index] = .{ .name = name, .value = value };
     }
     return .{ .items = items };
 }
