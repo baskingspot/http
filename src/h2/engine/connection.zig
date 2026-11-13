@@ -63,14 +63,12 @@ pub const Options = struct {
 };
 
 const Slot = struct {
-    used: bool = false,
     stream_id: u31 = 0,
-    /// The intrusive used-list links, maintained by `allocSlotIndex` and
-    /// `finishSlot`, so the engine's per-event passes touch live streams only:
-    /// a slot is large, and a full-array scan costs a cache line per free
-    /// slot, which dominated the engine's profile under load.
-    prev_used: ?u16 = null,
-    next_used: ?u16 = null,
+    /// The slot pool's links, owned by `Connection.pool`. The values are
+    /// meaningless until the pool acquires the entry, and the pool is the
+    /// only writer.
+    prev_used: slot_pool.Handle = std.math.maxInt(slot_pool.Handle),
+    next_used: slot_pool.Handle = std.math.maxInt(slot_pool.Handle),
     arena: ArenaAllocator,
     /// `.buffered`: the whole request body.
     body: std.ArrayList(u8) = .empty,
@@ -114,6 +112,13 @@ const Slot = struct {
     body_deadline: time.OptionalTimestamp = .none,
     exchange: Exchange = undefined,
 };
+
+const slot_pool = @import("stdx").slot;
+const SlotPool = slot_pool.Pool(Slot, "prev_used", "next_used");
+
+/// The pool's no-neighbor sentinel, spelled for the const walks that read the
+/// link fields directly.
+const slot_pool_end: slot_pool.Handle = std.math.maxInt(slot_pool.Handle);
 
 /// The engine behind `Exchange.beginResponse`, `write`, `endResponse`, and
 /// `resetStream`. One per slot; the slots slice never moves.
@@ -239,13 +244,10 @@ pub const Connection = struct {
     handler: Handler,
     session: Session,
     slots: []Slot,
-    /// The used-list head and tail, and the free-index stack behind
-    /// `allocSlotIndex`. The stack holds the indices of slots not in the
-    /// used list; pops allocate, pushes free.
-    used_head: ?u16 = null,
-    used_tail: ?u16 = null,
-    free_stack: []u16,
-    free_top: usize,
+    /// The live-stream list and the free list over `slots`: O(1) acquire and
+    /// release, iteration over live entries in arrival order, so the engine's
+    /// per-event passes never walk the free slots.
+    pool: SlotPool,
     body_bytes: usize,
     arena_retain_bytes: usize,
     body_mode: BodyMode,
@@ -265,18 +267,12 @@ pub const Connection = struct {
         errdefer options.allocator.free(slots);
         for (slots) |*slot| slot.* = .{ .arena = .init(options.allocator) };
 
-        // Reversed, so the first pop is slot 0, in allocation order.
-        const free_stack = try options.allocator.alloc(u16, options.max_streams);
-        errdefer options.allocator.free(free_stack);
-        for (free_stack, 0..) |*index, slot| index.* = @intCast(free_stack.len - 1 - slot);
-
         return .{
             .allocator = options.allocator,
             .handler = options.handler,
             .session = session,
             .slots = slots,
-            .free_stack = free_stack,
-            .free_top = free_stack.len,
+            .pool = SlotPool.init(slots),
             .body_bytes = options.body_bytes,
             .arena_retain_bytes = options.arena_retain_bytes,
             .body_mode = options.body_mode,
@@ -294,7 +290,6 @@ pub const Connection = struct {
             slot.arena.deinit();
         }
         self.allocator.free(self.slots);
-        self.allocator.free(self.free_stack);
         self.session.deinit(self.allocator);
         self.* = undefined;
     }
@@ -308,12 +303,8 @@ pub const Connection = struct {
         // A handler that parked on a full output budget resumes once any
         // output leaves the queue.
         if (n != 0) {
-            var index = self.used_head;
-            while (index) |i| {
-                const next = self.slots[i].next_used;
-                self.slots[i].parked = false;
-                index = next;
-            }
+            var it = self.pool.iterator();
+            while (it.next()) |item| item.entry.parked = false;
         }
         return n;
     }
@@ -344,14 +335,14 @@ pub const Connection = struct {
     /// excludes `Exchange.setDeadline`, which belongs to the application.
     pub fn deadline(self: *const Connection) ?Io.Timestamp {
         var at = self.head_deadline;
-        var index = self.used_head;
-        while (index) |i| {
-            const slot = &self.slots[i];
-            const next = slot.next_used;
+        // A read-only walk over the live list: the pool's iterator wants a
+        // mutable pool, and this is a const method.
+        var cursor = self.pool.used_head;
+        while (cursor != slot_pool_end) : (cursor = self.slots[cursor].next_used) {
+            const slot = &self.slots[cursor];
             if (slot.body_deadline.get()) |body_deadline| {
                 at = earliest(at, body_deadline.toStd());
             }
-            index = next;
         }
         return at;
     }
@@ -361,15 +352,13 @@ pub const Connection = struct {
     /// which delivers `wake = .expired`. It is never a reason to close.
     pub fn wakeDeadline(self: *const Connection) ?Io.Timestamp {
         var at: ?Io.Timestamp = null;
-        var index = self.used_head;
-        while (index) |i| {
-            const slot = &self.slots[i];
-            const next = slot.next_used;
+        var cursor = self.pool.used_head;
+        while (cursor != slot_pool_end) : (cursor = self.slots[cursor].next_used) {
+            const slot = &self.slots[cursor];
             if (slot.deadline.get()) |wake_at| {
                 const value = wake_at.toStd();
                 at = if (at) |current| earliest(current, value) else value;
             }
-            index = next;
         }
         return at;
     }
@@ -397,7 +386,7 @@ pub const Connection = struct {
     fn processEvent(self: *Connection, event: Event, now: Io.Timestamp) !void {
         switch (event) {
             .request => |request| {
-                const slot_index = self.allocSlotIndex() orelse {
+                const handle = self.pool.acquire() catch {
                     try self.session.submitReset(
                         self.allocator,
                         request.stream_id,
@@ -405,8 +394,7 @@ pub const Connection = struct {
                     );
                     return;
                 };
-                const slot = &self.slots[slot_index];
-                slot.used = true;
+                const slot = self.pool.get(handle);
                 slot.stream_id = request.stream_id;
                 slot.body = .empty;
                 slot.unread.clearRetainingCapacity();
@@ -446,7 +434,7 @@ pub const Connection = struct {
                         request.stream_id,
                         .internal_error,
                     );
-                    self.finishSlot(slot, false);
+                    self.finishSlot(handle, false);
                     return err;
                 };
                 slot.content_length = parseContentLength(request.head.headers) catch {
@@ -455,7 +443,7 @@ pub const Connection = struct {
                         request.stream_id,
                         .protocol_error,
                     );
-                    self.finishSlot(slot, false);
+                    self.finishSlot(handle, false);
                     return;
                 };
                 // A declared length above the cap is a buffered-mode refusal:
@@ -469,17 +457,17 @@ pub const Connection = struct {
                                 request.stream_id,
                                 .enhance_your_calm,
                             );
-                            self.finishSlot(slot, false);
+                            self.finishSlot(handle, false);
                             return;
                         }
                     }
                 }
-                slot.sink = .{ .connection = self, .index = slot_index };
-                slot.reader = .{ .connection = self, .index = slot_index };
+                slot.sink = .{ .connection = self, .index = handle };
+                slot.reader = .{ .connection = self, .index = handle };
             },
 
             .data => |data| {
-                const slot = self.findSlot(data.stream_id) orelse {
+                const handle = self.findSlot(data.stream_id) orelse {
                     if (data.bytes.len > 0) {
                         try self.session.release(
                             self.allocator,
@@ -489,6 +477,7 @@ pub const Connection = struct {
                     }
                     return;
                 };
+                const slot = self.pool.get(handle);
                 const unconsumed = if (self.body_mode == .buffered)
                     slot.received + data.bytes.len
                 else
@@ -506,7 +495,7 @@ pub const Connection = struct {
                             @intCast(data.bytes.len),
                         );
                     }
-                    self.finishSlot(slot, slot.handler_called);
+                    self.finishSlot(handle, slot.handler_called);
                     return;
                 }
 
@@ -528,7 +517,7 @@ pub const Connection = struct {
                                 @intCast(data.bytes.len),
                             );
                         }
-                        self.finishSlot(slot, slot.handler_called);
+                        self.finishSlot(handle, slot.handler_called);
                         return err;
                     };
                     if (data.bytes.len > 0) {
@@ -555,7 +544,7 @@ pub const Connection = struct {
                                 @intCast(data.bytes.len),
                             );
                         }
-                        self.finishSlot(slot, slot.handler_called);
+                        self.finishSlot(handle, slot.handler_called);
                         return err;
                     };
                     if (data.bytes.len != 0) slot.parked = false;
@@ -569,7 +558,8 @@ pub const Connection = struct {
             },
 
             .trailers => |trailers| {
-                const slot = self.findSlot(trailers.stream_id) orelse return;
+                const handle = self.findSlot(trailers.stream_id) orelse return;
+                const slot = self.pool.get(handle);
                 slot.trailers = copyHeaders(
                     slot.arena.allocator(),
                     trailers.headers,
@@ -579,7 +569,7 @@ pub const Connection = struct {
                         trailers.stream_id,
                         .internal_error,
                     );
-                    self.finishSlot(slot, slot.handler_called);
+                    self.finishSlot(handle, slot.handler_called);
                     return err;
                 };
                 slot.request_complete = trailers.end_stream;
@@ -588,9 +578,10 @@ pub const Connection = struct {
             },
 
             .reset => |reset| {
-                if (self.findSlot(reset.stream_id)) |slot| {
+                if (self.findSlot(reset.stream_id)) |handle| {
+                    const slot = self.pool.get(handle);
                     slot.reset_code = compatCode(reset.code);
-                    self.finishSlot(slot, slot.handler_called);
+                    self.finishSlot(handle, slot.handler_called);
                 }
             },
 
@@ -598,14 +589,10 @@ pub const Connection = struct {
                 // A handler parked on a zero write resumes when credit
                 // arrives. A connection-level update can open any stream.
                 if (update.stream_id == 0) {
-                    var index = self.used_head;
-                    while (index) |i| {
-                        const next = self.slots[i].next_used;
-                        self.slots[i].parked = false;
-                        index = next;
-                    }
-                } else if (self.findSlot(update.stream_id)) |slot| {
-                    slot.parked = false;
+                    var it = self.pool.iterator();
+                    while (it.next()) |item| item.entry.parked = false;
+                } else if (self.findSlot(update.stream_id)) |handle| {
+                    self.pool.get(handle).parked = false;
                 }
             },
             .settings, .goaway, .connection_error, .response => {},
@@ -613,14 +600,13 @@ pub const Connection = struct {
     }
 
     fn startReady(self: *Connection, now: Io.Timestamp) !void {
-        // The walk captures `next` before the body: a handler that ends its
-        // stream frees the slot mid-iteration, which unlinks it from the
-        // list. Slots come in allocation order, which is also arrival order.
-        var cursor = self.used_head;
-        while (cursor) |index| {
-            const slot = &self.slots[index];
-            const next = slot.next_used;
-            defer cursor = next;
+        // The pool's iterator advances before the body runs, so a handler
+        // that ends its stream frees the slot mid-iteration safely. Live
+        // entries come in acquisition order, which is arrival order.
+        var it = self.pool.iterator();
+        while (it.next()) |item| {
+            const handle = item.handle;
+            const slot = item.entry;
             if (slot.response_ended or slot.reset_pending) continue;
             if (self.body_mode == .buffered) {
                 if (!slot.request_complete or slot.handler_called) continue;
@@ -641,7 +627,7 @@ pub const Connection = struct {
                             slot.stream_id,
                             .protocol_error,
                         );
-                        self.finishSlot(slot, slot.handler_called);
+                        self.finishSlot(handle, slot.handler_called);
                         continue;
                     }
                 }
@@ -663,7 +649,7 @@ pub const Connection = struct {
             if (expired) slot.deadline = .none;
 
             slot.exchange = .{
-                .id = index,
+                .id = handle,
                 .stream_id = slot.stream_id,
                 .request = .{
                     .head = slot.request_head.?,
@@ -705,7 +691,7 @@ pub const Connection = struct {
                     slot.stream_id,
                     .internal_error,
                 );
-                self.finishSlot(slot, true);
+                self.finishSlot(handle, true);
             };
         }
     }
@@ -715,7 +701,7 @@ pub const Connection = struct {
         index: usize,
     ) shared.stream.ReadError!shared.stream.ReadResult {
         const slot = &self.slots[index];
-        if (!slot.used) return error.Canceled;
+        if (!self.pool.isLive(@intCast(index))) return error.Canceled;
         try self.releaseChunk(slot);
         slot.chunk.clearRetainingCapacity();
         if (slot.reset_pending) return error.Canceled;
@@ -746,13 +732,12 @@ pub const Connection = struct {
 
     fn pumpAll(self: *Connection) !bool {
         var progressed = false;
-        // The walk captures `next` before the body: finishing a slot here
-        // unlinks it from the list mid-iteration.
-        var cursor = self.used_head;
-        while (cursor) |index| {
-            const slot = &self.slots[index];
-            const next = slot.next_used;
-            defer cursor = next;
+        // The pool's iterator advances before the body runs, so finishing a
+        // slot here is safe mid-iteration.
+        var it = self.pool.iterator();
+        while (it.next()) |item| {
+            const handle = item.handle;
+            const slot = item.entry;
 
             if (slot.response_ended or slot.reset_pending) {
                 if (!slot.end_sent) {
@@ -769,7 +754,7 @@ pub const Connection = struct {
                             error.StreamClosed,
                             error.ConnectionClosed,
                             => {
-                                self.finishSlot(slot, slot.handler_called);
+                                self.finishSlot(handle, slot.handler_called);
                                 progressed = true;
                                 continue;
                             },
@@ -787,7 +772,7 @@ pub const Connection = struct {
                             error.StreamClosed,
                             error.ConnectionClosed,
                             => {
-                                self.finishSlot(slot, slot.handler_called);
+                                self.finishSlot(handle, slot.handler_called);
                                 progressed = true;
                                 continue;
                             },
@@ -796,7 +781,7 @@ pub const Connection = struct {
                         slot.end_sent = true;
                     }
                 }
-                self.finishSlot(slot, slot.handler_called);
+                self.finishSlot(handle, slot.handler_called);
                 progressed = true;
                 continue;
             }
@@ -823,7 +808,7 @@ pub const Connection = struct {
                     error.StreamClosed,
                     error.ConnectionClosed,
                     => {
-                        self.finishSlot(slot, slot.handler_called);
+                        self.finishSlot(handle, slot.handler_called);
                         progressed = true;
                         continue;
                     },
@@ -832,7 +817,7 @@ pub const Connection = struct {
                 slot.headers_sent = true;
                 progressed = true;
                 if (end) {
-                    self.finishSlot(slot, slot.handler_called);
+                    self.finishSlot(handle, slot.handler_called);
                     continue;
                 }
             }
@@ -848,7 +833,7 @@ pub const Connection = struct {
                     error.StreamClosed,
                     error.ConnectionClosed,
                     => {
-                        self.finishSlot(slot, slot.handler_called);
+                        self.finishSlot(handle, slot.handler_called);
                         progressed = true;
                         break;
                     },
@@ -871,7 +856,7 @@ pub const Connection = struct {
                         error.StreamClosed,
                         error.ConnectionClosed,
                         => {
-                            self.finishSlot(slot, slot.handler_called);
+                            self.finishSlot(handle, slot.handler_called);
                             progressed = true;
                             continue;
                         },
@@ -879,15 +864,20 @@ pub const Connection = struct {
                     };
                     slot.trailers_sent = true;
                 }
-                self.finishSlot(slot, slot.handler_called);
+                self.finishSlot(handle, slot.handler_called);
                 progressed = true;
             }
         }
         return progressed;
     }
 
-    fn finishSlot(self: *Connection, slot: *Slot, call_complete: bool) void {
-        if (slot.used and self.body_mode == .stream) {
+    fn finishSlot(self: *Connection, handle: slot_pool.Handle, call_complete: bool) void {
+        // A finished slot is finished: the liveness check keeps a second call
+        // (an error path that already completed the stream) from unwinding a
+        // freed slot or handing its handle to two callers.
+        if (!self.pool.isLive(handle)) return;
+        const slot = self.pool.get(handle);
+        if (self.body_mode == .stream) {
             // Unread bytes and the outstanding chunk are still charged to the
             // receive windows. The stream is gone, so only the connection
             // window can take them back.
@@ -911,27 +901,8 @@ pub const Connection = struct {
             self.handler.vtable.complete(self.handler.ptr, &slot.exchange);
         }
         shared.resetArena(&slot.arena, self.arena_retain_bytes);
-        // Unlink from the used list and return the index to the free stack.
-        // The list is doubly linked so this is O(1) in the live count.
-        if (slot.used) {
-            const base = @intFromPtr(self.slots.ptr);
-            const index: u16 = @intCast((@intFromPtr(slot) - base) / @sizeOf(Slot));
-            if (slot.prev_used) |prev| {
-                self.slots[prev].next_used = slot.next_used;
-            } else {
-                self.used_head = slot.next_used;
-            }
-            if (slot.next_used) |next| {
-                self.slots[next].prev_used = slot.prev_used;
-            } else {
-                self.used_tail = slot.prev_used;
-            }
-            slot.prev_used = null;
-            slot.next_used = null;
-            self.free_stack[self.free_top] = index;
-            self.free_top += 1;
-        }
-        slot.used = false;
+        // The pool takes the handle back; it owns the link fields from here.
+        self.pool.release(handle);
         slot.stream_id = 0;
         slot.body = .empty;
         slot.request_head = null;
@@ -958,42 +929,15 @@ pub const Connection = struct {
     }
 
     fn completeAll(self: *Connection) void {
-        var index = self.used_head;
-        while (index) |i| {
-            const next = self.slots[i].next_used;
-            self.finishSlot(&self.slots[i], true);
-            index = next;
-        }
+        var it = self.pool.iterator();
+        while (it.next()) |item| self.finishSlot(item.handle, true);
     }
-    /// Take the next free slot and link it into the used list, or null when
-    /// every slot is live. The used list keeps allocation order, which is
-    /// arrival order, so the engine's passes visit streams FIFO.
-    fn allocSlotIndex(self: *Connection) ?usize {
-        if (self.free_top == 0) return null;
-        self.free_top -= 1;
-        const index: u16 = self.free_stack[self.free_top];
-        const slot = &self.slots[index];
-        assert(!slot.used);
-        slot.used = true;
-        slot.prev_used = self.used_tail;
-        slot.next_used = null;
-        if (self.used_tail) |tail| {
-            self.slots[tail].next_used = index;
-        } else {
-            self.used_head = index;
-        }
-        self.used_tail = index;
-        return index;
-    }
-
-    /// The live slot for a stream id, through the used list: the walk is the
-    /// live count, not the slot-array size.
-    fn findSlot(self: *Connection, stream_id: u31) ?*Slot {
-        var index = self.used_head;
-        while (index) |i| {
-            const slot = &self.slots[i];
-            if (slot.stream_id == stream_id) return slot;
-            index = slot.next_used;
+    /// The handle of the live slot carrying a stream id. The walk is the live
+    /// count, not the slot-array size.
+    fn findSlot(self: *Connection, stream_id: u31) ?slot_pool.Handle {
+        var it = self.pool.iterator();
+        while (it.next()) |item| {
+            if (item.entry.stream_id == stream_id) return item.handle;
         }
         return null;
     }

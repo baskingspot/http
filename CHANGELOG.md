@@ -7,11 +7,14 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
-- `h2` engine connections track live streams through a used list instead of
-  scanning the whole slot array. A pass that visited every configured slot —
-  a cache line each, a thousand slots when a handful of streams were live —
-  now visits only the live ones, in arrival order. Per-request server cycles
-  drop accordingly under load.
+- `h2` engine connections track live streams through `stdx.slot`'s pool
+  instead of scanning the whole slot array. A pass that visited every
+  configured slot — a cache line each, a thousand slots when a handful of
+  streams were live — now visits only the live ones, in arrival order, and
+  the engine's own link bookkeeping is gone: the pool owns the links, the
+  handles are the indices, and the separate free-index allocation is deleted.
+  Per-request server cycles drop accordingly under load. The `stdx`
+  dependency moves to its unreleased `main` for the pool.
 
 ### Fixed
 

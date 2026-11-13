@@ -46,10 +46,6 @@
             .hash = "hparse-0.2.0-IukW0v66AAB71PIs0XSNyZD8lw_pUPSJ8EqZG62y42u6",
             .lazy = true,
         },
-        .stdx = .{
-            .url = "https://baskingspot.dev/stdx/v0.4.0.tar.gz",
-            .hash = "stdx-0.4.0-CcWeghttDwCzAvxm24NX7RL-Wb3ZSqZoHSJDNh6aFzuK",
-        },
         .tls = .{
             .url = "https://baskingspot.dev/tls/v0.4.1.tar.gz",
             .hash = "tls-0.4.1-nf2MKAeKKAAXtjhIUTb-AUO-pR7fe324iJHaphwpKhaC",
@@ -59,6 +55,10 @@
             .url = "https://baskingspot.dev/cli/v0.3.1.tar.gz",
             .hash = "cli-0.3.1-nGM5m-sVAQB7tupXqokmZpPHajiV5eZPcbUVDRvGgNPb",
             .lazy = true,
+        },
+        .stdx = .{
+            .url = "git+https://github.com/baskingspot/stdx#f4075f172cff70a722ad1a4f177d2d9f4830cef6",
+            .hash = "stdx-0.4.0-CcWego_zEACJpOcpIAOpouQ0SICSVS0OyEYV_eIJe0jb",
         },
     },
     .paths = .{
