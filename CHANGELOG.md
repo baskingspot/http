@@ -5,6 +5,14 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `h2.Session` rebuilds its stream table once removed streams outnumber
+  live ones. Removals leave tombstones in the table, so a long-lived session
+  with churn — every gRPC call is one stream opened and closed — walked ever
+  longer probe chains on every event for the life of the connection. Lookups
+  are flat again no matter how many streams the session has served.
+
 ### Added
 
 - `client.Body.reader` is a `std.Io.Reader`, so a response body goes anywhere a

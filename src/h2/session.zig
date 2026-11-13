@@ -323,6 +323,12 @@ pub const Session = struct {
     state: State,
     ids: stream.Ids,
     streams: std.AutoHashMapUnmanaged(u31, Stream),
+    /// Removals since the last `streams` rebuild. A removal leaves a
+    /// tombstone in the table, and a session with churn — every gRPC call is
+    /// one stream opened and closed — would otherwise probe past thousands
+    /// of them for the life of the connection, because the live count stays
+    /// low and never triggers a grow. See `nextEvent`.
+    removed_streams: usize,
     active_local: u32,
     active_remote: u32,
     closed: [closed_capacity]Closed,
@@ -399,6 +405,7 @@ pub const Session = struct {
             .state = .open,
             .ids = stream.Ids.init(options.role),
             .streams = streams,
+            .removed_streams = 0,
             .active_local = 0,
             .active_remote = 0,
             .closed = undefined,
@@ -526,6 +533,15 @@ pub const Session = struct {
         if (self.event) |_| {
             self.event = null;
             self.compact();
+        }
+
+        // Rebuild the stream table once tombstones outnumber live streams:
+        // O(live) work amortized over ~live removals, and the entry point is
+        // the one place no caller can hold a `getPtr` result into the table,
+        // which a rehash invalidates.
+        if (self.removed_streams > self.streams.count()) {
+            self.streams.rehash(std.hash_map.AutoContext(u31){});
+            self.removed_streams = 0;
         }
 
         if (self.options.role == .server and !self.preface_received) {
@@ -1510,6 +1526,7 @@ pub const Session = struct {
 
     fn removeStream(self: *Session, id: u31, reset: bool) ?Stream {
         const kv = self.streams.fetchRemove(id) orelse return null;
+        self.removed_streams += 1;
         self.rememberClosed(id, reset);
         switch (kv.value.initiator) {
             .local => self.active_local -= 1,
