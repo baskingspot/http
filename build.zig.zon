@@ -57,8 +57,8 @@
             .lazy = true,
         },
         .stdx = .{
-            .url = "git+https://github.com/baskingspot/stdx#f4075f172cff70a722ad1a4f177d2d9f4830cef6",
-            .hash = "stdx-0.4.0-CcWego_zEACJpOcpIAOpouQ0SICSVS0OyEYV_eIJe0jb",
+            .url = "git+https://github.com/baskingspot/stdx#b13fd1a9be2d9267130f38ae7990257cd4b211b6",
+            .hash = "stdx-0.4.0-CcWegogqEQCxdmLov6CdGNe2HRplhuab9hJPi4mGOFj_",
         },
     },
     .paths = .{

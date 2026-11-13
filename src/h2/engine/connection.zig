@@ -64,11 +64,12 @@ pub const Options = struct {
 
 const Slot = struct {
     stream_id: u31 = 0,
-    /// The slot pool's links, owned by `Connection.pool`. The values are
-    /// meaningless until the pool acquires the entry, and the pool is the
-    /// only writer.
-    prev_used: slot_pool.Handle = std.math.maxInt(slot_pool.Handle),
-    next_used: slot_pool.Handle = std.math.maxInt(slot_pool.Handle),
+    /// The slot pool's links, owned by `Connection.pool`: the handle type is
+    /// read from these fields, and `u16` holds `max_streams` with room to
+    /// spare. The values are meaningless until the pool acquires the entry,
+    /// and the pool is the only writer.
+    prev_used: u16 = std.math.maxInt(u16),
+    next_used: u16 = std.math.maxInt(u16),
     arena: ArenaAllocator,
     /// `.buffered`: the whole request body.
     body: std.ArrayList(u8) = .empty,
@@ -115,10 +116,6 @@ const Slot = struct {
 
 const slot_pool = @import("stdx").slot;
 const SlotPool = slot_pool.Pool(Slot, "prev_used", "next_used");
-
-/// The pool's no-neighbor sentinel, spelled for the const walks that read the
-/// link fields directly.
-const slot_pool_end: slot_pool.Handle = std.math.maxInt(slot_pool.Handle);
 
 /// The engine behind `Exchange.beginResponse`, `write`, `endResponse`, and
 /// `resetStream`. One per slot; the slots slice never moves.
@@ -337,8 +334,8 @@ pub const Connection = struct {
         var at = self.head_deadline;
         // A read-only walk over the live list: the pool's iterator wants a
         // mutable pool, and this is a const method.
-        var cursor = self.pool.used_head;
-        while (cursor != slot_pool_end) : (cursor = self.slots[cursor].next_used) {
+        var cursor = self.pool.state.used_head;
+        while (cursor != SlotPool.none) : (cursor = self.slots[cursor].next_used) {
             const slot = &self.slots[cursor];
             if (slot.body_deadline.get()) |body_deadline| {
                 at = earliest(at, body_deadline.toStd());
@@ -352,8 +349,8 @@ pub const Connection = struct {
     /// which delivers `wake = .expired`. It is never a reason to close.
     pub fn wakeDeadline(self: *const Connection) ?Io.Timestamp {
         var at: ?Io.Timestamp = null;
-        var cursor = self.pool.used_head;
-        while (cursor != slot_pool_end) : (cursor = self.slots[cursor].next_used) {
+        var cursor = self.pool.state.used_head;
+        while (cursor != SlotPool.none) : (cursor = self.slots[cursor].next_used) {
             const slot = &self.slots[cursor];
             if (slot.deadline.get()) |wake_at| {
                 const value = wake_at.toStd();
@@ -871,7 +868,7 @@ pub const Connection = struct {
         return progressed;
     }
 
-    fn finishSlot(self: *Connection, handle: slot_pool.Handle, call_complete: bool) void {
+    fn finishSlot(self: *Connection, handle: SlotPool.Handle, call_complete: bool) void {
         // A finished slot is finished: the liveness check keeps a second call
         // (an error path that already completed the stream) from unwinding a
         // freed slot or handing its handle to two callers.
@@ -934,7 +931,7 @@ pub const Connection = struct {
     }
     /// The handle of the live slot carrying a stream id. The walk is the live
     /// count, not the slot-array size.
-    fn findSlot(self: *Connection, stream_id: u31) ?slot_pool.Handle {
+    fn findSlot(self: *Connection, stream_id: u31) ?SlotPool.Handle {
         var it = self.pool.iterator();
         while (it.next()) |item| {
             if (item.entry.stream_id == stream_id) return item.handle;
