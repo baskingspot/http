@@ -248,13 +248,13 @@ pub fn response(fields: Headers) Error!ResponseHead {
 
 fn validateFieldName(name: []const u8) Error!void {
     if (name.len == 0) return error.InvalidFieldName;
-    if (simd.first(name, 0, notLowerTcharMask, notLowerTchar)) |_| return error.InvalidFieldName;
+    if (anyBad(name, notLowerTchar, notLowerTcharMask)) return error.InvalidFieldName;
 }
 
 fn validateValue(value: []const u8) Error!void {
     if (value.len == 0) return;
     if (isOws(value[0]) or isOws(value[value.len - 1])) return error.InvalidFieldValue;
-    if (simd.first(value, 0, notValueByteMask, notValueByte)) |_| return error.InvalidFieldValue;
+    if (anyBad(value, notValueByte, notValueByteMask)) return error.InvalidFieldValue;
 }
 
 fn validateRegularField(field: Header) Error!void {
@@ -291,7 +291,7 @@ fn validPath(path: []const u8, method: ?Method) bool {
 
 fn validToken(token: []const u8) bool {
     if (token.len == 0) return false;
-    return simd.first(token, 0, notTcharMask, notTchar) == null;
+    return !anyBad(token, notTchar, notTcharMask);
 }
 
 fn validScheme(scheme: []const u8) bool {
@@ -350,6 +350,25 @@ fn isTchar(byte: u8) bool {
 
 fn splat(comptime byte: u8) simd.Block.Vec {
     return @splat(byte);
+}
+
+/// True when any byte of `bytes` fails `stop`.
+///
+/// Below one SIMD block the scalar loop runs directly: the vector call's
+/// setup costs more than the scan saves on the short names, values, and
+/// tokens a typical request carries, and the per-field guard keeps those
+/// exactly at the old scalar cost. At a block or more, the vector path
+/// takes the whole blocks and the scalar tail finishes the remainder.
+fn anyBad(
+    bytes: []const u8,
+    comptime stop: fn (u8) bool,
+    comptime mask: fn (simd.Block.Vec) simd.Block.BoolVec,
+) bool {
+    if (bytes.len < simd.Block.width) {
+        for (bytes) |byte| if (stop(byte)) return true;
+        return false;
+    }
+    return simd.first(bytes, 0, mask, stop) != null;
 }
 
 fn inRange(lanes: simd.Block.Vec, comptime lo: u8, comptime hi: u8) simd.Block.BoolVec {
