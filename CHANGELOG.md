@@ -44,6 +44,12 @@ All notable changes to http are recorded here. The format follows
   and `client.RequestOptions.connect_deadline` bound resolve, connect, and
   handshake independently of the exchange deadline, so a black-holed dial is
   bounded even when the overall deadline is `.none`.
+- `RequestOptions.progress` now also runs during the TLS handshake, and while a
+  handshake read waits, so a cancelled dial stops a black-holed handshake
+  instead of waiting for the connect deadline. `Connection.Options.cancel`
+  exposes the same hook one level down; a polled read never sets the expired
+  flag, and the hook is cleared when the handshake ends so a live connection
+  does not slice reads it cannot cancel.
 - `client.Client.init(io, allocator, options)` takes a transport and
   `send(url, options)` dials, picks the adapter from the negotiated protocol,
   and sends one request. `Options.transport` defaults to cleartext HTTP/1.1,

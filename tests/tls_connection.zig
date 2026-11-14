@@ -18,6 +18,7 @@ const http = @import("http");
 const http_tls = @import("http_tls");
 const tls = @import("tls");
 const tls_nonblocking = @import("tls_nonblocking");
+const time = @import("stdx").time;
 
 const Server = tls_nonblocking.Server;
 const ServerHandshake = tls.ServerHandshake;
@@ -397,4 +398,70 @@ test "the connector refuses a cleartext URL" {
         .gpa = testing.allocator,
         .url = url,
     }));
+}
+
+/// Says keep going for `after_ns`, then stops. The delay is what proves the
+/// handshake read itself is bounded: without that, the hook would never run
+/// again inside a read that waits to the deadline.
+const AbortState = struct {
+    io: Io,
+    start: i96 = 0,
+    after_ns: i96,
+    seen: usize = 0,
+
+    fn step(context: *anyopaque, phase: http.client.transport.Phase) bool {
+        const self: *AbortState = @ptrCast(@alignCast(context));
+        self.seen += 1;
+        if (phase != .handshake) return true;
+        const now = Io.Clock.awake.now(self.io).nanoseconds;
+        return now - self.start < self.after_ns;
+    }
+};
+
+test "a progress hook aborts a handshake the peer never answers" {
+    // The regression guard is the five second budget, and 0.16 refuses a
+    // socket deadline outright.
+    if (comptime !http.client.plain.deadline_supported) return error.SkipZigTest;
+
+    const allocator = testing.allocator;
+
+    // The listener never accepts, so the kernel completes the TCP connect and
+    // the handshake then waits for a ServerHello that never comes. A five
+    // second budget keeps a regression from hanging the suite.
+    var address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
+    var listener = try address.listen(testing.io, .{
+        .mode = .stream,
+        .reuse_address = true,
+    });
+    defer listener.deinit(testing.io);
+    address.setPort(listener.socket.address.getPort());
+
+    var text: [96]u8 = undefined;
+    const url = try http.client.Url.parse(
+        allocator,
+        try std.fmt.bufPrint(&text, "https://ztls.server.test:{d}/", .{address.getPort()}),
+    );
+    defer url.deinit(allocator);
+
+    const now = @as(u64, @intCast(time.now(.awake).nanoseconds));
+    const budget = try time.OptionalTimestamp.init(
+        time.Timestamp.fromNanoseconds(now + 5 * std.time.ns_per_s),
+    );
+
+    var state: AbortState = .{ .io = testing.io, .after_ns = 150 * std.time.ns_per_ms };
+    state.start = Io.Clock.awake.now(testing.io).nanoseconds;
+    var connector: http_tls.client.Connector = .init(.{
+        .insecure_no_chain_anchor = true,
+    });
+    try testing.expectError(error.Canceled, connector.handle().connect(.{
+        .io = testing.io,
+        .gpa = allocator,
+        .url = url,
+        .address = address,
+        .connect_deadline = budget,
+        .progress = .{ .context = &state, .step = AbortState.step },
+    }));
+    const elapsed = Io.Clock.awake.now(testing.io).nanoseconds - state.start;
+    try testing.expect(elapsed < std.time.ns_per_s);
+    try testing.expect(state.seen >= 2);
 }

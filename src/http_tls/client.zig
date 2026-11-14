@@ -34,6 +34,16 @@ pub const WriteError = SocketClient.WriteError;
 /// The default offer: HTTP/2, then HTTP/1.1.
 pub const automatic_alpn = [_][]const u8{ "h2", "http/1.1" };
 
+/// A cancellation hook for one handshake. It runs on the task driving the
+/// handshake, never concurrently with the TLS state, and at least every 100 ms
+/// while a handshake read waits. Returning true ends `init` with
+/// `error.Canceled`. The transport clears it when the handshake ends.
+pub const HandshakeCancel = struct {
+    context: *anyopaque,
+    /// True ends the handshake.
+    shouldCancel: *const fn (context: *anyopaque) bool,
+};
+
 /// The protocol an ALPN selection stands for, or null when it is not HTTP.
 pub fn protocolFor(selected: []const u8) ?client.Protocol {
     if (mem.eql(u8, selected, "h2")) return .h2;
@@ -68,6 +78,10 @@ pub const Connection = struct {
         alpn: []const []const u8 = &automatic_alpn,
         /// Absolute monotonic deadline for the handshake and subsequent reads.
         deadline: time.OptionalTimestamp = .none,
+        /// Consulted between handshake steps and while a handshake read waits,
+        /// so a caller can abandon a black-holed handshake instead of waiting
+        /// for the deadline.
+        cancel: ?HandshakeCancel = null,
     };
 
     /// Initialize in the final location. The socket stays caller-owned on
@@ -92,6 +106,10 @@ pub const Connection = struct {
             .now_sec = options.now_sec,
             .alpn = self.alpn_protocols,
             .deadline_ns = if (options.deadline.get()) |deadline| deadline.nanoseconds else null,
+            .cancel = if (options.cancel) |cancel| .{
+                .context = cancel.context,
+                .shouldCancel = cancel.shouldCancel,
+            } else null,
         });
 
         const selected = self.inner.selectedAlpn() orelse return error.WrongAlpn;
@@ -222,6 +240,14 @@ fn connectorConnect(ptr: *anyopaque, context: transport.Context) anyerror!transp
     const stream = try plain.connectStream(context, .{});
     errdefer stream.close(context.io);
 
+    // The caller's hook covers every phase; the handshake is the one that can
+    // otherwise wait out the whole connect budget.
+    var handshake_cancel: TransportCancel = .{ .progress = context.progress };
+    const cancel: ?HandshakeCancel = if (context.progress != null)
+        .{ .context = &handshake_cancel, .shouldCancel = TransportCancel.shouldCancel }
+    else
+        null;
+
     const wrapped = try context.gpa.create(Wrapped);
     errdefer {
         wrapped.tls.deinit();
@@ -244,6 +270,7 @@ fn connectorConnect(ptr: *anyopaque, context: transport.Context) anyerror!transp
         .now_sec = self.config.now_sec orelse realSeconds(),
         .alpn = self.config.alpn,
         .deadline = context.dialDeadline(),
+        .cancel = cancel,
     });
     wrapped.tls.setDeadline(context.deadline);
 
@@ -251,6 +278,19 @@ fn connectorConnect(ptr: *anyopaque, context: transport.Context) anyerror!transp
     wrapped.protocol = protocolFor(selected) orelse return error.WrongAlpn;
     return wrapped.handle();
 }
+
+/// Bridges the connector's phase-aware hook to the handshake's: every handshake
+/// step is one `.handshake` phase, and the polarity flips because
+/// `transport.Progress` returns true to keep going.
+const TransportCancel = struct {
+    progress: ?transport.Progress = null,
+
+    fn shouldCancel(context: *anyopaque) bool {
+        const self: *TransportCancel = @ptrCast(@alignCast(context));
+        const progress = self.progress orelse return false;
+        return !progress.run(.handshake);
+    }
+};
 
 fn realSeconds() i64 {
     return @intCast(@divTrunc(time.now(.real).nanoseconds, std.time.ns_per_s));

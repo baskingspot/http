@@ -46,9 +46,12 @@
             .hash = "hparse-0.2.0-IukW0v66AAB71PIs0XSNyZD8lw_pUPSJ8EqZG62y42u6",
             .lazy = true,
         },
+        // TEMPORARY, branch pin for the handshake progress hook. Retarget to
+        // the released tarball URL and hash once baskingspot/tls tags a release
+        // that contains it.
         .tls = .{
-            .url = "https://baskingspot.dev/tls/v0.4.1.tar.gz",
-            .hash = "tls-0.4.1-nf2MKAeKKAAXtjhIUTb-AUO-pR7fe324iJHaphwpKhaC",
+            .url = "git+https://github.com/baskingspot/tls#ec299f1fb639eb4025cb1762edc377177285ec54",
+            .hash = "tls-0.4.1-nf2MKIQSKgArL5O-YkPpaqe3AL-2fnk0QbCkLo2L70pa",
             .lazy = true,
         },
         .cli = .{

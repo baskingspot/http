@@ -159,6 +159,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "http_tls", .module = tls_mod },
                 .{ .name = "tls", .module = dep.module("tls") },
                 .{ .name = "tls_nonblocking", .module = dep.module("tls_nonblocking") },
+                .{ .name = "stdx", .module = stdx.module("stdx") },
             },
         });
         tls_conn_mod.link_libc = true;
