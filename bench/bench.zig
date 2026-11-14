@@ -6,6 +6,7 @@ const testingx = @import("testingx");
 const content_length = @import("content_length_bench.zig");
 const encoding = @import("encoding_bench.zig");
 const h1 = @import("h1_bench.zig");
+const h2_head = @import("h2_head_bench.zig");
 const huffman = @import("huffman_bench.zig");
 const hpack = @import("hpack_bench.zig");
 const hparse = @import("hparse_bench.zig");
@@ -16,6 +17,7 @@ pub fn benchmarkMain(b: *testingx.B) !void {
     try b.addMod(content_length);
     try b.addMod(encoding);
     try b.addMod(h1);
+    try b.addMod(h2_head);
     try b.addMod(huffman);
     try b.addMod(hpack);
     try b.addMod(hparse);

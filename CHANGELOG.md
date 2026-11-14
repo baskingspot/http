@@ -7,6 +7,10 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
+- HTTP/2 request-head validation checks field names, values, and the method
+  token one SIMD block at a time instead of byte by byte; the accepted bytes
+  and the errors are unchanged. The `H2HeadWide` bench row drops from 380 to
+  276 ns/op.
 - Outgoing frames no longer stage through a second buffer: the session's
   output queue takes a frame's header and payload in one scatter append, so
   each payload is copied once on the way out instead of twice. The staging

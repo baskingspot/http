@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const compat = @import("../compat.zig");
+const simd = @import("../simd.zig");
 const testing = std.testing;
 const mem = std.mem;
 const ascii = std.ascii;
@@ -247,19 +248,13 @@ pub fn response(fields: Headers) Error!ResponseHead {
 
 fn validateFieldName(name: []const u8) Error!void {
     if (name.len == 0) return error.InvalidFieldName;
-    for (name) |byte| {
-        if (!isLowerTchar(byte)) return error.InvalidFieldName;
-    }
+    if (simd.first(name, 0, notLowerTcharMask, notLowerTchar)) |_| return error.InvalidFieldName;
 }
 
 fn validateValue(value: []const u8) Error!void {
     if (value.len == 0) return;
     if (isOws(value[0]) or isOws(value[value.len - 1])) return error.InvalidFieldValue;
-    for (value) |byte| {
-        if (byte == '\t') continue;
-        if (byte < 0x20) return error.InvalidFieldValue;
-        if (byte == 0x7f) return error.InvalidFieldValue;
-    }
+    if (simd.first(value, 0, notValueByteMask, notValueByte)) |_| return error.InvalidFieldValue;
 }
 
 fn validateRegularField(field: Header) Error!void {
@@ -296,10 +291,7 @@ fn validPath(path: []const u8, method: ?Method) bool {
 
 fn validToken(token: []const u8) bool {
     if (token.len == 0) return false;
-    for (token) |byte| {
-        if (!isTchar(byte)) return false;
-    }
-    return true;
+    return simd.first(token, 0, notTcharMask, notTchar) == null;
 }
 
 fn validScheme(scheme: []const u8) bool {
@@ -350,6 +342,52 @@ fn isLowerTchar(byte: u8) bool {
 /// field-name validator rejects them separately.
 fn isTchar(byte: u8) bool {
     return isLowerTchar(byte) or (byte >= 'A' and byte <= 'Z');
+}
+
+// The validators only ask whether any byte is bad, never which one, so the
+// offender is not reported and the vector and scalar paths cannot disagree on
+// it. Each mask is the lane form of the scalar predicate beside it.
+
+fn splat(comptime byte: u8) simd.Block.Vec {
+    return @splat(byte);
+}
+
+fn inRange(lanes: simd.Block.Vec, comptime lo: u8, comptime hi: u8) simd.Block.BoolVec {
+    return (lanes >= splat(lo)) & (lanes <= splat(hi));
+}
+
+fn lowerTcharMask(lanes: simd.Block.Vec) simd.Block.BoolVec {
+    var ok = inRange(lanes, 'a', 'z') | inRange(lanes, '0', '9');
+    inline for ("!#$%&'*+-.^_`|~") |special| ok |= lanes == splat(special);
+    return ok;
+}
+
+/// A true lane where the byte is not lowercase `tchar`.
+fn notLowerTcharMask(lanes: simd.Block.Vec) simd.Block.BoolVec {
+    return ~lowerTcharMask(lanes);
+}
+
+fn notLowerTchar(byte: u8) bool {
+    return !isLowerTchar(byte);
+}
+
+/// A true lane where the byte is not `tchar`.
+fn notTcharMask(lanes: simd.Block.Vec) simd.Block.BoolVec {
+    return ~(lowerTcharMask(lanes) | inRange(lanes, 'A', 'Z'));
+}
+
+fn notTchar(byte: u8) bool {
+    return !isTchar(byte);
+}
+
+/// A true lane on a CTL other than HTAB, or DEL. Bytes >= 0x80 are accepted,
+/// as the scalar loop always did.
+fn notValueByteMask(lanes: simd.Block.Vec) simd.Block.BoolVec {
+    return ((lanes < splat(0x20)) & (lanes != splat('\t'))) | (lanes == splat(0x7f));
+}
+
+fn notValueByte(byte: u8) bool {
+    return (byte < 0x20 and byte != '\t') or byte == 0x7f;
 }
 
 const request_fields = [_]Header{
@@ -627,4 +665,109 @@ test "outbound response validation" {
         .status = .ok,
         .headers = &.{.{ .name = ":status", .value = "200" }},
     }));
+}
+
+const width = simd.Block.width;
+
+/// Lengths that straddle the vector width: empty, one lane, a full block,
+/// and one either side.
+const boundary_lengths = [_]usize{ 0, 1, width - 1, width, width + 1, 2 * width, 2 * width + 1 };
+
+fn expectValueError(value: []const u8, expected: ?Error) !void {
+    const fields = [_]Header{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = "x-test", .value = value },
+    };
+    if (expected) |err| {
+        try testing.expectError(err, request(.{ .items = &fields }));
+    } else {
+        _ = try request(.{ .items = &fields });
+    }
+}
+
+test "vector field values: a bad byte at every position of every boundary length" {
+    var buf: [2 * width + 1]u8 = undefined;
+    for (boundary_lengths) |len| {
+        @memset(buf[0..len], 'a');
+        try expectValueError(buf[0..len], null);
+        // Interior tab and high-bit bytes are allowed at every position.
+        for (1..@max(len, 2) - 1) |at| {
+            for ([_]u8{ '\t', 0x80, 0xff }) |ok| {
+                buf[at] = ok;
+                try expectValueError(buf[0..len], null);
+            }
+            buf[at] = 'a';
+        }
+        // CTLs and DEL are rejected at every position, edges included.
+        for (0..len) |at| {
+            for ([_]u8{ 0x00, 0x0a, 0x1f, 0x7f }) |bad| {
+                buf[at] = bad;
+                try expectValueError(buf[0..len], error.InvalidFieldValue);
+            }
+            buf[at] = 'a';
+        }
+        // Everything invalid.
+        @memset(buf[0..len], 0x01);
+        try expectValueError(buf[0..len], if (len == 0) null else error.InvalidFieldValue);
+    }
+}
+
+test "vector field values: edge whitespace and high-bit runs" {
+    var buf: [2 * width + 1]u8 = undefined;
+    for (boundary_lengths) |len| {
+        @memset(buf[0..len], 0xc3);
+        try expectValueError(buf[0..len], null);
+        if (len == 0) continue;
+        @memset(buf[0..len], 'a');
+        buf[0] = ' ';
+        try expectValueError(buf[0..len], error.InvalidFieldValue);
+        buf[0] = 'a';
+        buf[len - 1] = '\t';
+        try expectValueError(buf[0..len], error.InvalidFieldValue);
+    }
+}
+
+test "vector field names: every byte value at every boundary position" {
+    var buf: [2 * width + 1]u8 = undefined;
+    for (boundary_lengths) |len| {
+        @memset(buf[0..len], 'a');
+        try testing.expectEqual(len != 0, if (validateFieldName(buf[0..len])) true else |_| false);
+        for (0..len) |at| {
+            for (0..256) |raw| {
+                const byte: u8 = @intCast(raw);
+                buf[at] = byte;
+                const result = validateFieldName(buf[0..len]);
+                if (isLowerTchar(byte)) {
+                    try result;
+                } else {
+                    try testing.expectError(error.InvalidFieldName, result);
+                }
+            }
+            buf[at] = 'a';
+        }
+        @memset(buf[0..len], 0xff);
+        try testing.expectError(error.InvalidFieldName, validateFieldName(buf[0..len]));
+    }
+    try testing.expectError(error.InvalidFieldName, validateFieldName(""));
+}
+
+test "vector tokens: every byte value at every boundary position" {
+    var buf: [2 * width + 1]u8 = undefined;
+    try testing.expect(!validToken(""));
+    for (boundary_lengths[1..]) |len| {
+        @memset(buf[0..len], 'G');
+        try testing.expect(validToken(buf[0..len]));
+        for (0..len) |at| {
+            for (0..256) |raw| {
+                const byte: u8 = @intCast(raw);
+                buf[at] = byte;
+                try testing.expectEqual(isTchar(byte), validToken(buf[0..len]));
+            }
+            buf[at] = 'G';
+        }
+        @memset(buf[0..len], 0x80);
+        try testing.expect(!validToken(buf[0..len]));
+    }
 }

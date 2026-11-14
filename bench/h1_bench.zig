@@ -2,8 +2,16 @@
 //! response head.
 
 const testingx = @import("testingx");
-const compat = @import("../src/compat.zig");
 const http = @import("http");
+
+/// `**` on byte strings is gone in Zig 0.17, and `src/compat.zig` sits outside
+/// the bench module path, so the benches carry their own.
+fn repeat(comptime s: []const u8, comptime n: usize) [s.len * n]u8 {
+    @setEvalBranchQuota(n + 1000);
+    var out: [s.len * n]u8 = undefined;
+    for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+    return out;
+}
 
 const h1 = http.h1;
 
@@ -79,11 +87,11 @@ pub fn benchmarkResponse(b: *testingx.B) !void {
     b.keepAlive(&storage);
 }
 
-const long_value = compat.repeatString("a", 1024);
+const long_value = repeat("a", 1024);
 const long_request = "GET / HTTP/1.1\r\nX-Long: " ++ long_value ++ "\r\n\r\n";
 
 // No final empty line: the completeness gate scans and returns Incomplete.
-const incomplete_request = "GET / HTTP/1.1\r\n" ++ compat.repeatString("X-Filler: value\r\n", 400);
+const incomplete_request = "GET / HTTP/1.1\r\n" ++ repeat("X-Filler: value\r\n", 400);
 
 pub fn benchmarkRequestLongValue(b: *testingx.B) !void {
     const buf: []const u8 = long_request;
