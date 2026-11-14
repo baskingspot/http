@@ -131,20 +131,8 @@ pub const Connection = struct {
         if (context.deadline.get() != null and !deadline_supported)
             return error.DeadlineUnsupported;
 
-        const stream = try dial(context);
+        const stream = try connectStream(context, .{ .no_delay = config.no_delay });
         errdefer stream.close(context.io);
-
-        if (config.no_delay) {
-            // A stack that refuses NODELAY serializes small writes for the
-            // life of the connection, so it fails the dial rather than
-            // silently dropping the promise.
-            stdx.posix.setsockopt(
-                stream.socket.handle,
-                posix.IPPROTO.TCP,
-                posix.TCP.NODELAY,
-                1,
-            ) catch return error.SystemResources;
-        }
 
         const self = try context.gpa.create(Connection);
         self.* = .{
@@ -412,10 +400,43 @@ fn waitBeforeWrite(self: *Connection) Error!void {
 // Dialing
 // ---------------------------------------------------------------------------
 
+/// What the dial applies after the stream is connected.
+// ast-grep-ignore: public-struct-field-default -- options bag; no-delay is the default
+pub const DialOptions = struct {
+    /// Set `TCP_NODELAY`. Shared by every transport that uses this dial.
+    no_delay: bool = true,
+};
+
+/// Resolve and connect the URL's host without wrapping the stream in an HTTP
+/// connection. A TLS connector uses this and then adds its own record layer.
+pub fn connectStream(context: transport.Context, options: DialOptions) Error!Io.net.Stream {
+    const stream = try dial(context);
+    errdefer stream.close(context.io);
+    if (options.no_delay) {
+        // A stack that refuses NODELAY serializes small writes for the life of
+        // the connection, so it fails the dial rather than silently dropping
+        // the promise.
+        stdx.posix.setsockopt(
+            stream.socket.handle,
+            posix.IPPROTO.TCP,
+            posix.TCP.NODELAY,
+            1,
+        ) catch return error.SystemResources;
+    }
+    return stream;
+}
+
 fn dial(context: transport.Context) Error!Io.net.Stream {
     if (expired(context.deadline)) return error.TimedOut;
     if (context.progress) |progress| {
         if (!progress.run(.resolve)) return error.Stopped;
+    }
+
+    if (context.address) |address| {
+        if (context.progress) |progress| {
+            if (!progress.run(.connect)) return error.Stopped;
+        }
+        return connectAddress(context, address);
     }
 
     var addresses: [max_addresses]IpAddress = undefined;
@@ -643,7 +664,7 @@ fn setCloexec(fd: posix.socket_t) !void {
 }
 
 fn setNonBlocking(fd: posix.socket_t, enabled: bool) !void {
-    const raw = posix.system.fcntl(fd, posix.F.GETFL, 0);
+    const raw = posix.system.fcntl(fd, posix.F.GETFL, @as(usize, 0));
     if (posix.errno(raw) != .SUCCESS) return error.SystemResources;
     var flags: posix.O = @bitCast(@as(u32, @intCast(raw)));
     flags.NONBLOCK = enabled;

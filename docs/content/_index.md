@@ -837,6 +837,26 @@ there rather than a value the client accepts and ignores.
 `connection.setDeadline` moves the deadline for later reads, which is how a
 long-lived watch loop keeps a per-read bound without reconnecting.
 
+`http_tls.client.Connector` is the same seam for `https`. It reuses the
+cleartext dial, runs the handshake with the caller's CA, offers an ALPN list,
+and reports the selected protocol, so `client.Client` picks the h1 or h2
+adapter without the caller looking at ALPN:
+
+```zig
+var connector: http_tls.client.Connector = .init(.{ .ca_pem = ca_pem });
+var connection = try connector.handle().connect(.{
+    .io = io,
+    .gpa = gpa,
+    .url = try .parse(gpa, "https://10.96.0.1:443/apis/v1"),
+    .deadline = deadline,
+});
+```
+
+`Config.alpn` defaults to `h2` then `http/1.1`; a peer that selects neither is
+`error.WrongAlpn`, and an `http` URL is `error.PlainUnsupported`. Certificate
+names come from the URL host, so `Context.address` pins the address without
+changing SNI or the DNS-ID check.
+
 The seam is what makes TLS a separate module. `http` names no TLS type, so an
 `https` connector comes from `http_tls` or from any other module that fills the
 vtable; `transport.Connection` is already the shape `http_tls.client.Connection`

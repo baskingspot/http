@@ -56,6 +56,10 @@ pub const Context = struct {
     /// One absolute monotonic deadline for the whole attempt and every later
     /// read and write on the connection. `.none` waits indefinitely.
     deadline: time.OptionalTimestamp = .none,
+    /// Connect here instead of resolving `url.host`. For a test peer, a pinned
+    /// endpoint, or a name this process resolves differently. The host in the
+    /// URL still drives the `Host` field, SNI, and certificate names.
+    address: ?Io.net.IpAddress = null,
     progress: ?Progress = null,
 };
 

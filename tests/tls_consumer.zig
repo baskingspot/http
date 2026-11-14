@@ -40,7 +40,8 @@ test "the anchors builder is reachable through the module name" {
         .host_name = "example.com",
         .now_sec = 0,
     };
-    try testing.expectEqualStrings("h2", options.alpn);
+    try testing.expectEqualStrings("h2", options.alpn[0]);
+    try testing.expectEqualStrings("http/1.1", options.alpn[1]);
 }
 
 test "the transport is reachable through the module name" {

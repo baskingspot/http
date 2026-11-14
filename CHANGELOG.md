@@ -20,9 +20,22 @@ All notable changes to http are recorded here. The format follows
 - `client.Url.parse` splits an absolute `http` or `https` URL into the scheme,
   authority, host, port, and origin-form target, with the scheme default port.
   `uri.percentEncode` encodes one query component.
+- `http_tls.client.Connector` fills the dial seam for `https`: it reuses the
+  cleartext dial, runs the TLS handshake with the caller's CA, offers an ALPN
+  list (`h2` then `http/1.1` by default), and reports the negotiated protocol.
+  A URL whose scheme is `http` is `error.PlainUnsupported`.
+- `client.transport.Context.address` connects to a given address instead of
+  resolving `url.host`, so a test peer or a pinned endpoint keeps the URL's
+  host for SNI, `Host`, and certificate checks.
+- `client.plain.connectStream` and `client.plain.DialOptions` expose the
+  resolve-and-connect step for a transport that adds its own record layer.
 
 ### Changed
 
+- `http_tls.client.Connection.Options.alpn` is a protocol list, not one name.
+  The peer's selection must be in the list, or `init` is `error.WrongAlpn`. The
+  default offers `h2` and then `http/1.1`, and `selectedAlpn` reports which
+  one won.
 - The client and engine modules no longer carry a `blocking` qualifier, which
   named one `std.Io` backend rather than the API. `client.blocking.Client` is
   `client.Client`, `h1.client.blocking` is `h1.client.buffered`,

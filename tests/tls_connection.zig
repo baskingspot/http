@@ -83,6 +83,14 @@ const ServerThread = struct {
     io: Io,
     listener: *Io.net.Server,
     leaf: []const u8,
+    /// Protocols the server accepts, in preference order.
+    alpn: []const []const u8 = &.{"h2"},
+    /// Answer the first complete request head with this and close, instead of
+    /// echoing. A request can arrive in several TLS records, so the head is
+    /// accumulated until the blank line.
+    response: ?[]const u8 = null,
+    request: [2048]u8 = undefined,
+    request_len: usize = 0,
     outcome: ?anyerror = null,
 
     /// Drive the server transport until the peer closes, echoing plaintext.
@@ -90,6 +98,14 @@ const ServerThread = struct {
         self.serve() catch |err| {
             self.outcome = err;
         };
+    }
+
+    /// Append application bytes to the request buffer; a head that fills it is
+    /// not a request this fixture needs to answer.
+    fn collect(self: *ServerThread, bytes: []const u8) !void {
+        if (self.request_len + bytes.len > self.request.len) return error.RequestTooLarge;
+        @memcpy(self.request[self.request_len..][0..bytes.len], bytes);
+        self.request_len += bytes.len;
     }
 
     fn serve(self: *ServerThread) !void {
@@ -117,7 +133,7 @@ const ServerThread = struct {
         try io.randomSecure(&config.random.data);
         try server.init(
             &.{
-                .handshake = .{ .alpn_protocols = &.{"h2"} },
+                .handshake = .{ .alpn_protocols = self.alpn },
                 .cert_chain = &.{self.leaf},
                 .signer = private_key.signer(),
             },
@@ -148,6 +164,16 @@ const ServerThread = struct {
                     server.received(n);
                 },
                 .application_data => |bytes| {
+                    if (self.response) |response| {
+                        try self.collect(bytes);
+                        server.consumeApplication(bytes.len);
+                        const head = self.request[0..self.request_len];
+                        if (std.mem.find(u8, head, "\r\n\r\n") != null) {
+                            try sendPlain(&server, fd, response);
+                            return;
+                        }
+                        continue;
+                    }
                     var offset: usize = 0;
                     while (offset < bytes.len) {
                         const accepted = server.write(bytes[offset..]) catch return;
@@ -170,6 +196,22 @@ const ServerThread = struct {
     }
 };
 
+/// Write every byte of `bytes` as application data, flushing as it goes.
+fn sendPlain(server: *Server, fd: std.posix.socket_t, bytes: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const accepted = try server.write(bytes[offset..]);
+        offset += accepted;
+        const wire = server.sendBuffer();
+        if (wire.len != 0) {
+            const written = Platform.send(fd, &.{}, wire) catch return error.TransportClosed;
+            if (written == 0) return error.TransportClosed;
+            server.sent(written);
+        }
+        if (accepted == 0) return error.NoProgress;
+    }
+}
+
 const Harness = struct {
     io: Io,
     listener: Io.net.Server,
@@ -177,7 +219,17 @@ const Harness = struct {
     thread_data: ServerThread,
     thread: std.Thread,
 
-    fn init(self: *Harness, allocator: std.mem.Allocator, leaf: []const u8) !void {
+    const Options = struct {
+        alpn: []const []const u8 = &.{"h2"},
+        response: ?[]const u8 = null,
+    };
+
+    fn init(
+        self: *Harness,
+        allocator: std.mem.Allocator,
+        leaf: []const u8,
+        options: Options,
+    ) !void {
         self.io = testing.io;
         self.address = try .parseLiteral("127.0.0.1:0");
         self.listener = try self.address.listen(self.io, .{
@@ -185,7 +237,13 @@ const Harness = struct {
             .reuse_address = true,
         });
         self.address.setPort(self.listener.socket.address.getPort());
-        self.thread_data = .{ .io = self.io, .listener = &self.listener, .leaf = leaf };
+        self.thread_data = .{
+            .io = self.io,
+            .listener = &self.listener,
+            .leaf = leaf,
+            .alpn = options.alpn,
+            .response = options.response,
+        };
         _ = allocator;
         self.thread = try .spawn(.{}, ServerThread.run, .{&self.thread_data});
     }
@@ -209,7 +267,7 @@ test "the connection reads and writes plaintext over TLS" {
     defer allocator.free(ca_pem);
 
     var harness: Harness = undefined;
-    try harness.init(allocator, leaf_der);
+    try harness.init(allocator, leaf_der, .{});
     defer harness.deinit();
 
     const socket = try harness.address.connect(harness.io, .{ .mode = .stream });
@@ -220,7 +278,7 @@ test "the connection reads and writes plaintext over TLS" {
         .ca_pem = ca_pem,
         .host_name = "ztls.server.test",
         .now_sec = now_sec,
-        .alpn = "h2",
+        .alpn = &.{"h2"},
     });
     defer conn.deinit();
 
@@ -252,7 +310,7 @@ test "a passed deadline ends the wait and reports itself" {
     defer allocator.free(ca_pem);
 
     var harness: Harness = undefined;
-    try harness.init(allocator, leaf_der);
+    try harness.init(allocator, leaf_der, .{});
     defer harness.deinit();
 
     const socket = try harness.address.connect(harness.io, .{ .mode = .stream });
@@ -263,7 +321,7 @@ test "a passed deadline ends the wait and reports itself" {
         .ca_pem = ca_pem,
         .host_name = "ztls.server.test",
         .now_sec = now_sec,
-        .alpn = "h2",
+        .alpn = &.{"h2"},
     });
     defer conn.deinit();
 
@@ -279,4 +337,80 @@ test "a passed deadline ends the wait and reports itself" {
     try conn.writer().writeAll("still here");
     conn.setDeadline(try .init(.fromNanoseconds(0)));
     try testing.expectError(error.ReadFailed, conn.reader().readSliceAll(&buf));
+}
+
+test "the connector dials https and serves a request" {
+    const allocator = testing.allocator;
+
+    const leaf_der = try derAlloc(allocator, leaf_b64);
+    defer allocator.free(leaf_der);
+    const ca_pem = try pemAlloc(allocator, ca_b64);
+    defer allocator.free(ca_pem);
+
+    var harness: Harness = undefined;
+    try harness.init(allocator, leaf_der, .{
+        .alpn = &.{"http/1.1"},
+        .response = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+    });
+    defer harness.deinit();
+
+    // The certificate names `ztls.server.test`, which does not resolve in this
+    // process, so the dial takes the address override and the URL host still
+    // drives SNI and the certificate check.
+    var text: [96]u8 = undefined;
+    const url_text = try std.fmt.bufPrint(
+        &text,
+        "https://ztls.server.test:{d}/v1/secret",
+        .{harness.address.getPort()},
+    );
+    const url = try http.client.Url.parse(allocator, url_text);
+    defer url.deinit(allocator);
+
+    var connector: http_tls.client.Connector = .init(.{ .ca_pem = ca_pem });
+    var connection = try connector.handle().connect(.{
+        .io = harness.io,
+        .gpa = allocator,
+        .url = url,
+        .address = harness.address,
+    });
+    defer connection.deinit();
+
+    // The client offered h2 first and the server only accepts http/1.1, so the
+    // selection decides the adapter.
+    try testing.expectEqual(http.client.Protocol.h1, connection.protocol);
+
+    var net: http.client.Client = undefined;
+    try net.init(connection.reader, connection.writer, .{
+        .protocol = connection.protocol,
+        .common = .{
+            .allocator = allocator,
+            .read_cause = connection.cause(),
+        },
+    });
+    defer net.deinit();
+
+    var response = try net.request(.{
+        .method_token = "GET",
+        .scheme = .https,
+        .authority = url.authority,
+        .target = url.target,
+    });
+    defer response.body.close();
+
+    var got: [8]u8 = undefined;
+    var writer: Io.Writer = .fixed(&got);
+    const used = try response.body.reader.streamRemaining(&writer);
+    try testing.expectEqualStrings("hello", got[0..used]);
+    try testing.expect(response.body.outcome() == null);
+}
+
+test "the connector refuses a cleartext URL" {
+    var connector: http_tls.client.Connector = .init(.{});
+    const url = try http.client.Url.parse(testing.allocator, "http://127.0.0.1:1/");
+    defer url.deinit(testing.allocator);
+    try testing.expectError(error.PlainUnsupported, connector.handle().connect(.{
+        .io = testing.io,
+        .gpa = testing.allocator,
+        .url = url,
+    }));
 }
