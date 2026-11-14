@@ -28,6 +28,7 @@ pub const Status = @import("status.zig").Status;
 pub const status = @import("status.zig");
 pub const token_list = @import("token_list.zig");
 pub const transfer_encoding = @import("transfer_encoding.zig");
+pub const uri = @import("uri.zig");
 pub const Values = @import("header.zig").Values;
 pub const Version = @import("version.zig").Version;
 pub const WireVersion = @import("version.zig").WireVersion;
@@ -51,4 +52,5 @@ test {
     _ = encoding;
     _ = token_list;
     _ = transfer_encoding;
+    _ = uri;
 }

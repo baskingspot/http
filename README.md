@@ -42,6 +42,7 @@ The library is pre-1.0 and the API is not frozen; a consumer pins a version.
 - [The h2 session and frames](https://baskingspot.dev/http/#the-h2-session-and-frames): `h2.frame.parse` is the frame codec, and `h2.Session` owns SETTINGS, streams, flow control, HPACK, and CONTINUATION assembly.
 - [HPACK](https://baskingspot.dev/http/#hpack): `hpack.Decoder` and `hpack.Encoder` keep the static and dynamic tables in step, and `prefix_int` and `huffman` are the primitives QPACK reuses.
 - [The client contract](https://baskingspot.dev/http/#the-client-contract): `client.Request` and `client.Body` are protocol-neutral, `client.Response.body.reader` is a `std.Io.Reader` over a framing-blind decoder, and `client.Client` dispatches to an h1 or an h2 adapter.
+- [Dialing](https://baskingspot.dev/http/#dialing): `client.transport.Connector` is the seam, `client.plain` resolves, connects, and applies one deadline to every read and write, and `client.Url` splits a URL into the fields a request needs.
 - [Running a server](https://baskingspot.dev/http/#running-a-server): `engine.Handler(Exchange)` is the one vtable every engine calls, and `http_tls` adds TLS without putting crypto in the core.
 - [Performance](https://baskingspot.dev/http/#performance): 81 ns against 79 ns on a typical request head, 255 ns against 334 ns on a wide one, and 3.8x on a 1 KiB header value.
 - [Limits](https://baskingspot.dev/http/#limits): no chunked request bodies on h1, no connection reuse, and the rest of what is not here.

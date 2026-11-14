@@ -5,8 +5,30 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `client.transport` is the dial seam: a `Connector` turns a `client.Url` into
+  a reader, a writer, the negotiated `Protocol`, and one absolute deadline for
+  both directions. `http` names no TLS type, so an `https` connector is a
+  vtable implementation from `http_tls` or another module.
+- `client.plain` is the cleartext connector. It resolves the host, tries each
+  address, sets `TCP_NODELAY`, and bounds the dial and every later read and
+  write with one deadline: reads through `Io.Batch` with a `net_read`
+  operation, writes with `MSG_DONTWAIT` plus the same wait. A progress hook can
+  stop the dial. Zig 0.16 has no socket operation in `Io.Operation`, so a
+  deadline there is `error.DeadlineUnsupported`.
+- `client.Url.parse` splits an absolute `http` or `https` URL into the scheme,
+  authority, host, port, and origin-form target, with the scheme default port.
+  `uri.percentEncode` encodes one query component.
+
 ### Changed
 
+- The client and engine modules no longer carry a `blocking` qualifier, which
+  named one `std.Io` backend rather than the API. `client.blocking.Client` is
+  `client.Client`, `h1.client.blocking` is `h1.client.buffered`,
+  `h2.client.blocking` is `h2.client`, and `h1.engine.blocking` and
+  `h2.engine.blocking` are `h1.engine.direct` and `h2.engine.direct`. Update the
+  import; no behavior changed.
 - HTTP/2 request-head validation checks field names, values, and the method
   token one SIMD block at a time instead of byte by byte; the accepted bytes
   and the errors are unchanged. The `H2HeadWide` bench row drops from 380 to

@@ -788,6 +788,65 @@ plaintext reader and writer and implements the contract over either protocol.
 The caller chooses the protocol. ALPN or a cleartext prior-knowledge decision
 belongs above this layer, where the connection is opened.
 
+## Dialing
+
+`client.transport` is the dial seam. A `client.transport.Connector` turns a
+`client.Url` into a `client.transport.Connection`: a reader, a writer, the
+negotiated `Protocol`, and one absolute deadline for both directions. The
+dialer is the only thing that needs to know how a socket is opened, and it
+hands the exchange to `client.Client` unchanged.
+
+`client.plain` is the cleartext connector. `Connector.init(.{ .protocol = .h1 })`
+gives a value whose `handle()` is a `client.transport.Connector`; pass it a
+`Context` with the URL, the `Io`, an allocator, and optionally a deadline and a
+progress hook. It resolves the host, tries each address in order, sets
+`TCP_NODELAY`, and reports `error.TlsUnsupported` for an `https` URL rather than
+sending cleartext to a TLS port.
+
+```zig
+var connector: http.client.plain.Connector = .init(.{});
+var connection = try connector.handle().connect(.{
+    .io = io,
+    .gpa = gpa,
+    .url = try .parse(gpa, "http://127.0.0.1:8080/"),
+    .deadline = deadline,
+});
+defer connection.deinit();
+
+var client: http.client.Client = undefined;
+try client.init(connection.reader, connection.writer, .{
+    .protocol = connection.protocol,
+    .common = .{ .allocator = gpa, .read_cause = connection.cause() },
+});
+defer client.deinit();
+```
+
+One deadline covers the dial and every later read and write. Reads go through
+`Io.Batch`, which on the threaded backend is a `poll(2)` with the remaining
+time. Writes use `MSG_DONTWAIT` plus the same wait, because a blocking write on
+a large payload waits for the whole payload even when the socket reported
+one byte of room. A read a deadline ends is `error.ReadFailed` with
+`error.TimedOut` latched as the cause, and `connection.cause()` turns that into
+`.local = .timed_out` on the body.
+
+Name resolution is not bounded: `std.Io` has no lookup timeout, so the deadline
+starts once the host is a list of addresses. Zig 0.16 has no socket read or
+write operation in `Io.Operation`, so a deadline is `error.DeadlineUnsupported`
+there rather than a value the client accepts and ignores.
+
+`connection.setDeadline` moves the deadline for later reads, which is how a
+long-lived watch loop keeps a per-read bound without reconnecting.
+
+The seam is what makes TLS a separate module. `http` names no TLS type, so an
+`https` connector comes from `http_tls` or from any other module that fills the
+vtable; `transport.Connection` is already the shape `http_tls.client.Connection`
+implements.
+
+`client.Url.parse` splits a URL into the scheme, authority, host, port, and
+origin-form target, with the scheme default port. `client.Url.deinit` releases
+the one allocation a URL can take. `uri.percentEncode` encodes one query
+component against the unreserved set of RFC 3986.
+
 ## The h1 adapters
 
 `h1.client.streaming.Client` implements the shared contract over
