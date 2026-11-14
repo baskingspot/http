@@ -364,7 +364,7 @@ fn anyBad(
     comptime stop: fn (u8) bool,
     comptime mask: fn (simd.Block.Vec) simd.Block.BoolVec,
 ) bool {
-    if (bytes.len < simd.Block.width) {
+    if (bytes.len < width) {
         for (bytes) |byte| if (stop(byte)) return true;
         return false;
     }
