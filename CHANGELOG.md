@@ -29,9 +29,18 @@ All notable changes to http are recorded here. The format follows
   host for SNI, `Host`, and certificate checks.
 - `client.plain.connectStream` and `client.plain.DialOptions` expose the
   resolve-and-connect step for a transport that adds its own record layer.
+- `client.Client.init(io, allocator, options)` takes a transport and
+  `send(url, options)` dials, picks the adapter from the negotiated protocol,
+  and sends one request. `Options.transport` defaults to cleartext HTTP/1.1,
+  `Options.deadline` bounds every exchange, and `RequestOptions` carries the
+  method, headers, body, progress hook, and address override.
 
 ### Changed
 
+- `client.Client.init` now builds a dialing client and takes `(io, allocator,
+  options)`. The old constructor, which adopted a caller-owned reader and
+  writer, is `client.Client.attached(reader, writer, config)`. `protocol()`
+  returns `?Protocol`, null before the first exchange.
 - `http_tls.client.Connection.Options.alpn` is a protocol list, not one name.
   The peer's selection must be in the list, or `init` is `error.WrongAlpn`. The
   default offers `h2` and then `http/1.1`, and `selectedAlpn` reports which

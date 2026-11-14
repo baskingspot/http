@@ -367,35 +367,19 @@ test "the connector dials https and serves a request" {
     defer url.deinit(allocator);
 
     var connector: http_tls.client.Connector = .init(.{ .ca_pem = ca_pem });
-    var connection = try connector.handle().connect(.{
-        .io = harness.io,
-        .gpa = allocator,
-        .url = url,
+    var client: http.client.Client = undefined;
+    try client.init(allocator, harness.io, .{ .transport = connector.handle() });
+    defer client.deinit();
+
+    var response = try client.send(url, .{
+        .method_token = "GET",
         .address = harness.address,
     });
-    defer connection.deinit();
+    defer response.body.close();
 
     // The client offered h2 first and the server only accepts http/1.1, so the
     // selection decides the adapter.
-    try testing.expectEqual(http.client.Protocol.h1, connection.protocol);
-
-    var net: http.client.Client = undefined;
-    try net.init(connection.reader, connection.writer, .{
-        .protocol = connection.protocol,
-        .common = .{
-            .allocator = allocator,
-            .read_cause = connection.cause(),
-        },
-    });
-    defer net.deinit();
-
-    var response = try net.request(.{
-        .method_token = "GET",
-        .scheme = .https,
-        .authority = url.authority,
-        .target = url.target,
-    });
-    defer response.body.close();
+    try testing.expectEqual(http.client.Protocol.h1, client.protocol().?);
 
     var got: [8]u8 = undefined;
     var writer: Io.Writer = .fixed(&got);

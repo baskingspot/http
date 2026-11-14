@@ -866,7 +866,7 @@ test "the connector carries a request and a streaming body" {
     try testing.expectEqual(Protocol.h1, connection.protocol);
 
     var client: dispatch.Client = undefined;
-    try client.init(connection.reader, connection.writer, .{
+    try client.attached(connection.reader, connection.writer, .{
         .protocol = connection.protocol,
         .common = .{
             .allocator = testing.allocator,
@@ -919,7 +919,7 @@ test "a body read the deadline ended is a local timeout" {
     defer connection.deinit();
 
     var client: dispatch.Client = undefined;
-    try client.init(connection.reader, connection.writer, .{
+    try client.attached(connection.reader, connection.writer, .{
         .protocol = connection.protocol,
         .common = .{
             .allocator = testing.allocator,
@@ -963,4 +963,31 @@ test "a deadline the lane cannot honor is refused" {
         .url = url,
         .deadline = soon,
     }));
+}
+
+test "the client dials and sends through its connector" {
+    var fixture: Fixture = undefined;
+    try fixture.init(
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+        0,
+    );
+    defer fixture.deinit();
+
+    var text: [64]u8 = undefined;
+    const url = try parseFor(fixture.address.getPort(), &text, "http");
+    defer url.deinit(testing.allocator);
+
+    var client: dispatch.Client = undefined;
+    try client.init(testing.allocator, testing.io, .{});
+    defer client.deinit();
+    try testing.expectEqual(@as(?Protocol, null), client.protocol());
+
+    var response = try client.send(url, .{ .method_token = "GET" });
+    defer response.body.close();
+    try testing.expectEqual(@as(?Protocol, .h1), client.protocol());
+
+    var got: [8]u8 = undefined;
+    var writer: Io.Writer = .fixed(&got);
+    const used = try response.body.reader.streamRemaining(&writer);
+    try testing.expectEqualStrings("hello", got[0..used]);
 }

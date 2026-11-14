@@ -145,7 +145,7 @@ pub fn main(init: std.process.Init) !void {
             return error.UnsupportedAlpn;
         if (verbose) printRequest(request, negotiated);
         var http_client: client.Client = undefined;
-        try http_client.init(conn.reader(), conn.writer(), .{
+        try http_client.attached(conn.reader(), conn.writer(), .{
             .protocol = negotiated,
             .common = .{ .allocator = arena },
         });
@@ -165,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
             printRequest(request, protocol);
         }
         var http_client: client.Client = undefined;
-        try http_client.init(&stream_reader.interface, &stream_writer.interface, .{
+        try http_client.attached(&stream_reader.interface, &stream_writer.interface, .{
             .protocol = protocol,
             .common = .{ .allocator = arena },
         });

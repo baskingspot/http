@@ -788,38 +788,64 @@ plaintext reader and writer and implements the contract over either protocol.
 The caller chooses the protocol. ALPN or a cleartext prior-knowledge decision
 belongs above this layer, where the connection is opened.
 
+## The client
+
+`client.Client` has two modes. `init` gives it a dialer, and `send` opens the
+connection, picks the adapter from the negotiated protocol, and sends one
+request:
+
+```zig
+var client: http.client.Client = undefined;
+try client.init(gpa, io, .{ .transport = tls_connector.handle() });
+defer client.deinit();
+
+var response = try client.send(url, .{ .method_token = "GET" });
+defer response.body.close();
+```
+
+`attached` is the mode for a socket you already own: it takes a reader and a
+writer and never dials, bounds, or closes anything. That is the layer
+`h1.client.streaming` and `h2.client.Client` sit under, and what a proxy or a
+test harness uses. `request` sends over the attached connection; `send` is the
+one that dials.
+
+A client holds at most one connection. `send` closes the previous one, so close
+the response body before the next call.
+
 ## Dialing
 
 `client.transport` is the dial seam. A `client.transport.Connector` turns a
 `client.Url` into a `client.transport.Connection`: a reader, a writer, the
 negotiated `Protocol`, and one absolute deadline for both directions. The
-dialer is the only thing that needs to know how a socket is opened, and it
-hands the exchange to `client.Client` unchanged.
+dialer is the only thing that needs to know how a socket is opened.
 
-`client.plain` is the cleartext connector. `Connector.init(.{ .protocol = .h1 })`
-gives a value whose `handle()` is a `client.transport.Connector`; pass it a
-`Context` with the URL, the `Io`, an allocator, and optionally a deadline and a
-progress hook. It resolves the host, tries each address in order, sets
-`TCP_NODELAY`, and reports `error.TlsUnsupported` for an `https` URL rather than
-sending cleartext to a TLS port.
+`client.plain` is the cleartext connector and the default: a client with no
+`.transport` speaks cleartext HTTP/1.1 with these options. `Connector.init(.{ .protocol = .h1 })`
+gives a value whose `handle()` is a `client.transport.Connector`. It resolves
+the host, tries each address in order, sets `TCP_NODELAY`, and reports
+`error.TlsUnsupported` for an `https` URL rather than sending cleartext to a
+TLS port.
+
+`http_tls.client.Connector` is the same seam for `https`. It reuses the
+cleartext dial, runs the handshake with the caller's CA, offers an ALPN list,
+and reports the selected protocol, so the client picks the h1 or h2 adapter
+without the caller looking at ALPN:
 
 ```zig
-var connector: http.client.plain.Connector = .init(.{});
-var connection = try connector.handle().connect(.{
-    .io = io,
-    .gpa = gpa,
-    .url = try .parse(gpa, "http://127.0.0.1:8080/"),
-    .deadline = deadline,
-});
-defer connection.deinit();
-
+var connector: http_tls.client.Connector = .init(.{ .ca_pem = ca_pem });
 var client: http.client.Client = undefined;
-try client.init(connection.reader, connection.writer, .{
-    .protocol = connection.protocol,
-    .common = .{ .allocator = gpa, .read_cause = connection.cause() },
-});
-defer client.deinit();
+try client.init(io, gpa, .{ .transport = connector.handle() });
 ```
+
+`Config.alpn` defaults to `h2` then `http/1.1`; a peer that selects neither is
+`error.WrongAlpn`, and an `http` URL is `error.PlainUnsupported`. Certificate
+names come from the URL host, so `RequestOptions.address` pins the address
+without changing SNI or the DNS-ID check.
+
+That seam is what keeps TLS out of `http`: the core names no TLS type, so an
+`https` connector comes from `http_tls` or from any module that fills the
+vtable. `transport.Connection` is already the shape
+`http_tls.client.Connection` implements.
 
 One deadline covers the dial and every later read and write. Reads go through
 `Io.Batch`, which on the threaded backend is a `poll(2)` with the remaining
@@ -834,33 +860,8 @@ starts once the host is a list of addresses. Zig 0.16 has no socket read or
 write operation in `Io.Operation`, so a deadline is `error.DeadlineUnsupported`
 there rather than a value the client accepts and ignores.
 
-`connection.setDeadline` moves the deadline for later reads, which is how a
-long-lived watch loop keeps a per-read bound without reconnecting.
-
-`http_tls.client.Connector` is the same seam for `https`. It reuses the
-cleartext dial, runs the handshake with the caller's CA, offers an ALPN list,
-and reports the selected protocol, so `client.Client` picks the h1 or h2
-adapter without the caller looking at ALPN:
-
-```zig
-var connector: http_tls.client.Connector = .init(.{ .ca_pem = ca_pem });
-var connection = try connector.handle().connect(.{
-    .io = io,
-    .gpa = gpa,
-    .url = try .parse(gpa, "https://10.96.0.1:443/apis/v1"),
-    .deadline = deadline,
-});
-```
-
-`Config.alpn` defaults to `h2` then `http/1.1`; a peer that selects neither is
-`error.WrongAlpn`, and an `http` URL is `error.PlainUnsupported`. Certificate
-names come from the URL host, so `Context.address` pins the address without
-changing SNI or the DNS-ID check.
-
-The seam is what makes TLS a separate module. `http` names no TLS type, so an
-`https` connector comes from `http_tls` or from any other module that fills the
-vtable; `transport.Connection` is already the shape `http_tls.client.Connection`
-implements.
+`transport.Connection.setDeadline` moves the deadline for later reads, which is
+how a long-lived watch loop keeps a per-read bound without reconnecting.
 
 `client.Url.parse` splits a URL into the scheme, authority, host, port, and
 origin-form target, with the scheme default port. `client.Url.deinit` releases
