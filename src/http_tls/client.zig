@@ -216,8 +216,8 @@ const connector_vtable: transport.Connector.VTable = .{ .connect = connectorConn
 fn connectorConnect(ptr: *anyopaque, context: transport.Context) anyerror!transport.Connection {
     const self: *Connector = @ptrCast(@alignCast(ptr));
     if (context.url.scheme == .http) return error.PlainUnsupported;
-    if (context.deadline.get() != null and !plain.deadline_supported)
-        return error.DeadlineUnsupported;
+    if (context.deadline.get() != null or context.connect_deadline.get() != null)
+        if (!plain.deadline_supported) return error.DeadlineUnsupported;
 
     const stream = try plain.connectStream(context, .{});
     errdefer stream.close(context.io);
@@ -235,14 +235,17 @@ fn connectorConnect(ptr: *anyopaque, context: transport.Context) anyerror!transp
         .protocol = undefined,
         .deadline = context.deadline,
     };
+    // The handshake gets the connect budget; everything after it gets the
+    // exchange deadline.
     try wrapped.tls.init(context.gpa, context.io, stream, .{
         .ca_pem = self.config.ca_pem,
         .insecure_no_chain_anchor = self.config.insecure_no_chain_anchor,
         .host_name = context.url.host,
         .now_sec = self.config.now_sec orelse realSeconds(),
         .alpn = self.config.alpn,
-        .deadline = context.deadline,
+        .deadline = context.dialDeadline(),
     });
+    wrapped.tls.setDeadline(context.deadline);
 
     const selected = wrapped.tls.selectedAlpn() orelse return error.WrongAlpn;
     wrapped.protocol = protocolFor(selected) orelse return error.WrongAlpn;

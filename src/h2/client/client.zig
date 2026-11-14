@@ -942,6 +942,7 @@ const body_reader_vtable: Io.Reader.VTable = .{
 const body_vtable: Body.VTable = .{
     .outcome = Client.bodyOutcome,
     .close = bodyClose,
+    .abort = bodyClose,
 };
 
 fn bodyClose(ptr: *anyopaque) void {

@@ -817,7 +817,9 @@ test harness uses. `request` sends over the attached connection; `send` is the
 one that dials.
 
 A client holds at most one connection. `send` closes the previous one, so close
-the response body before the next call.
+the response body before the next call. `abort` is `close` without the wait: a
+body you give up on is not drained, and the connection is finished rather than
+reused.
 
 ## Dialing
 
@@ -867,6 +869,8 @@ starts once the host is a list of addresses. Zig 0.16 has no socket read or
 write operation in `Io.Operation`, so a deadline is `error.DeadlineUnsupported`
 there rather than a value the client accepts and ignores.
 
+`RequestOptions.connect_deadline` bounds the dial and handshake on its own, so a
+watch with no exchange deadline still cannot hang on a black-holed connect.
 `transport.Connection.setDeadline` moves the deadline for later reads, which is
 how a long-lived watch loop keeps a per-read bound without reconnecting.
 

@@ -31,6 +31,7 @@ pub const Config = common.Config;
 const body_vtable: Body.VTable = .{
     .outcome = Client.bodyOutcome,
     .close = Client.bodyClose,
+    .abort = Client.bodyAbort,
 };
 
 /// The body stream. `Client.bodyReader` is the field this vtable is looked up
@@ -328,6 +329,23 @@ pub const Client = struct {
         self.closeBody();
     }
 
+    fn bodyAbort(ptr: *anyopaque) void {
+        const self: *Client = @ptrCast(@alignCast(ptr));
+        self.abortBody();
+    }
+
+    /// Give the response up without reading it. Nothing here waits on the
+    /// peer: an h1 exchange cannot be reset, so the connection is only usable
+    /// after a drain, and a caller aborting does not want that wait.
+    fn abortBody(self: *Client) void {
+        if (!self.active) return;
+        if (!self.body_eof) self.dirty = true;
+        self.active = false;
+        self.body_eof = false;
+        self.body_outcome = null;
+        self.pending = &.{};
+    }
+
     fn closeBody(self: *Client) void {
         if (!self.active) return;
         if (!self.body_eof) {
@@ -367,12 +385,20 @@ const Fixture = struct {
     listener: Io.net.Server,
     address: Io.net.IpAddress,
     response: []const u8,
+    /// Body bytes written with the head; the rest follows `split_hold_ms`
+    /// later. The default splits the body from the head, which is what a real
+    /// server does. `std.math.maxInt(usize)` writes the whole response at once.
+    split_body_at: usize = 0,
+    /// How long the rest of the body waits after the first write.
+    split_hold_ms: u64 = 20,
     result: ?anyerror = null,
     thread: std.Thread,
 
     fn init(self: *Fixture, response: []const u8) !void {
         self.io = testing.io;
         self.response = response;
+        self.split_body_at = 0;
+        self.split_hold_ms = 20;
         self.result = null;
         self.address = try .parseLiteral("127.0.0.1:0");
         self.listener = try self.address.listen(self.io, .{
@@ -409,7 +435,9 @@ const Fixture = struct {
         var buffer: [256]u8 = undefined;
         var writer = stream.writer(self.io, &buffer);
         const head_len = (std.mem.find(u8, self.response, "\r\n\r\n") orelse 0) + 4;
-        writer.interface.writeAll(self.response[0..head_len]) catch |err| {
+        const body = self.response[head_len..];
+        const first_end = head_len + @min(self.split_body_at, body.len);
+        writer.interface.writeAll(self.response[0..first_end]) catch |err| {
             self.result = err;
             return;
         };
@@ -417,11 +445,13 @@ const Fixture = struct {
             self.result = err;
             return;
         };
-        self.io.sleep(.{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake) catch |err| {
+        if (first_end == self.response.len) return;
+        const hold: Io.Duration = .{ .nanoseconds = self.split_hold_ms * std.time.ns_per_ms };
+        self.io.sleep(hold, .awake) catch |err| {
             self.result = err;
             return;
         };
-        writer.interface.writeAll(self.response[head_len..]) catch |err| {
+        writer.interface.writeAll(self.response[first_end..]) catch |err| {
             self.result = err;
             return;
         };
@@ -557,6 +587,88 @@ fn expectSameBytes(expected: []const u8, body: Body) !void {
     const used = try body.reader.streamRemaining(&writer);
     try testing.expectEqualStrings(expected, got[0..used]);
     try testing.expect(body.outcome() == null);
+}
+
+test "a body read returns what arrived instead of filling the destination" {
+    var fixture: Fixture = undefined;
+    try fixture.init("HTTP/1.1 200 OK\r\nContent-Length: 11\r\n" ++
+        "Connection: close\r\n\r\nhello world");
+    defer fixture.deinit();
+    // Five bytes arrive with the head; the rest is 200 ms behind. A read that
+    // insisted on filling its destination would have to wait for all eleven.
+    fixture.split_body_at = 5;
+    fixture.split_hold_ms = 200;
+
+    const stream = try fixture.address.connect(fixture.io, .{ .mode = .stream });
+    defer stream.close(fixture.io);
+
+    var write_buffer: [256]u8 = undefined;
+    var stream_writer = stream.writer(fixture.io, &write_buffer);
+    var stream_reader = stream.reader(fixture.io, &.{});
+    var client: Client = undefined;
+    try client.init(&stream_reader.interface, &stream_writer.interface, .{
+        .allocator = testing.allocator,
+    });
+    defer client.deinit();
+
+    const response = try client.request(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+    });
+    defer response.body.close();
+
+    var got: [16]u8 = undefined;
+    var writer: Io.Writer = .fixed(&got);
+    const first = try response.body.reader.stream(&writer, .unlimited);
+    try testing.expectEqual(5, first);
+    try testing.expectEqualStrings("hello", got[0..first]);
+
+    const second = try response.body.reader.stream(&writer, .unlimited);
+    try testing.expectEqual(6, second);
+    try testing.expectEqualStrings("hello world", got[0 .. first + second]);
+}
+
+test "abort gives the response up without reading the rest" {
+    var fixture: Fixture = undefined;
+    try fixture.init("HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort");
+    defer fixture.deinit();
+    // The peer holds the rest of the body for 200 ms, so a drain inside `close`
+    // would wait for it. `abort` must not read at all.
+    fixture.split_body_at = 5;
+    fixture.split_hold_ms = 200;
+
+    const stream = try fixture.address.connect(fixture.io, .{ .mode = .stream });
+    defer stream.close(fixture.io);
+
+    var write_buffer: [256]u8 = undefined;
+    var stream_writer = stream.writer(fixture.io, &write_buffer);
+    var stream_reader = stream.reader(fixture.io, &.{});
+    var client: Client = undefined;
+    try client.init(&stream_reader.interface, &stream_writer.interface, .{
+        .allocator = testing.allocator,
+    });
+    defer client.deinit();
+
+    const response = try client.request(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+    });
+    const before = Io.Clock.awake.now(fixture.io).nanoseconds;
+    response.body.abort();
+    const elapsed = Io.Clock.awake.now(fixture.io).nanoseconds - before;
+    try testing.expect(elapsed < 100 * std.time.ns_per_ms);
+
+    // An h1 exchange cannot be reset, so the byte stream is finished.
+    try testing.expectError(error.ConnectionDirty, client.request(.{
+        .method_token = "GET",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/",
+    }));
 }
 
 test "a streaming body is framing-blind" {

@@ -46,6 +46,9 @@ pub const Options = struct {
     max_headers: usize = 128,
     /// Deadline for every exchange that does not set its own.
     deadline: time.OptionalTimestamp = .none,
+    /// Dial budget for every exchange that does not set its own. Bounds resolve,
+    /// connect, and handshake even when `deadline` is `.none`.
+    connect_deadline: time.OptionalTimestamp = .none,
 };
 
 // ast-grep-ignore: public-struct-field-default -- options bag; a GET without a body
@@ -56,6 +59,8 @@ pub const RequestOptions = struct {
     body: []const u8 = "",
     /// Absolute deadline for this exchange, overriding the client's.
     deadline: time.OptionalTimestamp = .none,
+    /// Dial budget for this exchange, overriding the client's.
+    connect_deadline: time.OptionalTimestamp = .none,
     /// Runs during resolve and between connect poll slices.
     progress: ?transport.Progress = null,
     /// Connect here instead of resolving the URL's host.
@@ -85,6 +90,7 @@ pub const Client = struct {
         max_header_bytes: usize,
         max_headers: usize,
         deadline: time.OptionalTimestamp,
+        connect_deadline: time.OptionalTimestamp,
         /// The byte transport behind `inner`, when one is open.
         connection: ?transport.Connection = null,
     };
@@ -103,6 +109,7 @@ pub const Client = struct {
                 .max_header_bytes = options.max_header_bytes,
                 .max_headers = options.max_headers,
                 .deadline = options.deadline,
+                .connect_deadline = options.connect_deadline,
                 .connection = null,
             },
         };
@@ -149,11 +156,16 @@ pub const Client = struct {
             options.deadline
         else
             dialing.deadline;
+        const connect_deadline = if (options.connect_deadline.get() != null)
+            options.connect_deadline
+        else
+            dialing.connect_deadline;
         var connection = try dialing.connector.connect(.{
             .io = dialing.io,
             .gpa = dialing.allocator,
             .url = url,
             .deadline = deadline,
+            .connect_deadline = connect_deadline,
             .progress = options.progress,
             .address = options.address,
         });
@@ -184,6 +196,24 @@ pub const Client = struct {
     /// The protocol of the open connection, or null when none is open.
     pub fn protocol(self: *const Client) ?Protocol {
         if (self.inner) |inner| return inner;
+        return null;
+    }
+
+    /// Why the last read on the open connection failed. Valid while a response
+    /// body is open: it names a truncation, a reset, a protocol fault, or a
+    /// local cause such as a deadline. `Body.outcome` carries the same
+    /// information on the body itself.
+    pub fn readCause(self: *const Client) ?anyerror {
+        const dialing = self.dialing orelse return null;
+        if (dialing.connection) |*connection| return connection.readCause();
+        return null;
+    }
+
+    /// Why the last write on the open connection failed. Valid while a response
+    /// body is open.
+    pub fn writeCause(self: *const Client) ?anyerror {
+        const dialing = self.dialing orelse return null;
+        if (dialing.connection) |*connection| return connection.writeCause();
         return null;
     }
 

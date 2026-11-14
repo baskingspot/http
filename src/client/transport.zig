@@ -48,6 +48,14 @@ pub const Progress = struct {
     }
 };
 
+/// The earlier of two deadlines. `.none` loses to any value, and two `.none`
+/// values stay `.none`.
+pub fn earlier(a: time.OptionalTimestamp, b: time.OptionalTimestamp) time.OptionalTimestamp {
+    const left = a.get() orelse return b;
+    const right = b.get() orelse return a;
+    return if (left.nanoseconds <= right.nanoseconds) a else b;
+}
+
 // ast-grep-ignore: public-struct-field-default -- options bag; no deadline by default
 pub const Context = struct {
     io: Io,
@@ -56,11 +64,22 @@ pub const Context = struct {
     /// One absolute monotonic deadline for the whole attempt and every later
     /// read and write on the connection. `.none` waits indefinitely.
     deadline: time.OptionalTimestamp = .none,
+    /// Budget for resolve, connect, and handshake only. It bounds a black-holed
+    /// dial even when `deadline` is `.none`, and the earlier of the two wins.
+    /// Later reads and writes use `deadline`, never this.
+    connect_deadline: time.OptionalTimestamp = .none,
     /// Connect here instead of resolving `url.host`. For a test peer, a pinned
     /// endpoint, or a name this process resolves differently. The host in the
     /// URL still drives the `Host` field, SNI, and certificate names.
     address: ?Io.net.IpAddress = null,
     progress: ?Progress = null,
+
+    /// The deadline a connector applies to resolve, connect, and handshake.
+    pub fn dialDeadline(self: Context) time.OptionalTimestamp {
+        if (self.connect_deadline.get() == null) return self.deadline;
+        if (self.deadline.get() == null) return self.connect_deadline;
+        return earlier(self.connect_deadline, self.deadline);
+    }
 };
 
 pub const Connector = struct {

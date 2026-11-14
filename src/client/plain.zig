@@ -128,8 +128,8 @@ pub const Connection = struct {
 
     fn open(context: transport.Context, config: Config) Error!*Connection {
         if (context.url.scheme == .https) return error.TlsUnsupported;
-        if (context.deadline.get() != null and !deadline_supported)
-            return error.DeadlineUnsupported;
+        if (context.deadline.get() != null or context.connect_deadline.get() != null)
+            if (!deadline_supported) return error.DeadlineUnsupported;
 
         const stream = try connectStream(context, .{ .no_delay = config.no_delay });
         errdefer stream.close(context.io);
@@ -427,7 +427,8 @@ pub fn connectStream(context: transport.Context, options: DialOptions) Error!Io.
 }
 
 fn dial(context: transport.Context) Error!Io.net.Stream {
-    if (expired(context.deadline)) return error.TimedOut;
+    const deadline = context.dialDeadline();
+    if (expired(deadline)) return error.TimedOut;
     if (context.progress) |progress| {
         if (!progress.run(.resolve)) return error.Stopped;
     }
@@ -436,7 +437,7 @@ fn dial(context: transport.Context) Error!Io.net.Stream {
         if (context.progress) |progress| {
             if (!progress.run(.connect)) return error.Stopped;
         }
-        return connectAddress(context, address);
+        return connectAddress(context, address, deadline);
     }
 
     var addresses: [max_addresses]IpAddress = undefined;
@@ -448,7 +449,7 @@ fn dial(context: transport.Context) Error!Io.net.Stream {
         if (context.progress) |progress| {
             if (!progress.run(.connect)) return error.Stopped;
         }
-        const stream = connectAddress(context, address) catch |err| switch (err) {
+        const stream = connectAddress(context, address, deadline) catch |err| switch (err) {
             error.TimedOut,
             error.Stopped,
             error.InvalidHost,
@@ -543,7 +544,11 @@ const Lookup = struct {
     }
 };
 
-fn connectAddress(context: transport.Context, address: IpAddress) Error!Io.net.Stream {
+fn connectAddress(
+    context: transport.Context,
+    address: IpAddress,
+    deadline: time.OptionalTimestamp,
+) Error!Io.net.Stream {
     const family: posix.sa_family_t = switch (address) {
         .ip4 => posix.AF.INET,
         .ip6 => posix.AF.INET6,
@@ -581,7 +586,7 @@ fn connectAddress(context: transport.Context, address: IpAddress) Error!Io.net.S
     }
 
     if (connecting) {
-        try waitWritable(fd, context.deadline, context.progress);
+        try waitWritable(fd, deadline, context.progress);
         const so_error = getsockoptError(fd) catch return error.SystemResources;
         if (so_error != 0) return errnoToError(so_error);
     }

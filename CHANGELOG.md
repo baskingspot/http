@@ -33,6 +33,17 @@ All notable changes to http are recorded here. The format follows
   host for SNI, `Host`, and certificate checks.
 - `client.plain.connectStream` and `client.plain.DialOptions` expose the
   resolve-and-connect step for a transport that adds its own record layer.
+- `client.Body.abort()` gives a response up without reading the rest: h1 marks
+  the connection unusable and h2 resets the stream, so nothing waits on a peer
+  that may never finish. `close` still drains a bounded amount so an h1
+  connection can be reused.
+- `client.Client.readCause` and `writeCause` report why the last read or write
+  on the open connection failed, for a caller that needs reset versus
+  truncation versus a deadline while a body is still open.
+- `client.transport.Context.connect_deadline`, `client.Options.connect_deadline`,
+  and `client.RequestOptions.connect_deadline` bound resolve, connect, and
+  handshake independently of the exchange deadline, so a black-holed dial is
+  bounded even when the overall deadline is `.none`.
 - `client.Client.init(io, allocator, options)` takes a transport and
   `send(url, options)` dials, picks the adapter from the negotiated protocol,
   and sends one request. `Options.transport` defaults to cleartext HTTP/1.1,

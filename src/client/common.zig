@@ -225,6 +225,12 @@ pub const Body = struct {
         /// Finish the response. Idempotent. Releases unread flow control and
         /// resets an incomplete stream where the protocol supports it.
         close: *const fn (ptr: *anyopaque) void,
+        /// Give the response up without reading the rest. Idempotent. Nothing
+        /// waits on the peer: h1 marks the connection unusable, because a body
+        /// that stops mid-flight leaves the byte stream useless, and h2 resets
+        /// the stream. Use `close` to finish a response and `abort` when the
+        /// peer may never send the rest.
+        abort: *const fn (ptr: *anyopaque) void,
     };
 
     pub fn outcome(self: Body) ?Outcome {
@@ -233,6 +239,10 @@ pub const Body = struct {
 
     pub fn close(self: Body) void {
         self.vtable.close(self.ptr);
+    }
+
+    pub fn abort(self: Body) void {
+        self.vtable.abort(self.ptr);
     }
 };
 
