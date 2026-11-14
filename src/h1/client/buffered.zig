@@ -1,4 +1,4 @@
-//! A blocking HTTP/1 client over `std.Io.net`.
+//! An HTTP/1 client over `std.Io.net` that buffers the whole body.
 //!
 //! The adapter writes one request with `h1.Writer`, feeds the response into
 //! `h1.ClientConn`, and copies the body into a caller-owned buffer. It does
@@ -236,7 +236,7 @@ fn sampleRequest() Request {
     };
 }
 
-test "blocking client reads Content-Length" {
+test "buffered client reads Content-Length" {
     var fixture: Fixture = undefined;
     try fixture.init("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
     defer fixture.deinit();
@@ -249,7 +249,7 @@ test "blocking client reads Content-Length" {
     try testing.expectEqualStrings("hello", response.body);
 }
 
-test "blocking client reads chunked and skips an interim response" {
+test "buffered client reads chunked and skips an interim response" {
     var fixture: Fixture = undefined;
     try fixture.init(
         "HTTP/1.1 100 Continue\r\n\r\n" ++
@@ -266,7 +266,7 @@ test "blocking client reads chunked and skips an interim response" {
     try testing.expectEqualStrings("hello", response.body);
 }
 
-test "blocking client reads a close-delimited body" {
+test "buffered client reads a close-delimited body" {
     var fixture: Fixture = undefined;
     try fixture.init("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhello");
     defer fixture.deinit();
@@ -279,7 +279,7 @@ test "blocking client reads a close-delimited body" {
     try testing.expectEqualStrings("hello", response.body);
 }
 
-test "blocking client keeps the head when the body arrives later" {
+test "buffered client keeps the head when the body arrives later" {
     var fixture: Fixture = undefined;
     try fixture.init("HTTP/1.1 200 OK\r\nServer: h1\r\nContent-Length: 20\r\n\r\n" ++
         "0123456789abcdefghij");

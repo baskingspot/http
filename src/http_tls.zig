@@ -20,7 +20,7 @@ const tls_client_impl = @import("h2/engine/transport/tls_client.zig");
 pub const anchors = @import("http_tls/anchors.zig");
 pub const Bundle = anchors.Bundle;
 
-/// A blocking plaintext connection over TLS: reader, writer, one deadline.
+/// A plaintext connection over TLS: reader, writer, one deadline.
 pub const client = @import("http_tls/client.zig");
 
 pub const h2 = struct {

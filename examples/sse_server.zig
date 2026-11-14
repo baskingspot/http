@@ -116,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
         var request_buffer: [16 * 1024]u8 = undefined;
         var headers: [64]http.Header = undefined;
         var response_head: [1024]u8 = undefined;
-        http.h1.engine.blocking.serve(io, conn, app.handler(), .{
+        http.h1.engine.direct.serve(io, conn, app.handler(), .{
             .allocator = gpa,
             .request_buffer = &request_buffer,
             .headers = &headers,

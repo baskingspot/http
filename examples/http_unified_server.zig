@@ -8,7 +8,7 @@
 //!
 //! The TLS handshake selects the protocol before any HTTP byte. On cleartext,
 //! the first bytes distinguish the h2 preface from an HTTP/1 request; a small
-//! reader replays them into the matching blocking engine.
+//! reader replays them into the matching direct engine.
 
 const std = @import("std");
 const Io = std.Io;
@@ -164,7 +164,7 @@ fn serveCleartext(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
     var writer = stream.writer(io, &write_buffer);
     if (maybe_h2 and prefix_len == h2_preface.len) {
         var h2_read_buffer: [16 * 1024]u8 = undefined;
-        try http.h2.engine.blocking.serveIo(
+        try http.h2.engine.direct.serveIo(
             io,
             &prefixed.interface,
             &writer.interface,
@@ -183,7 +183,7 @@ fn serveCleartext(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
     var request_buffer: [16 * 1024]u8 = undefined;
     var headers: [64]http.Header = undefined;
     var response_head: [1024]u8 = undefined;
-    try http.h1.engine.blocking.serveIo(
+    try http.h1.engine.direct.serveIo(
         io,
         &prefixed.interface,
         &writer.interface,
@@ -252,7 +252,7 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
     if (std.mem.eql(u8, alpn, "h2")) {
         var read_buffer: [16 * 1024]u8 = undefined;
         var write_buffer: [4 * 1024]u8 = undefined;
-        try http.h2.engine.blocking.serveIo(
+        try http.h2.engine.direct.serveIo(
             io,
             conn.reader(),
             conn.writer(),
@@ -271,7 +271,7 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
         var request_buffer: [16 * 1024]u8 = undefined;
         var headers: [64]http.Header = undefined;
         var response_head: [1024]u8 = undefined;
-        try http.h1.engine.blocking.serveIo(
+        try http.h1.engine.direct.serveIo(
             io,
             conn.reader(),
             conn.writer(),

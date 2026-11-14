@@ -1,11 +1,11 @@
-//! A blocking HTTP/1 client against the Go net/http interop server.
+//! An HTTP/1 client over std.Io against the Go net/http interop server.
 
 const std = @import("std");
 const Io = std.Io;
 const print = std.debug.print;
 
 const http = @import("http");
-const client = http.h1.client.blocking;
+const client = http.h1.client.buffered;
 
 const address_text = "127.0.0.1:8091";
 

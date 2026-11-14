@@ -1,7 +1,7 @@
 //! Full-duplex HTTP/2 streaming, end to end over a loopback socket.
 //!
-//! The server is the blocking engine in `.stream` body mode; the client is the
-//! blocking adapter using `begin`, `BodyWriter`, and `response`. The test that
+//! The server is the direct engine in `.stream` body mode; the client is the
+//! h2 client using `begin`, `BodyWriter`, and `response`. The test that
 //! decides whether request-body streaming works is the first one here: two
 //! request/response messages cross on one stream while the request body is
 //! still open.
@@ -12,10 +12,10 @@ const Io = std.Io;
 
 const http = @import("http");
 const time = @import("stdx").time;
-const engine = http.h2.engine.blocking;
+const engine = http.h2.engine.direct;
 const Handler = http.h2.engine.Handler;
 const Exchange = http.h2.engine.Exchange;
-const client_mod = http.h2.client.blocking;
+const client_mod = http.h2.client;
 const Client = client_mod.Client;
 
 /// Read the next piece of a response body, or null at a clean end.

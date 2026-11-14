@@ -1,4 +1,4 @@
-//! A blocking byte-transport driver for a multiplexed HTTP/2 client.
+//! The byte-transport driver for a multiplexed HTTP/2 client.
 //!
 //! `Driver` owns no protocol state. It flushes `Connection` output, reads
 //! plaintext, and retains bytes the connection did not accept. The caller

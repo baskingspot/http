@@ -16,10 +16,10 @@ storage you own, and never allocate.
 - [Method and status](#method-and-status): `Method.parse` is case-sensitive, `Status` is an open enum so an unnamed three-digit code is still a value, and `WireVersion` keeps the exact digits.
 - [The h1 message](#the-h1-message): `h1.parseRequest` returns borrowed slices or `error.Incomplete`, `h1.framing` picks the body rule, `h1.chunked.Decoder` resumes mid-body, and `h1.Writer` writes the message back out.
 - [The h1 connection machine](#the-h1-connection-machine): `h1.ServerConn` and `h1.ClientConn` take the bytes you read and the time you have, and own no memory and no socket.
-- [The h1 engines](#the-h1-engines): `h1.engine.blocking.serve` takes one connection at a time, and `h1.engine.poll`, `.epoll`, and `.kqueue` serve fixed slots with deadlines.
+- [The h1 engines](#the-h1-engines): `h1.engine.direct.serve` takes one connection at a time, and `h1.engine.poll`, `.epoll`, and `.kqueue` serve fixed slots with deadlines.
 - [The h2 session and frames](#the-h2-session-and-frames): `h2.frame.parse` is the frame codec, and `h2.Session` owns SETTINGS, streams, flow control, HPACK, and CONTINUATION assembly.
 - [HPACK](#hpack): `hpack.Decoder` and `hpack.Encoder` share the static and dynamic tables, and `prefix_int` and `huffman` are the primitives QPACK reuses.
-- [The client contract](#the-client-contract): `client.Request` and `client.Body` are protocol-neutral, and `client.blocking.Client` dispatches to an h1 or an h2 adapter.
+- [The client contract](#the-client-contract): `client.Request` and `client.Body` are protocol-neutral, and `client.Client` dispatches to an h1 or an h2 adapter.
 - [Running a server](#running-a-server): `engine.Handler(Exchange)` is the one vtable every engine calls, and `http_tls` adds TLS without putting crypto in the core.
 - [Performance](#performance): 81 ns against 79 ns on a typical request head, 255 ns against 334 ns on a wide one, and 3.8x on a 1 KiB header value.
 - [Limits](#limits): no streaming request bodies, no connection reuse, and the rest of what is not here.
@@ -379,8 +379,8 @@ work for data from a trusted source. An empty chunk is rejected either way.
 # The h1 connection machine
 
 `h1.ServerConn` and `h1.ClientConn` are the two state machines. Both own no
-memory, touch no socket, and take the time as an argument, so a blocking
-thread, a poll loop, and an io_uring ring drive the same code.
+memory, touch no socket, and take the time as an argument, so the direct
+engine, a poll loop, and an io_uring ring drive the same code.
 
 ## The server loop
 
@@ -474,7 +474,7 @@ second connection machine.
 
 ## What an engine takes
 
-`h1.engine.blocking.Config` carries the allocator, the request buffer, the
+`h1.engine.direct.Config` carries the allocator, the request buffer, the
 header storage, the response head buffer, `engine.Config` for the body and
 arena limits, and `write_chunk_bytes`. The readiness engines take buffer sizes
 instead and allocate the slots in `init`.
@@ -483,14 +483,15 @@ Every engine calls the same `engine.Handler(Exchange)` vtable.
 [Running a server](#running-a-server) has the handler contract and the
 exchange.
 
-## The blocking engine
+## The direct engine
 
-`h1.engine.blocking.run(io, listener, handler, config)` accepts and serves one
+`h1.engine.direct.run(io, listener, handler, config)` accepts and serves one
 connection at a time, and `serve` drives one stream. `serveIo` is the same loop
 over a plaintext `*std.Io.Reader` and `*std.Io.Writer`, which is the seam a TLS
 wrapper uses.
 
-Every timeout is zero here, because a blocking syscall cannot enforce one. Use
+Every timeout is zero here, because the engine's reads and writes have no
+deadline. Use
 it for tools, tests, and trusted peers. The accept loop retries
 `ConnectionAborted` and `WouldBlock`, sleeps a second on `SystemResources` and
 the fd quotas, and returns on anything else.
@@ -773,12 +774,12 @@ the bytes must copy them or exhaust them before the next read.
 
 `Local` says whether the connection survives. `canceled`, `capacity`, and
 `timed_out` leave it unusable for this response; `out_of_memory` and `unusable`
-close it. `BodyStep` is the older non-blocking shape, with `would_block` for an
-evented client, and a blocking body never returns `would_block`.
+close it. `BodyStep` is the older evented shape, with `would_block` for an
+evented client, and an Io-driven body never returns `would_block`.
 
 ## Dispatch on the protocol
 
-`client.blocking.Client.init(reader, writer, config)` takes a caller-owned
+`client.Client.init(reader, writer, config)` takes a caller-owned
 plaintext reader and writer and implements the contract over either protocol.
 `config.protocol` is `.h1` or `.h2`, and `config.common` carries the allocator,
 `max_header_bytes`, and `max_headers`. `request(value)` returns a
@@ -794,8 +795,8 @@ belongs above this layer, where the connection is opened.
 the head. It hands the body back as the `std.Io.Reader` above, and the framing
 decoders behind it are `h1.ClientConn`'s.
 
-`h1.client.blocking.fetch` is the one-request adapter with no allocator and no
-connection reuse. It takes an `h1.client.blocking.Request` and a `Config` of
+`h1.client.buffered.fetch` is the one-request adapter with no allocator and no
+connection reuse. It takes an `h1.client.buffered.Request` and a `Config` of
 caller-owned buffers, writes HTTP/1.1, adds `Content-Length` when you did not
 frame the body, and returns the head, the framing, and a body slice borrowed
 from `Config.body_buffer`. A body past that buffer is `error.BodyTooLarge`. A
@@ -806,7 +807,7 @@ how `examples/http1_tls_client.zig` runs after its handshake.
 
 ## The h2 adapter
 
-`h2.client.blocking.Client` speaks h2 and h2c over the same reader and writer
+`h2.client.Client` speaks h2 and h2c over the same reader and writer
 pair. It multiplexes nothing: one request at a time on a connection, with the
 body streamed through `client.Body`.
 
@@ -850,7 +851,7 @@ Response DATA carries a `DataLease`; release it before polling again. Heads,
 DATA, trailers, closes, writable notifications, and GOAWAY stay in that event
 stream, including all trailer fields.
 
-`h2.client.Driver` owns the blocking byte pump around that connection. Its
+`h2.client.Driver` owns the byte pump around that connection. Its
 `flush` completes successful short writes and flushes complete frames, while
 `read(deadline)` takes an `stdx.time.OptionalTimestamp` and retains input the
 connection did not accept. A call that absorbs retained input returns `.ready`
@@ -894,7 +895,7 @@ from the engine. `policy_response` can replace a rejection's status, fields,
 and body.
 
 ```zig
-const engine = http.h1.engine.blocking;
+const engine = http.h1.engine.direct;
 
 fn handler(self: *App) engine.Handler {
     return .{ .ptr = self, .vtable = &.{
@@ -1026,7 +1027,7 @@ is legal at any point. A peer reset makes the next read return
 
 ## The h2 engines
 
-`h2.engine.blocking.run` and `serve` are the h1 blocking engine's counterpart,
+`h2.engine.direct.run` and `serve` are the h1 direct engine's counterpart,
 and `serveIo` is the same TLS seam. They are a transport driver around
 `h2.engine.Connection`, which owns the session, the fixed slot table, the
 per-stream arenas, and the handler: `receive` takes transport bytes, `drive`
@@ -1051,11 +1052,11 @@ record buffers, and ALPN inside the transport. Set `Config.transport`, and
 nothing below `h2.engine.Connection` changes. Without that option, a consumer
 does not fetch TLS or the CLI package.
 
-The blocking engines take a plaintext reader and writer instead.
-`examples/http2_tls.zig` runs `tls_std`'s blocking handshake with ALPN `h2` and
-hands the wrapper's reader and writer to `h2.engine.blocking.serveIo`.
+The direct engines take a plaintext reader and writer instead.
+`examples/http2_tls.zig` runs `tls_std`'s own handshake with ALPN `h2` and
+hands the wrapper's reader and writer to `h2.engine.direct.serveIo`.
 `examples/http1_tls.zig` and `examples/http1_tls_client.zig` do the same around
-the h1 engine and `h1.client.blocking.fetchIo`. `just conformance-run-tls` and
+the h1 engine and `h1.client.buffered.fetchIo`. `just conformance-run-tls` and
 `just interop-tls` run those pairs.
 
 ## The examples
@@ -1121,11 +1122,11 @@ absolute value against this table.
 
 Not implemented:
 
-- Streaming request bodies on h1. `h1.ServerConn` has no incremental body delivery, and `h1.client.streaming` sends `Request.body` in one call. The h2 client and server do stream: `h2.client.blocking.Client.begin` and `body_mode = .stream`.
-- A streaming request body through `client.blocking.Client`. The protocol-neutral facade has no `begin`; use the h2 adapter when the body does not exist up front.
+- Streaming request bodies on h1. `h1.ServerConn` has no incremental body delivery, and `h1.client.streaming` sends `Request.body` in one call. The h2 client and server do stream: `h2.client.Client.begin` and `body_mode = .stream`.
+- A streaming request body through `client.Client`. The protocol-neutral facade has no `begin`; use the h2 adapter when the body does not exist up front.
 - Chunked request bodies on the server. `h1.ServerConn` answers 501 with `RejectReason.chunked_unsupported`; `h1.chunked.Decoder` is there for a caller that drives the body itself.
-- Response trailers on the shared blocking client. `h1.ClientConn` parses them into `Config.trailers`, and `client.Response` has no trailer list, so `h1.client` and `h2.client.blocking` drop the fields. Use `h2.client.Connection` to receive complete h2 trailers; snapshots live in the stream arena.
-- Connection reuse and pooling. `h1.client.blocking.fetch` reads one response and does not reuse the connection, and nothing in `http.client` pools connections. `h2.client.blocking.Client` keeps the one connection it was given.
+- Response trailers on the shared client. `h1.ClientConn` parses them into `Config.trailers`, and `client.Response` has no trailer list, so `h1.client` and `h2.client` drop the fields. Use `h2.client.Connection` to receive complete h2 trailers; snapshots live in the stream arena.
+- Connection reuse and pooling. `h1.client.buffered.fetch` reads one response and does not reuse the connection, and nothing in `http.client` pools connections. `h2.client.Client` keeps the one connection it was given.
 - Redirects. A 3xx comes back as a `client.Response` with its `Status`; nothing follows it.
 - Cookies. `Headers` never combines `Set-Cookie`, h2 `cookie` lines stay separate, and there is no jar.
 - Routing. `h1.targetForm` classifies the target and stops. There is no router, no path parameter, and no method dispatch.

@@ -4,7 +4,7 @@
 //!     just conformance-run-readiness
 //!
 //! poll(2) on Linux, kqueue(2) on macOS. The handler is the same exchange
-//! handler as the blocking example; the transport is one thread with fixed
+//! handler as the direct example; the transport is one thread with fixed
 //! connection slots.
 
 const std = @import("std");

@@ -38,10 +38,10 @@ The library is pre-1.0 and the API is not frozen; a consumer pins a version.
 - [Method and status](https://baskingspot.dev/http/#method-and-status): `Method.parse` is case-sensitive, `Status` is an open enum so an unnamed three-digit code is still a value, and `WireVersion` keeps the exact digits.
 - [The h1 message](https://baskingspot.dev/http/#the-h1-message): `h1.parseRequest` returns borrowed slices or `error.Incomplete`, `h1.framing` picks the body rule, `h1.chunked.Decoder` resumes mid-body, and `h1.Writer` writes the message back out.
 - [The h1 connection machine](https://baskingspot.dev/http/#the-h1-connection-machine): `h1.ServerConn` and `h1.ClientConn` take the bytes you read and the time you have, and own no memory and no socket.
-- [The h1 engines](https://baskingspot.dev/http/#the-h1-engines): `h1.engine.blocking.serve` takes one connection at a time, and `h1.engine.poll`, `.epoll`, and `.kqueue` serve fixed slots with deadlines.
+- [The h1 engines](https://baskingspot.dev/http/#the-h1-engines): `h1.engine.direct.serve` takes one connection at a time, and `h1.engine.poll`, `.epoll`, and `.kqueue` serve fixed slots with deadlines.
 - [The h2 session and frames](https://baskingspot.dev/http/#the-h2-session-and-frames): `h2.frame.parse` is the frame codec, and `h2.Session` owns SETTINGS, streams, flow control, HPACK, and CONTINUATION assembly.
 - [HPACK](https://baskingspot.dev/http/#hpack): `hpack.Decoder` and `hpack.Encoder` keep the static and dynamic tables in step, and `prefix_int` and `huffman` are the primitives QPACK reuses.
-- [The client contract](https://baskingspot.dev/http/#the-client-contract): `client.Request` and `client.Body` are protocol-neutral, `client.Response.body.reader` is a `std.Io.Reader` over a framing-blind decoder, and `client.blocking.Client` dispatches to an h1 or an h2 adapter.
+- [The client contract](https://baskingspot.dev/http/#the-client-contract): `client.Request` and `client.Body` are protocol-neutral, `client.Response.body.reader` is a `std.Io.Reader` over a framing-blind decoder, and `client.Client` dispatches to an h1 or an h2 adapter.
 - [Running a server](https://baskingspot.dev/http/#running-a-server): `engine.Handler(Exchange)` is the one vtable every engine calls, and `http_tls` adds TLS without putting crypto in the core.
 - [Performance](https://baskingspot.dev/http/#performance): 81 ns against 79 ns on a typical request head, 255 ns against 334 ns on a wide one, and 3.8x on a 1 KiB header value.
 - [Limits](https://baskingspot.dev/http/#limits): no chunked request bodies on h1, no connection reuse, and the rest of what is not here.
@@ -51,7 +51,7 @@ Not implemented:
 - Streaming request bodies: `client.Request.body` is a `[]const u8`, and an engine's `Exchange.request.body` is the whole body up to `Config.body_bytes`.
 - Chunked request bodies on the server: `h1.ServerConn` answers 501 with `RejectReason.chunked_unsupported`.
 - Response trailers: `h1.ClientConn` parses them into `Config.trailers`, and `client.ResponseHead` has no trailer list, so the fields are dropped.
-- Connection reuse and pooling: `h1.client.blocking.fetch` does not reuse the connection, and nothing in `http.client` pools one.
+- Connection reuse and pooling: `h1.client.buffered.fetch` does not reuse the connection, and nothing in `http.client` pools one.
 - Redirects: a 3xx comes back as a `client.Response` with its `Status`; nothing follows it.
 - Cookies: `Headers` never combines `Set-Cookie`, h2 `cookie` lines stay separate, and there is no jar.
 - Routing: `h1.targetForm` classifies the target and stops. There is no router and no method dispatch.

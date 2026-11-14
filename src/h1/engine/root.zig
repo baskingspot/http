@@ -9,7 +9,7 @@ const poll_impl = @import("poll.zig");
 const epoll_impl = @import("epoll.zig");
 const kqueue_impl = @import("kqueue.zig");
 
-pub const blocking = @import("blocking.zig");
+pub const direct = @import("direct.zig");
 pub const poll = if (builtin.os.tag == .linux) poll_impl else struct {};
 pub const epoll = if (builtin.os.tag == .linux) epoll_impl else struct {};
 pub const kqueue = if (builtin.os.tag == .macos) kqueue_impl else struct {};
@@ -17,7 +17,7 @@ pub const Exchange = @import("common.zig").Exchange;
 pub const Handler = @import("common.zig").Handler;
 
 test {
-    _ = blocking;
+    _ = direct;
     _ = poll;
     _ = epoll;
     _ = kqueue;

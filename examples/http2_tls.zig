@@ -1,4 +1,4 @@
-//! A small h2c-over-TLS (h2) server on the blocking engine.
+//! A small h2c-over-TLS (h2) server on the direct engine.
 //!
 //!     just example-h2-tls
 //!     just conformance-run-tls
@@ -103,7 +103,7 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
 
     var read_buffer: [16 * 1024]u8 = undefined;
     var write_buffer: [1]u8 = undefined;
-    try http.h2.engine.blocking.serveIo(
+    try http.h2.engine.direct.serveIo(
         io,
         conn.reader(),
         conn.writer(),

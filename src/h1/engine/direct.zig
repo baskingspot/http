@@ -1,7 +1,7 @@
-//! A blocking HTTP/1 server engine over std.Io.
+//! An HTTP/1 server engine over std.Io, one connection per call.
 //!
 //! One connection is served at a time. The engine uses the Io runtime's
-//! blocking network streams, so it cannot enforce the connection deadlines;
+//! plain read and write calls, so it cannot enforce connection deadlines;
 //! all timeouts are zero. Use it for tools, tests, and trusted peers. The
 //! evented engines are separate.
 
@@ -464,7 +464,7 @@ test "serve a chunked response stream" {
     try testing.expect(client.result == null);
 }
 
-test "serve one blocking connection" {
+test "serve one connection" {
     const address = try Io.net.IpAddress.parseLiteral("127.0.0.1:0");
     var listener = try address.listen(testing.io, .{ .mode = .stream, .reuse_address = true });
     defer listener.deinit(testing.io);

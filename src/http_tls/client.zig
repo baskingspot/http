@@ -1,4 +1,4 @@
-//! A blocking TLS client with HTTP ALPN policy.
+//! A TLS client over std.Io with HTTP ALPN policy.
 //!
 //! `tls_nonblocking.SocketClient` owns the socket I/O, handshake, records,
 //! trust store, and plaintext reader/writer. This wrapper keeps HTTP's policy:

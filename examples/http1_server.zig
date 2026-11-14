@@ -1,4 +1,4 @@
-//! A small blocking HTTP/1.1 server over std.Io, one task per connection.
+//! A small HTTP/1.1 server over std.Io, one task per connection.
 //!
 //!     just example
 //!     curl -v http://127.0.0.1:8080/
@@ -13,7 +13,7 @@ const Io = std.Io;
 const print = std.debug.print;
 
 const http = @import("http");
-const engine = http.h1.engine.blocking;
+const engine = http.h1.engine.direct;
 
 const address_text = "127.0.0.1:8080";
 const max_target = 256;

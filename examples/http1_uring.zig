@@ -4,7 +4,7 @@
 //!
 //! The point is the parser under a nonblocking data path: io_uring owns the
 //! socket edge, `h1.parseRequest` gets whatever bytes arrived, and the same
-//! head/framing/persistence calls from the blocking example decide what to do.
+//! head/framing/persistence calls from the direct example decide what to do.
 //! The listener accept is blocking on purpose; the ring drives every read and
 //! write after that.
 //!

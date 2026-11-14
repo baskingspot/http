@@ -2,7 +2,7 @@
 
 pub const common = @import("common.zig");
 pub const frame_queue = @import("frame_queue.zig");
-pub const blocking = @import("blocking.zig");
+pub const Client = @import("dispatch.zig").Client;
 pub const Protocol = common.Protocol;
 pub const Scheme = common.Scheme;
 pub const Request = common.Request;
@@ -23,6 +23,6 @@ pub const Config = common.Config;
 
 test {
     _ = common;
-    _ = blocking;
+    _ = Client;
     _ = frame_queue;
 }

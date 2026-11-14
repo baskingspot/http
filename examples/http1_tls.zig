@@ -1,11 +1,11 @@
-//! An HTTP/1.1 server over TLS 1.3 on the blocking engine.
+//! An HTTP/1.1 server over TLS 1.3 on the direct engine.
 //!
 //!     just example-h1-tls
 //!     curl -k https://127.0.0.1:8444/
 //!
 //! TLS comes from `baskingspot/tls` through `tls_std`. The handshake is
 //! eager; its reader and writer are the plaintext transport for the h1
-//! blocking engine. One thread per connection.
+//! direct engine. One thread per connection.
 
 const std = @import("std");
 const Io = std.Io;
@@ -111,7 +111,7 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
     var request_buffer: [16 * 1024]u8 = undefined;
     var headers: [64]http.Header = undefined;
     var response_head: [1024]u8 = undefined;
-    try http.h1.engine.blocking.serveIo(
+    try http.h1.engine.direct.serveIo(
         io,
         conn.reader(),
         conn.writer(),

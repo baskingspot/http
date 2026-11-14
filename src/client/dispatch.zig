@@ -1,4 +1,4 @@
-//! Protocol dispatch for a blocking client.
+//! Protocol dispatch for the Io-driven client.
 //!
 //! Both adapters share the types in `client/common.zig` and speak over the
 //! caller-owned reader and writer. The caller chooses the protocol above this
@@ -10,7 +10,7 @@ const testing = std.testing;
 
 const common = @import("common.zig");
 const h1 = @import("../h1/client/streaming.zig");
-const h2 = @import("../h2/client/blocking.zig");
+const h2 = @import("../h2/client/client.zig");
 
 pub const Protocol = common.Protocol;
 pub const Request = common.Request;

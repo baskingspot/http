@@ -15,7 +15,7 @@ test "the module imports by name and exposes the client" {
     _ = http_tls.Bundle;
 }
 
-test "the client exposes the blocking surface" {
+test "the client exposes the request surface" {
     const Connection = http_tls.client.Connection;
     try testing.expect(@hasDecl(Connection, "init"));
     try testing.expect(@hasDecl(Connection, "deinit"));

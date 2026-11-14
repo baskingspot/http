@@ -24,7 +24,7 @@ const stdx = @import("stdx");
 const http = @import("http");
 const out = stdx.stdio.out;
 const err = stdx.stdio.err;
-const client = http.client.blocking;
+const client = http.client;
 const tls = @import("tls");
 const tls_std = @import("tls_std");
 
@@ -308,7 +308,7 @@ fn printResponse(response: client.Response, silent: bool, verbose: bool) !void {
     out.flush();
 }
 
-fn drain(body: http.client.Body, w: *Io.Writer) !void {
+fn drain(body: client.Body, w: *Io.Writer) !void {
     _ = body.reader.streamRemaining(w) catch |failure| switch (failure) {
         error.ReadFailed => return switch (body.outcome() orelse .truncated) {
             .truncated => error.TruncatedBody,

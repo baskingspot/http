@@ -1,4 +1,4 @@
-//! A small h2c server over std.Io, driven by the blocking h2 engine.
+//! A small h2c server over std.Io, driven by the direct h2 engine.
 //!
 //!     just example-h2
 //!     curl -v --http2-prior-knowledge http://127.0.0.1:8081/
@@ -79,7 +79,7 @@ fn serveThread(gpa: Allocator, io: Io, stream: Io.net.Stream) void {
 fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
     var read_buffer: [16 * 1024]u8 = undefined;
     var write_buffer: [4096]u8 = undefined;
-    try http.h2.engine.blocking.serve(io, stream, App.handler(), .{
+    try http.h2.engine.direct.serve(io, stream, App.handler(), .{
         .allocator = gpa,
         .read_buffer = &read_buffer,
         .write_buffer = &write_buffer,

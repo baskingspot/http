@@ -1,6 +1,6 @@
 //! Loopback test for `http_tls.client.Connection`.
 //!
-//! The blocking connection owns a socket, so it needs a peer on a real one. A
+//! The TLS connection owns a socket, so it needs a peer on a real one. A
 //! listener thread drives `tls_nonblocking.Server` through the handshake and
 //! echoes application data; the client side is the module under test.
 //!
@@ -200,7 +200,7 @@ const Harness = struct {
     }
 };
 
-test "the blocking connection reads and writes plaintext over TLS" {
+test "the connection reads and writes plaintext over TLS" {
     const allocator = testing.allocator;
 
     const leaf_der = try derAlloc(allocator, leaf_b64);

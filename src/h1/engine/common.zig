@@ -28,7 +28,7 @@ pub const Exchange = struct {
     deferred_deadline: ?Io.Timestamp = null,
     deferred_on_timeout: ?PolicyResponse = null,
     waker: ?common.Waker = null,
-    /// Set by the readiness engine. The blocking engine has no wake loop.
+    /// Set by the readiness engine. The direct engine has no wake loop.
     defer_supported: bool = false,
     /// Engine-owned allocator for this exchange. It is valid from handler
     /// entry until `complete` returns. The engine resets it before the slot
@@ -65,7 +65,7 @@ pub const Exchange = struct {
     /// without responding; the engine calls `callback` on its own thread after
     /// `wake`. The context must live until `complete`. `cancel` runs if the
     /// client disconnects or the request deadline expires before the response.
-    /// Only readiness engines support this; the blocking engine returns
+    /// Only readiness engines support this; the direct engine returns
     /// `error.Unsupported`.
     pub fn deferResponse(
         self: *Exchange,

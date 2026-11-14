@@ -3,7 +3,7 @@
 //! The connection owns the session, the fixed slot table, the per-stream
 //! arenas, and the handler. A transport feeds bytes with `receive`, calls
 //! `drive` to deliver events and queue responses, and drains `send`. It never
-//! touches a socket. `blocking` and the readiness engines are thin drivers
+//! touches a socket. `direct` and the readiness engines are thin drivers
 //! around this type.
 //!
 //! `Options.body_mode` chooses when the handler runs. `.buffered` (the

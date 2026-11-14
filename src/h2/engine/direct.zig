@@ -1,11 +1,11 @@
-//! A blocking HTTP/2 server engine over std.Io.
+//! An HTTP/2 server engine over std.Io, one connection per call.
 //!
 //! The engine owns the transport loop, not the exchange state. It feeds the
-//! shared `Connection` core, flushes queued output, and blocks on reads. One
+//! shared `Connection` core, flushes queued output, and waits on reads. One
 //! connection is served at a time; the h2c example adds a thread per
 //! connection. Handler wakes (`Exchange.setDeadline`) are delivered on the
 //! awake clock; the engine's own close deadlines are not enforced, like
-//! `h1.engine.blocking`.
+//! `h1.engine.direct`.
 
 const std = @import("std");
 const Io = std.Io;

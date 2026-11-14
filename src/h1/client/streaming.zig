@@ -1,4 +1,4 @@
-//! A blocking HTTP/1 client with a streaming response body.
+//! An HTTP/1 client over std.Io with a streaming response body.
 //!
 //! The client writes one request, parses the response head into a per-response
 //! arena, and exposes body bytes through a `std.Io.Reader` on the shared client

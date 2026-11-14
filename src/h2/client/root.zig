@@ -1,6 +1,6 @@
 //! HTTP/2 client adapters.
 
-pub const blocking = @import("blocking.zig");
+pub const Client = @import("client.zig").Client;
 pub const Driver = @import("driver.zig").Driver;
 const connection = @import("connection.zig");
 pub const Connection = connection.Connection;
@@ -12,7 +12,7 @@ pub const Request = connection.Request;
 pub const Options = connection.Options;
 
 test {
-    _ = blocking;
+    _ = Client;
     _ = Driver;
     _ = Connection;
     _ = Stream;

@@ -1,4 +1,4 @@
-//! A blocking HTTP/2 client with streaming request and response bodies.
+//! An HTTP/2 client over std.Io with streaming request and response bodies.
 //!
 //! The adapter owns a `h2.Session`, serializes one request at a time, and
 //! snapshots response header names and values into the per-response arena.
@@ -39,7 +39,7 @@ const Header = @import("../../header.zig").Header;
 const Headers = @import("../../header.zig").Headers;
 const hpack = @import("../../hpack/root.zig");
 const Status = @import("../../status.zig").Status;
-const engine = @import("../engine/blocking.zig");
+const engine = @import("../engine/direct.zig");
 const frame = @import("../frame.zig");
 const session_mod = @import("../session.zig");
 const Session = session_mod.Session;
@@ -1063,7 +1063,7 @@ const Harness = struct {
     }
 };
 
-test "the blocking client streams a response body" {
+test "the client streams a response body" {
     const expected = "hello, streaming world";
     var harness: Harness = undefined;
     try harness.init(expected);
@@ -1112,7 +1112,7 @@ test "the blocking client streams a response body" {
     try testing.expectEqual(@as(usize, 1), harness.app.seen);
 }
 
-test "the blocking client releases flow control while streaming" {
+test "the client releases flow control while streaming" {
     var big: [100 * 1024]u8 = undefined;
     for (&big, 0..) |*byte, index| byte.* = @intCast(index % 251);
 
@@ -1153,7 +1153,7 @@ test "the blocking client releases flow control while streaming" {
     try testing.expectEqual(big.len, offset);
 }
 
-test "the blocking client sends a request body" {
+test "the client sends a request body" {
     var harness: Harness = undefined;
     try harness.initEcho("", true);
     defer harness.deinit();
@@ -1189,7 +1189,7 @@ test "the blocking client sends a request body" {
     try testing.expectEqualStrings(payload, received[0..used]);
 }
 
-test "the blocking client sends a request body through flow control" {
+test "the client sends a request body through flow control" {
     var harness: Harness = undefined;
     try harness.initEcho("", true);
     defer harness.deinit();
@@ -1407,7 +1407,7 @@ test "closing after remote END_STREAM releases without resetting" {
     try testing.expectEqual(@as(?usize, null), try readInto(response.body, &scratch));
 }
 
-test "the blocking client sends a static request body" {
+test "the client sends a static request body" {
     var harness: Harness = undefined;
     try harness.init("body response");
     defer harness.deinit();

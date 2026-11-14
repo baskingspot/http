@@ -1,4 +1,4 @@
-//! Integration tests for the blocking HTTP/1 engine.
+//! Integration tests for the direct HTTP/1 engine.
 //!
 //! Each test starts one listener, serves one connection, and speaks raw HTTP
 //! over a real loopback socket. The tests exercise the transport edge, not just
@@ -11,7 +11,7 @@ const mem = std.mem;
 const panic = std.debug.panic;
 
 const http = @import("http");
-const engine = http.h1.engine.blocking;
+const engine = http.h1.engine.direct;
 
 const TestConfig = struct {
     request_buffer: [1024]u8 = undefined,

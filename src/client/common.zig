@@ -12,11 +12,11 @@
 //! interleave a header block between HEADERS and its final CONTINUATION, so
 //! every write appends whole frames, never a partial one.
 //!
-//! A streaming adapter (`h2.client.blocking.Client.begin`) returns the writer
+//! A streaming adapter (`h2.client.Client.begin`) returns the writer
 //! after the request head is committed and reads the response head separately
 //! with `response()`. The two sides of one stream are independent: the caller
 //! may write body bytes, read a response chunk, and write again before either
-//! side ends. A blocking `write` accepts all the bytes it is given or fails;
+//! side ends. A synchronous `write` accepts all the bytes it is given or fails;
 //! a partial write is not a result. Request bytes are copied into the
 //! connection queue during the call, so the slice does not outlive it.
 //!
@@ -96,7 +96,7 @@ pub const Local = enum {
     /// Allocation failed. The connection is not usable; close it.
     out_of_memory,
     /// A local failure left a partial frame on the wire. The connection is not
-    /// usable; close it. A blocking adapter must not produce this.
+    /// usable; close it. An Io-driven adapter must not produce this.
     unusable,
     /// A read deadline the caller set expired. The stream is unfinished, so
     /// the connection is not reusable.
@@ -149,7 +149,7 @@ pub const BodyResult = struct {
     data: []const u8,
 };
 
-/// The non-blocking body error set. A blocking body reports the same failures
+/// The evented body error set. An Io-driven body reports the same failures
 /// as `error.ReadFailed` with the cause on `Body.outcome`.
 pub const BodyError = error{
     EndOfStream,
@@ -162,7 +162,7 @@ pub const BodyError = error{
     LocalUnusable,
 };
 
-/// A non-blocking body step. `WouldBlock` is an error, not a result variant.
+/// An evented body step. `WouldBlock` is an error, not a result variant.
 pub const BodyStep = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -193,7 +193,7 @@ pub const BodyStep = struct {
 
 pub const BodyStepError = BodyError || error{WouldBlock};
 
-/// The blocking-client body contract.
+/// The client body contract for an Io-driven adapter.
 ///
 /// The bytes are a `std.Io.Reader`, so a body goes anywhere a reader goes.
 /// Framing is decoded beneath it, and a caller cannot observe whether the

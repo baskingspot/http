@@ -1,4 +1,4 @@
-//! A blocking HTTP/1.1 client over TLS 1.3.
+//! An HTTP/1.1 client over TLS 1.3, on std.Io.
 //!
 //! Start `just example-h1-tls` first, then run this from another terminal.
 
@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
     var body: [16 * 1024]u8 = undefined;
     var write: [1024]u8 = undefined;
 
-    const response = try http.h1.client.blocking.fetchIo(
+    const response = try http.h1.client.buffered.fetchIo(
         conn.reader(),
         conn.writer(),
         .{

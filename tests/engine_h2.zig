@@ -1,4 +1,4 @@
-//! Integration test for the blocking HTTP/2 engine over a real loopback socket.
+//! Integration test for the direct HTTP/2 engine over a real loopback socket.
 //!
 //! The client is the sans-I/O session, so the test covers the transport loop
 //! and the exchange engine without speaking raw frames by hand.
@@ -8,7 +8,7 @@ const testing = std.testing;
 const Io = std.Io;
 
 const http = @import("http");
-const engine = http.h2.engine.blocking;
+const engine = http.h2.engine.direct;
 const Handler = http.h2.engine.Handler;
 const Exchange = http.h2.engine.Exchange;
 
@@ -177,7 +177,7 @@ fn handshake(session: *http.h2.Session, r: *Io.Reader, w: *Io.Writer) !void {
     }
 }
 
-test "the blocking engine serves a request over a socket" {
+test "the direct engine serves a request over a socket" {
     var harness: Harness = undefined;
     try harness.init();
     defer harness.deinit();
@@ -227,7 +227,7 @@ test "the blocking engine serves a request over a socket" {
     try testing.expectEqual(@as(usize, 1), harness.app.seen);
 }
 
-test "the blocking engine sends a trailer section after the body" {
+test "the direct engine sends a trailer section after the body" {
     var harness: Harness = undefined;
     try harness.initWith(.{
         .trailers = &.{.{ .name = "grpc-status", .value = "0" }},
