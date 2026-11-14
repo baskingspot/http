@@ -267,6 +267,40 @@ const OutQueue = struct {
         self.total += bytes.len;
     }
 
+    /// Append several slices in order, one reservation and one cursor pass:
+    /// a frame's nine-byte header and its payload reach the queue without
+    /// staging through a second buffer, which was a full extra copy of every
+    /// payload sent.
+    fn appendParts(self: *OutQueue, allocator: Allocator, parts: []const []const u8) !void {
+        var total: usize = 0;
+        for (parts) |part| total += part.len;
+        if (total == 0) return;
+        try self.ensure(allocator, total);
+
+        var node = self.write_chunk orelse self.head.?;
+        var offset: usize = if (self.write_chunk == null) 0 else self.write_offset;
+        for (parts) |part| {
+            var rest = part;
+            while (rest.len > 0) {
+                // A full chunk advances on entry, not only between slices:
+                // one part can end exactly at a chunk boundary, and the next
+                // part would otherwise overwrite that chunk from byte zero.
+                if (offset == out_chunk_size) {
+                    node = node.next.?;
+                    offset = 0;
+                }
+                const take = @min(out_chunk_size - offset, rest.len);
+                @memcpy(node.bytes[offset..][0..take], rest[0..take]);
+                node.len = offset + take;
+                rest = rest[take..];
+                offset += take;
+            }
+        }
+        self.write_chunk = node;
+        self.write_offset = node.len;
+        self.total += total;
+    }
+
     fn peek(self: *const OutQueue, out: []u8) usize {
         var written: usize = 0;
         var node = self.head;
@@ -359,7 +393,6 @@ pub const Session = struct {
     field_headers: []Header,
     field_bytes: []u8,
     send_block: []u8,
-    frame_buf: []u8,
 
     out: OutQueue,
     /// Bytes drained from `out` by send/sendFrame.
@@ -381,8 +414,6 @@ pub const Session = struct {
         errdefer allocator.free(block_buf);
         const send_block = try allocator.alloc(u8, options.max_send_header_block);
         errdefer allocator.free(send_block);
-        const frame_buf = try allocator.alloc(u8, 9 + out_frame_payload);
-        errdefer allocator.free(frame_buf);
         // The decode storage holds any field section within the limit, so
         // running out of it means the section is over the limit. It also
         // holds the largest decoder table entry, which the decoder needs to
@@ -444,7 +475,6 @@ pub const Session = struct {
             .field_headers = field_headers,
             .field_bytes = field_bytes,
             .send_block = send_block,
-            .frame_buf = frame_buf,
             .out = .{},
             .out_sent = 0,
             .last_header_run = null,
@@ -470,7 +500,6 @@ pub const Session = struct {
         allocator.free(self.in_buf);
         allocator.free(self.block.buffer);
         allocator.free(self.send_block);
-        allocator.free(self.frame_buf);
         allocator.free(self.field_bytes);
         allocator.free(self.field_headers);
         self.* = undefined;
@@ -1354,7 +1383,7 @@ pub const Session = struct {
             mem.writeInt(u16, payload[at..][0..2], compat.enumToInt(entry.id), .big);
             mem.writeInt(u32, payload[at + 2 ..][0..4], entry.value, .big);
         }
-        if (9 + payload.len > self.frame_buf.len) return error.SettingsTooLarge;
+        if (payload.len > out_frame_payload) return error.SettingsTooLarge;
         try self.out.ensure(allocator, 9 + payload.len);
 
         if (next.initial_window_size != old_initial) {
@@ -1588,8 +1617,6 @@ pub const Session = struct {
         stream_id: u31,
         payload: []const u8,
     ) Error!void {
-        const total = 9 + payload.len;
-        assert(total <= self.frame_buf.len);
         var header: [9]u8 = undefined;
         frame.encodeHeader(&header, .{
             .length = @intCast(payload.len),
@@ -1597,9 +1624,7 @@ pub const Session = struct {
             .flags = frame_flags,
             .stream_id = stream_id,
         });
-        @memcpy(self.frame_buf[0..9], &header);
-        if (payload.len > 0) @memcpy(self.frame_buf[9..][0..payload.len], payload);
-        try self.out.append(allocator, self.frame_buf[0..total]);
+        try self.out.appendParts(allocator, &.{ &header, payload });
     }
 
     fn queueInitial(self: *Session, allocator: Allocator) Error!void {

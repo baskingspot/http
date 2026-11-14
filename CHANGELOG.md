@@ -7,6 +7,10 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
+- Outgoing frames no longer stage through a second buffer: the session's
+  output queue takes a frame's header and payload in one scatter append, so
+  each payload is copied once on the way out instead of twice. The staging
+  buffer is gone.
 - `h2.Session` no longer pre-reserves a stream table sized to
   `max_streams`; the table grows with the live count. A table sized sixteen
   times the live set made every stream lookup probe long chains and every
