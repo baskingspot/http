@@ -46,6 +46,7 @@ const Cursor = @import("../Cursor.zig");
 const Header = @import("../header.zig").Header;
 const Headers = @import("../header.zig").Headers;
 const Method = @import("../method.zig").Method;
+const ows = @import("../ows.zig");
 const simd = @import("../simd.zig");
 const Status = @import("../status.zig").Status;
 const version_mod = @import("../version.zig");
@@ -204,6 +205,39 @@ pub const HostError = error{DuplicateHost};
 /// The single `Host` value, or null when the field is absent. More than one
 /// field line is `error.DuplicateHost`. RFC 9112 §3.2 requires exactly one
 /// Host in an HTTP/1.1 request; the caller applies that rule.
+pub const FieldLineError = error{
+    /// The line has no colon.
+    MissingColon,
+    /// The name is empty, or holds a byte outside `tchar`.
+    InvalidName,
+    /// The value holds a byte outside `field-vchar`, SP, and HTAB.
+    InvalidValue,
+};
+
+/// Parse one `name: value` field line into a borrowed `Header`, with OWS around
+/// the value trimmed.
+///
+/// The line must not include its CRLF: the caller splits lines. This is the
+/// shape for a field a caller holds as text, such as a command-line
+/// `--header` flag. A message head goes through `parseRequest` or
+/// `parseResponse`, which enforce the same grammar over the whole section.
+///
+/// Space or tab between the name and the colon is `error.InvalidName`, which
+/// is the field-name rule and the anti-smuggling rule at once.
+pub fn parseFieldLine(line: []const u8) FieldLineError!Header {
+    const colon = mem.findScalar(u8, line, ':') orelse return error.MissingColon;
+    const name = line[0..colon];
+    if (name.len == 0) return error.InvalidName;
+    for (name) |byte| {
+        if (!syntax.tchar_table[byte]) return error.InvalidName;
+    }
+    const value = ows.trim(line[colon + 1 ..]);
+    for (value) |byte| {
+        if (!syntax.isFieldValueByte(byte)) return error.InvalidValue;
+    }
+    return .{ .name = name, .value = value };
+}
+
 pub fn host(headers: Headers) HostError!?[]const u8 {
     var values = headers.values("Host");
     const first = values.next() orelse return null;

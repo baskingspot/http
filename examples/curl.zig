@@ -75,14 +75,13 @@ pub fn main(init: std.process.Init) !void {
                 body = args.takeValue(opt) orelse return usage();
             } else if (opt.is("header", 'H')) {
                 const raw = args.takeValue(opt) orelse return usage();
-                const colon = mem.findScalar(u8, raw, ':') orelse return error.InvalidHeader;
-                const name = mem.trim(u8, raw[0..colon], " \t");
-                const value = mem.trim(u8, raw[colon + 1 ..], " \t");
-                if (name.len == 0 or name[0] == ':') return error.InvalidHeader;
-                const lower = try arena.dupe(u8, name);
+                const field = http.h1.parseFieldLine(raw) catch return error.InvalidHeader;
+                // h2 rejects an uppercase field name, so the example sends
+                // lowercase on both protocols.
+                const lower = try arena.dupe(u8, field.name);
                 for (lower) |*byte| byte.* = std.ascii.toLower(byte.*);
                 if (header_count == headers.len) return error.TooManyHeaders;
-                headers[header_count] = .{ .name = lower, .value = value };
+                headers[header_count] = .{ .name = lower, .value = field.value };
                 header_count += 1;
             } else {
                 return usage();

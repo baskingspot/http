@@ -20,6 +20,10 @@ All notable changes to http are recorded here. The format follows
 - `client.Url.parse` splits an absolute `http` or `https` URL into the scheme,
   authority, host, port, and origin-form target, with the scheme default port.
   `uri.percentEncode` encodes one query component.
+- `h1.parseFieldLine` parses one `name: value` line into a borrowed `Header`
+  and trims its OWS, for a caller that holds field lines as text. It rejects a
+  missing colon, a name outside `tchar`, and a value outside the field-value
+  grammar.
 - `http_tls.client.Connector` fills the dial seam for `https`: it reuses the
   cleartext dial, runs the TLS handshake with the caller's CA, offers an ALPN
   list (`h2` then `http/1.1` by default), and reports the negotiated protocol.

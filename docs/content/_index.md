@@ -12,7 +12,7 @@ machine, and engines; the parsers take bytes, return borrowed slices, fill
 storage you own, and never allocate.
 
 - [Field values](#field-values): `content_length.parse`, `encoding.negotiate`, `token_list.contains`, and `transfer_encoding.summarize` read one field family each, and `Cursor` is the byte position all of them walk.
-- [Headers](#headers): `Headers.get`, `values`, and `containsToken` look up a field section in wire order and fold ASCII case, and duplicate lines stay separate.
+- [Headers](#headers): `Headers.get`, `values`, and `containsToken` look up a field section in wire order and fold ASCII case, and duplicate lines stay separate. `h1.parseFieldLine` turns one `name: value` string into a `Header` with OWS trimmed, for fields you hold as text.
 - [Method and status](#method-and-status): `Method.parse` is case-sensitive, `Status` is an open enum so an unnamed three-digit code is still a value, and `WireVersion` keeps the exact digits.
 - [The h1 message](#the-h1-message): `h1.parseRequest` returns borrowed slices or `error.Incomplete`, `h1.framing` picks the body rule, `h1.chunked.Decoder` resumes mid-body, and `h1.Writer` writes the message back out.
 - [The h1 connection machine](#the-h1-connection-machine): `h1.ServerConn` and `h1.ClientConn` take the bytes you read and the time you have, and own no memory and no socket.
@@ -166,6 +166,13 @@ view owns nothing, and every lookup is a scan of a slice you already have.
 `Header` is a name and a value, both borrowed from the message buffer. The
 parser fills a `[]Header` that the caller owns, so a head is two slices: the
 bytes that arrived, and the array describing them.
+
+A field you hold as text, such as a command-line `--header` flag, goes through
+`h1.parseFieldLine`. It splits on the first colon, trims OWS from the value,
+and validates the same grammar the parser uses: the name is `tchar`, and the
+value is `field-vchar`, SP, and HTAB. A space before the colon is
+`error.InvalidName`, which is the field-name rule and the anti-smuggling rule
+in one.
 
 ## Look up a field
 
