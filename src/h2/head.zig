@@ -358,8 +358,9 @@ fn splat(comptime byte: u8) simd.Block.Vec {
 /// setup costs more than the scan saves on the short names, values, and
 /// tokens a typical request carries, and the per-field guard keeps those
 /// exactly at the old scalar cost. At a block or more, the vector path
-/// takes the whole blocks and the scalar tail finishes the remainder.
-fn anyBad(
+/// takes the whole blocks and the scalar tail finishes the remainder. The
+/// function is inline, so the guard costs a branch, not a call.
+inline fn anyBad(
     bytes: []const u8,
     comptime stop: fn (u8) bool,
     comptime mask: fn (simd.Block.Vec) simd.Block.BoolVec,
