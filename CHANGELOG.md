@@ -7,6 +7,12 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
+- `h2.Session` no longer pre-reserves a stream table sized to
+  `max_streams`; the table grows with the live count. A table sized sixteen
+  times the live set made every stream lookup probe long chains and every
+  tombstone rebuild walk the whole oversized table — under gRPC-style churn
+  that was a fifth of the session's CPU. The insertions grow through the
+  allocator, and the stream-limit refusal stays count-based.
 - `h2` engine connections track live streams through `stdx.slot`'s pool
   instead of scanning the whole slot array. A pass that visited every
   configured slot — a cache line each, a thousand slots when a handful of

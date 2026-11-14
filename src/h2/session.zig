@@ -398,7 +398,12 @@ pub const Session = struct {
 
         var streams: std.AutoHashMapUnmanaged(u31, Stream) = .empty;
         errdefer streams.deinit(allocator);
-        try streams.ensureTotalCapacity(allocator, options.max_streams);
+        // No capacity reserve: the table grows with the live count. A table
+        // pre-sized to `max_streams` while a fraction of that is live makes
+        // every tombstone-driven rebuild walk the whole oversized table, and
+        // every probe chain long; a table that tracks the live set keeps both
+        // proportional. `put` grows it; the refused-stream check below is
+        // count-based, not capacity-based.
 
         var self: Session = .{
             .options = options,
@@ -863,7 +868,7 @@ pub const Session = struct {
                 self.rememberClosed(id, true);
                 return null;
             }
-            self.streams.putAssumeCapacityNoClobber(id, .{
+            try self.streams.put(allocator, id, .{
                 .state = .idle,
                 .initiator = .remote,
                 .send = flow.Window.init(self.remote.initial_window_size),
@@ -1104,7 +1109,7 @@ pub const Session = struct {
         };
         const run_start = self.out_sent + self.out.total;
         const id = self.ids.nextLocal().?;
-        self.streams.putAssumeCapacityNoClobber(id, .{
+        try self.streams.put(allocator, id, .{
             .state = .idle,
             .initiator = .local,
             .send = flow.Window.init(self.remote.initial_window_size),
