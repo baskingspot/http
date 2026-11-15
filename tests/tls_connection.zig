@@ -72,8 +72,7 @@ fn derAlloc(allocator: std.mem.Allocator, b64: []const u8) ![]u8 {
 }
 
 fn pemAlloc(allocator: std.mem.Allocator, b64: []const u8) ![]u8 {
-    return std.fmt.allocPrint(
-        allocator,
+    return allocator.print(
         "-----BEGIN CERTIFICATE-----\n{s}\n-----END CERTIFICATE-----\n",
         .{b64},
     );
@@ -358,7 +357,7 @@ test "the connector dials https and serves a request" {
     // process, so the dial takes the address override and the URL host still
     // drives SNI and the certificate check.
     var text: [96]u8 = undefined;
-    const url_text = try std.fmt.bufPrint(
+    const url_text = try std.mem.print(
         &text,
         "https://ztls.server.test:{d}/v1/secret",
         .{harness.address.getPort()},

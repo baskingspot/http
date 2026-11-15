@@ -271,8 +271,7 @@ const TestApp = struct {
             return;
         }
 
-        const body = try std.fmt.allocPrint(
-            exchange.arena,
+        const body = try exchange.arena.print(
             "{s} {d}\n",
             .{ target, exchange.request.body.len },
         );

@@ -34,7 +34,6 @@ pub const Body = shared.Body;
 pub const BodyWriter = shared.BodyWriter;
 pub const Response = shared.Response;
 pub const Config = shared.Config;
-const compat = @import("../../compat.zig");
 const Header = @import("../../header.zig").Header;
 const Headers = @import("../../header.zig").Headers;
 const hpack = @import("../../hpack/root.zig");
@@ -304,7 +303,7 @@ pub const Client = struct {
                 .goaway => |goaway| {
                     self.goaway = .{
                         .last_stream_id = goaway.last_stream_id,
-                        .code = compat.enumToInt(goaway.code),
+                        .code = @backingInt(goaway.code),
                     };
                     if (self.stream_id > goaway.last_stream_id) {
                         self.connection_poisoned = true;
@@ -361,7 +360,7 @@ pub const Client = struct {
         }
         if (add_length) {
             var length_text: [20]u8 = undefined;
-            const text = try std.fmt.bufPrint(&length_text, "{d}", .{content_length});
+            const text = try mem.print(&length_text, "{d}", .{content_length});
             fields[field_count - 1] = .{ .name = "content-length", .value = text };
         }
 
@@ -493,7 +492,7 @@ pub const Client = struct {
             .goaway => |goaway| {
                 self.goaway = .{
                     .last_stream_id = goaway.last_stream_id,
-                    .code = compat.enumToInt(goaway.code),
+                    .code = @backingInt(goaway.code),
                 };
                 if (self.stream_id > goaway.last_stream_id) {
                     self.connection_poisoned = true;
@@ -505,7 +504,7 @@ pub const Client = struct {
                 return error.ConnectionError;
             },
             .reset => |reset| {
-                self.body_reset_code = compat.enumToInt(reset.code);
+                self.body_reset_code = @backingInt(reset.code);
                 return error.Reset;
             },
             .request => return error.UnexpectedRequest,
@@ -592,7 +591,7 @@ pub const Client = struct {
                 .goaway => |goaway| {
                     self.goaway = .{
                         .last_stream_id = goaway.last_stream_id,
-                        .code = compat.enumToInt(goaway.code),
+                        .code = @backingInt(goaway.code),
                     };
                     if (self.stream_id > goaway.last_stream_id) return error.Truncated;
                 },
@@ -602,7 +601,7 @@ pub const Client = struct {
                         self.body_eof = true;
                         return error.EndOfStream;
                     }
-                    self.body_reset_code = compat.enumToInt(reset.code);
+                    self.body_reset_code = @backingInt(reset.code);
                     return error.Reset;
                 },
                 .request => return error.UnexpectedRequest,

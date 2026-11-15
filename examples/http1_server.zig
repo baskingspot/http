@@ -128,8 +128,7 @@ const App = struct {
         const is_root = std.mem.eql(u8, target, "/");
         const method_name = if (head.method) |method| method.token() else "UNKNOWN";
         const body = if (is_root)
-            try std.fmt.allocPrint(
-                exchange.arena,
+            try exchange.arena.print(
                 "{s} {s} ({d}-byte body)\n",
                 .{ method_name, target, exchange.request.body.len },
             )

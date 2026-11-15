@@ -51,7 +51,6 @@ const Method = @import("../method.zig").Method;
 const Status = @import("../status.zig").Status;
 const token_list = @import("../token_list.zig");
 const h1 = @import("root.zig");
-const compat = @import("../compat.zig");
 pub const RejectReason = @import("../engine/common.zig").RejectReason;
 const PolicyResponse = @import("../engine/common.zig").PolicyResponse;
 
@@ -1703,7 +1702,7 @@ test "a minimum read window rejects a default-buffered body" {
     }
     try testing.expectEqual(.need_more, std.meta.activeTag(t.conn.bufferBody()));
 
-    const bytes = compat.filled(u8, 64, 'x');
+    const bytes: [64]u8 = @splat('x');
     try expectReject(try t.feed(&bytes), .payload_too_large);
     try testing.expectEqual(.close_after_drain, std.meta.activeTag(try t.drain()));
     try testing.expect(mem.startsWith(u8, t.out(), "HTTP/1.1 413 "));

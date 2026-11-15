@@ -26,9 +26,9 @@ pub fn isTargetByte(byte: u8) bool {
     return byte >= 0x21 and byte <= 0x7e;
 }
 
-fn makeSet(comptime predicate: fn (u8) bool) std.StaticBitSet(256) {
+fn makeSet(comptime predicate: fn (u8) bool) std.bit_set.Static(256) {
     @setEvalBranchQuota(10_000);
-    var set: std.StaticBitSet(256) = .empty;
+    var set: std.bit_set.Static(256) = .empty;
     for (0..256) |index| {
         if (predicate(@intCast(index))) set.set(index);
     }

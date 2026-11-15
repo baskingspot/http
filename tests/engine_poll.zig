@@ -160,8 +160,7 @@ const TestApp = struct {
             thread.detach();
             return;
         }
-        const body = try std.fmt.allocPrint(
-            exchange.arena,
+        const body = try exchange.arena.print(
             "{s} {d}\n",
             .{ target, exchange.request.body.len },
         );
@@ -187,8 +186,7 @@ const TestApp = struct {
         if (context.status != .not_implemented) {
             return .{ .options = .{ .status = context.status }, .body = "" };
         }
-        const body = try std.fmt.allocPrint(
-            context.arena,
+        const body = try context.arena.print(
             "{{\"error\":{d}}}\n",
             .{context.status.code()},
         );
@@ -861,7 +859,7 @@ test "poll closes a known-length stream on underrun and overrun" {
         const stream = try h.connect();
         defer stream.close(h.io);
         var request: [128]u8 = undefined;
-        const head = try std.fmt.bufPrint(
+        const head = try mem.print(
             &request,
             "GET {s} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
             .{target},

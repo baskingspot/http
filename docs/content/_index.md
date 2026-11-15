@@ -42,7 +42,7 @@ const http = b.dependency("http", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("http", http.module("http"));
 ```
 
-`http` builds with Zig 0.16 and 0.17. The package also exports a second module,
+`http` builds with Zig 0.17. The package also exports a second module,
 `http_tls`, for the TLS readiness engines; the `http` module itself imports no
 TLS and links no crypto library.
 
@@ -865,9 +865,7 @@ one byte of room. A read a deadline ends is `error.ReadFailed` with
 `.local = .timed_out` on the body.
 
 Name resolution is not bounded: `std.Io` has no lookup timeout, so the deadline
-starts once the host is a list of addresses. Zig 0.16 has no socket read or
-write operation in `Io.Operation`, so a deadline is `error.DeadlineUnsupported`
-there rather than a value the client accepts and ignores.
+starts once the host is a list of addresses.
 
 `RequestOptions.connect_deadline` bounds the dial and handshake on its own, so a
 watch with no exchange deadline still cannot hang on a black-holed connect.
@@ -1180,8 +1178,9 @@ Two of the four rows are parity. hparse is 2 ns faster on the shortest head,
 and the response head is a tie. The advantage arrives with the field count and
 the value length: 24% on the wide head and 3.8 times on the 1 KiB value.
 
-`bench/h1_bench.zig` and `bench/hparse_bench.zig` carry the same buffers, and
-`just bench -- --filter=Request` runs both sides of every row.
+The hparse column is a fixed measurement: hparse 0.2.0 does not compile on Zig
+0.17, so its bench row is gone and `just bench -- --filter=Request` runs the
+`http` rows in `bench/h1_bench.zig` alone.
 
 ## Where the time goes
 

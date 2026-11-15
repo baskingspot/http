@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -79,12 +78,6 @@ pub fn build(b: *std.Build) void {
     // first configure pass it is not fetched yet, `lazyDependency` returns
     // null, and the build runner fetches it and reruns this script.
     const testingx_dep = b.lazyDependency("testingx", .{ .target = target });
-    // The reference parser for the benchmark comparison. Dev-only and lazy:
-    // it never enters a consumer's fetch path.
-    const hparse_dep = if (builtin.zig_version.minor == 16)
-        b.lazyDependency("hparse", .{ .target = target, .optimize = bench_optimize })
-    else
-        null;
     const test_runner: ?std.Build.Step.Compile.TestRunner = if (testingx_dep) |dep|
         .{ .path = dep.path("src/runner.zig"), .mode = .simple }
     else
@@ -95,7 +88,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = test_runner,
     });
     const run_tests = b.addRunArtifact(tests);
-    passthruArgs(b, run_tests);
+    run_tests.addPassthruArgs();
 
     const test_step = b.step("test", "Run the unit tests");
     test_step.dependOn(&run_tests.step);
@@ -122,7 +115,7 @@ pub fn build(b: *std.Build) void {
             .test_runner = test_runner,
         });
         const run_http_tls_tests = b.addRunArtifact(http_tls_tests);
-        passthruArgs(b, run_http_tls_tests);
+        run_http_tls_tests.addPassthruArgs();
         test_step.dependOn(&run_http_tls_tests.step);
 
         // A consumer importing `http_tls` by module name, the way grpc does. This
@@ -145,7 +138,7 @@ pub fn build(b: *std.Build) void {
             .test_runner = test_runner,
         });
         const run_tls_consumer = b.addRunArtifact(tls_consumer_tests);
-        passthruArgs(b, run_tls_consumer);
+        run_tls_consumer.addPassthruArgs();
         test_step.dependOn(&run_tls_consumer.step);
 
         // The blocking TLS connection owns a socket, so its test needs a listener
@@ -168,7 +161,7 @@ pub fn build(b: *std.Build) void {
             .test_runner = test_runner,
         });
         const run_tls_conn = b.addRunArtifact(tls_conn_tests);
-        passthruArgs(b, run_tls_conn);
+        run_tls_conn.addPassthruArgs();
         test_step.dependOn(&run_tls_conn.step);
     }
 
@@ -190,7 +183,7 @@ pub fn build(b: *std.Build) void {
             .test_runner = test_runner,
         });
         const run_interop = b.addRunArtifact(interop_tests);
-        passthruArgs(b, run_interop);
+        run_interop.addPassthruArgs();
         test_step.dependOn(&run_interop.step);
     }
 
@@ -207,7 +200,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = test_runner,
     });
     const run_corpus = b.addRunArtifact(corpus_tests);
-    passthruArgs(b, run_corpus);
+    run_corpus.addPassthruArgs();
     test_step.dependOn(&run_corpus.step);
 
     // The blocking engine over real loopback sockets. The tests live outside
@@ -223,7 +216,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = test_runner,
     });
     const run_engine_tests = b.addRunArtifact(engine_tests);
-    passthruArgs(b, run_engine_tests);
+    run_engine_tests.addPassthruArgs();
     test_step.dependOn(&run_engine_tests.step);
 
     // The blocking HTTP/2 engine over a real loopback socket.
@@ -238,7 +231,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = test_runner,
     });
     const run_h2_engine_tests = b.addRunArtifact(h2_engine_tests);
-    passthruArgs(b, run_h2_engine_tests);
+    run_h2_engine_tests.addPassthruArgs();
     test_step.dependOn(&run_h2_engine_tests.step);
 
     // Full-duplex HTTP/2 request-body streaming over a real loopback socket.
@@ -256,7 +249,7 @@ pub fn build(b: *std.Build) void {
         .test_runner = test_runner,
     });
     const run_h2_streaming_tests = b.addRunArtifact(h2_streaming_tests);
-    passthruArgs(b, run_h2_streaming_tests);
+    run_h2_streaming_tests.addPassthruArgs();
     test_step.dependOn(&run_h2_streaming_tests.step);
 
     // The readiness HTTP/2 engine runs the same socket test on poll, epoll,
@@ -279,7 +272,7 @@ pub fn build(b: *std.Build) void {
             .test_runner = test_runner,
         });
         const run_readiness_tests = b.addRunArtifact(readiness_tests);
-        passthruArgs(b, run_readiness_tests);
+        run_readiness_tests.addPassthruArgs();
         test_step.dependOn(&run_readiness_tests.step);
 
         if (target.result.os.tag == .linux) {
@@ -300,7 +293,7 @@ pub fn build(b: *std.Build) void {
                 .test_runner = test_runner,
             });
             const run_epoll_tests = b.addRunArtifact(epoll_tests);
-            passthruArgs(b, run_epoll_tests);
+            run_epoll_tests.addPassthruArgs();
             test_step.dependOn(&run_epoll_tests.step);
         }
     }
@@ -325,7 +318,7 @@ pub fn build(b: *std.Build) void {
             .test_runner = test_runner,
         });
         const run_poll_tests = b.addRunArtifact(poll_tests);
-        passthruArgs(b, run_poll_tests);
+        run_poll_tests.addPassthruArgs();
         test_step.dependOn(&run_poll_tests.step);
 
         const epoll_options = b.addOptions();
@@ -345,7 +338,7 @@ pub fn build(b: *std.Build) void {
             .test_runner = test_runner,
         });
         const run_epoll_tests = b.addRunArtifact(epoll_tests);
-        passthruArgs(b, run_epoll_tests);
+        run_epoll_tests.addPassthruArgs();
         test_step.dependOn(&run_epoll_tests.step);
     }
 
@@ -369,7 +362,7 @@ pub fn build(b: *std.Build) void {
             .test_runner = test_runner,
         });
         const run_kqueue_tests = b.addRunArtifact(kqueue_tests);
-        passthruArgs(b, run_kqueue_tests);
+        run_kqueue_tests.addPassthruArgs();
         test_step.dependOn(&run_kqueue_tests.step);
     }
 
@@ -397,7 +390,7 @@ pub fn build(b: *std.Build) void {
         .dependOn(&example.step);
 
     const run_example = b.addRunArtifact(example);
-    passthruArgs(b, run_example);
+    run_example.addPassthruArgs();
     b.step("example", "Run the HTTP/1.1 example server")
         .dependOn(&run_example.step);
 
@@ -415,7 +408,7 @@ pub fn build(b: *std.Build) void {
     b.step("example-sse-bin", "Build the SSE example server")
         .dependOn(&sse.step);
     const run_sse = b.addRunArtifact(sse);
-    passthruArgs(b, run_sse);
+    run_sse.addPassthruArgs();
     b.step("example-sse", "Run the SSE example server")
         .dependOn(&run_sse.step);
 
@@ -432,7 +425,7 @@ pub fn build(b: *std.Build) void {
     b.step("example-deferred-bin", "Build the deferred-handler example server")
         .dependOn(&deferred.step);
     const run_deferred = b.addRunArtifact(deferred);
-    passthruArgs(b, run_deferred);
+    run_deferred.addPassthruArgs();
     b.step("example-deferred", "Run the deferred-handler example server")
         .dependOn(&run_deferred.step);
 
@@ -449,7 +442,7 @@ pub fn build(b: *std.Build) void {
     b.step("example-sse-poll-bin", "Build the poll-based SSE example server")
         .dependOn(&sse_poll.step);
     const run_sse_poll = b.addRunArtifact(sse_poll);
-    passthruArgs(b, run_sse_poll);
+    run_sse_poll.addPassthruArgs();
     b.step("example-sse-poll", "Run the poll-based SSE example server")
         .dependOn(&run_sse_poll.step);
 
@@ -466,7 +459,7 @@ pub fn build(b: *std.Build) void {
     b.step("example-stream-bin", "Build the file transform pipeline example")
         .dependOn(&pipeline.step);
     const run_pipeline = b.addRunArtifact(pipeline);
-    passthruArgs(b, run_pipeline);
+    run_pipeline.addPassthruArgs();
     b.step("example-stream", "Run the file transform pipeline example")
         .dependOn(&run_pipeline.step);
 
@@ -485,7 +478,7 @@ pub fn build(b: *std.Build) void {
         .dependOn(&interop_client.step);
 
     const run_interop_client = b.addRunArtifact(interop_client);
-    passthruArgs(b, run_interop_client);
+    run_interop_client.addPassthruArgs();
     b.step("interop-client", "Run the HTTP/1 client against the Go interop server")
         .dependOn(&run_interop_client.step);
 
@@ -504,7 +497,7 @@ pub fn build(b: *std.Build) void {
         .dependOn(&h2_example.step);
 
     const run_h2_example = b.addRunArtifact(h2_example);
-    passthruArgs(b, run_h2_example);
+    run_h2_example.addPassthruArgs();
     b.step("example-h2", "Run the HTTP/2 h2c example server")
         .dependOn(&run_h2_example.step);
 
@@ -533,7 +526,7 @@ pub fn build(b: *std.Build) void {
         h2_readiness_example_bin.dependOn(&h2_readiness.step);
 
         const run_h2_readiness = b.addRunArtifact(h2_readiness);
-        passthruArgs(b, run_h2_readiness);
+        run_h2_readiness.addPassthruArgs();
         h2_readiness_example_run.dependOn(&run_h2_readiness.step);
     }
 
@@ -569,7 +562,7 @@ pub fn build(b: *std.Build) void {
             h2_tls_readiness_example_bin.dependOn(&h2_tls_readiness.step);
 
             const run_h2_tls_readiness = b.addRunArtifact(h2_tls_readiness);
-            passthruArgs(b, run_h2_tls_readiness);
+            run_h2_tls_readiness.addPassthruArgs();
             h2_tls_readiness_example_run.dependOn(&run_h2_tls_readiness.step);
         }
     }
@@ -605,7 +598,7 @@ pub fn build(b: *std.Build) void {
             h2_tls_example_bin.dependOn(&h2_tls.step);
 
             const run_h2_tls = b.addRunArtifact(h2_tls);
-            passthruArgs(b, run_h2_tls);
+            run_h2_tls.addPassthruArgs();
             h2_tls_example_run.dependOn(&run_h2_tls.step);
         }
     }
@@ -649,7 +642,7 @@ pub fn build(b: *std.Build) void {
             h1_tls_example_bin.dependOn(&h1_tls.step);
 
             const run_h1_tls = b.addRunArtifact(h1_tls);
-            passthruArgs(b, run_h1_tls);
+            run_h1_tls.addPassthruArgs();
             h1_tls_example_run.dependOn(&run_h1_tls.step);
 
             const h1_tls_client_mod = b.createModule(.{
@@ -671,7 +664,7 @@ pub fn build(b: *std.Build) void {
             h1_tls_client_bin.dependOn(&h1_tls_client.step);
 
             const run_h1_tls_client = b.addRunArtifact(h1_tls_client);
-            passthruArgs(b, run_h1_tls_client);
+            run_h1_tls_client.addPassthruArgs();
             h1_tls_client_run.dependOn(&run_h1_tls_client.step);
         }
     }
@@ -706,7 +699,7 @@ pub fn build(b: *std.Build) void {
             unified_example_bin.dependOn(&unified.step);
 
             const run_unified = b.addRunArtifact(unified);
-            passthruArgs(b, run_unified);
+            run_unified.addPassthruArgs();
             unified_example_run.dependOn(&run_unified.step);
         }
     }
@@ -738,7 +731,7 @@ pub fn build(b: *std.Build) void {
             curl_example_bin.dependOn(&curl.step);
 
             const run_curl = b.addRunArtifact(curl);
-            passthruArgs(b, run_curl);
+            run_curl.addPassthruArgs();
             curl_example_run.dependOn(&run_curl.step);
         }
     }
@@ -761,7 +754,7 @@ pub fn build(b: *std.Build) void {
         poll_example_bin.dependOn(&poll.step);
 
         const run_poll = b.addRunArtifact(poll);
-        passthruArgs(b, run_poll);
+        run_poll.addPassthruArgs();
         poll_example_run.dependOn(&run_poll.step);
     }
 
@@ -789,7 +782,7 @@ pub fn build(b: *std.Build) void {
         epoll_example_bin.dependOn(&epoll.step);
 
         const run_epoll = b.addRunArtifact(epoll);
-        passthruArgs(b, run_epoll);
+        run_epoll.addPassthruArgs();
         epoll_example_run.dependOn(&run_epoll.step);
     }
 
@@ -817,7 +810,7 @@ pub fn build(b: *std.Build) void {
         kqueue_example_bin.dependOn(&kqueue.step);
 
         const run_kqueue = b.addRunArtifact(kqueue);
-        passthruArgs(b, run_kqueue);
+        run_kqueue.addPassthruArgs();
         kqueue_example_run.dependOn(&run_kqueue.step);
     }
 
@@ -839,37 +832,20 @@ pub fn build(b: *std.Build) void {
         uring_bin.dependOn(&uring.step);
 
         const run_uring = b.addRunArtifact(uring);
-        passthruArgs(b, run_uring);
+        run_uring.addPassthruArgs();
         uring_run.dependOn(&run_uring.step);
     }
 
     if (b.lazyImport(@This(), "testingx")) |testingx| {
         const dep = testingx_dep orelse unreachable;
-        // hparse is fetched by the same lazy pass. If it is still null, the
-        // build runner fetches it and reruns this script, then adds the step.
-        if (hparse_dep) |hparse| {
-            const run_bench = testingx.addBench(b, .{
-                .module = dep.module("testingx"),
-                .root_source_file = b.path("bench/bench.zig"),
-                .imports = &.{
-                    .{ .name = "http", .module = bench_mod },
-                    .{ .name = "hparse", .module = hparse.module("hparse") },
-                },
-                .target = target,
-            });
-            passthruArgs(b, run_bench);
+        const run_bench = testingx.addBench(b, .{
+            .module = dep.module("testingx"),
+            .root_source_file = b.path("bench/bench.zig"),
+            .imports = &.{.{ .name = "http", .module = bench_mod }},
+            .target = target,
+        });
+        run_bench.addPassthruArgs();
 
-            b.step("bench", "Run benchmarks").dependOn(&run_bench.step);
-        }
-    }
-}
-
-/// `b.args` (removed in Zig 0.17) and `Run.addPassthruArgs` are the same
-/// feature on either side of the split. Probe the build API, not the version.
-fn passthruArgs(b: *std.Build, run: *std.Build.Step.Run) void {
-    if (comptime @hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
-        run.addPassthruArgs();
-    } else if (b.args) |args| {
-        run.addArgs(args);
+        b.step("bench", "Run benchmarks").dependOn(&run_bench.step);
     }
 }

@@ -17,8 +17,7 @@ All notable changes to http are recorded here. The format follows
   address, sets `TCP_NODELAY`, and bounds the dial and every later read and
   write with one deadline: reads through `Io.Batch` with a `net_read`
   operation, writes with `MSG_DONTWAIT` plus the same wait. A progress hook can
-  stop the dial. Zig 0.16 has no socket operation in `Io.Operation`, so a
-  deadline there is `error.DeadlineUnsupported`.
+  stop the dial.
 - `client.Url.parse` splits an absolute `http` or `https` URL into the scheme,
   authority, host, port, and origin-form target, with the scheme default port.
   `uri.percentEncode` encodes one query component.
@@ -110,6 +109,14 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
+- `http` requires Zig 0.17. The 0.16 lane is gone: `build.zig.zon` asks for
+  0.17.0, `flake.nix` carries only the 0.17 shell (there is no
+  `nix develop .#zig-old`), and the version shims are removed. `ziglint-0-17`
+  lints against 0.17, so the deprecated `bufPrint`, `allocPrint`, and
+  `StaticBitSet` spellings are now `mem.print`, `Allocator.print`, and
+  `bit_set.Static`. The `hparse` comparison bench row goes with the old lane:
+  hparse 0.2.0 does not compile on 0.17, so `zig build bench` runs the native
+  rows only.
 - `client.Body` is `reader`, `outcome()`, and `close()`. Read it with
   `body.reader` and name a failure with `body.outcome()`, which is `.truncated`,
   `.protocol_error`, `.reset` with the RST_STREAM code, or `.local` with a

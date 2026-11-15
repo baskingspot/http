@@ -35,7 +35,6 @@
 //! that the gate returns `error.Incomplete` until the terminator arrives.
 
 const std = @import("std");
-const compat = @import("../compat.zig");
 const testing = std.testing;
 const assert = std.debug.assert;
 const mem = std.mem;
@@ -590,7 +589,7 @@ fn parseStatus(cursor: *Cursor) Error!Status {
     const tens = try expectDigit(cursor);
     const ones = try expectDigit(cursor);
     const value = @as(u16, hundreds) * 100 + @as(u16, tens) * 10 + ones;
-    return compat.enumFromInt(Status, @intCast(value));
+    return @fromBackingInt(@intCast(value));
 }
 
 /// RFC 9112 §4: `reason-phrase = 1*( HTAB / SP / VCHAR / obs-text )`, made
@@ -754,7 +753,7 @@ test "request: a typical head (RFC 9112 §2.1, §3, §5)" {
 test "request: method is a token (RFC 9112 §3.1, RFC 9110 §5.6.2)" {
     const valid = [_][]const u8{ "GET", "POST", "PRI", "M-SEARCH", "get", "-" };
     for (valid) |method| {
-        const buf = try fmt.allocPrint(testing.allocator, "{s} / HTTP/1.1\r\n\r\n", .{method});
+        const buf = try testing.allocator.print("{s} / HTTP/1.1\r\n\r\n", .{method});
         defer testing.allocator.free(buf);
         var storage: [1]Header = undefined;
         const parsed = try parseRequestOnce(buf, &storage);
@@ -762,7 +761,7 @@ test "request: method is a token (RFC 9112 §3.1, RFC 9110 §5.6.2)" {
     }
 
     for ([_][]const u8{ "GE(T", "GE T", "" }) |method| {
-        const buf = try fmt.allocPrint(testing.allocator, "{s} / HTTP/1.1\r\n\r\n", .{method});
+        const buf = try testing.allocator.print("{s} / HTTP/1.1\r\n\r\n", .{method});
         defer testing.allocator.free(buf);
         var storage: [1]Header = undefined;
         try testing.expectError(error.Invalid, parseRequestOnce(buf, &storage));
@@ -934,8 +933,7 @@ test "line endings: a truncated line end is incomplete" {
 test "field value: CTLs and NUL are invalid (RFC 9110 §5.5)" {
     var storage: [1]Header = undefined;
     for ([_][]const u8{ "a\x00b", "a\x01b", "a\x0bb", "a\x7fb" }) |value| {
-        const buf = try fmt.allocPrint(
-            testing.allocator,
+        const buf = try testing.allocator.print(
             "GET / HTTP/1.1\r\nX: {s}\r\n\r\n",
             .{value},
         );

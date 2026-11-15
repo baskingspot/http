@@ -4,8 +4,8 @@
 const testingx = @import("testingx");
 const http = @import("http");
 
-/// `**` on byte strings is gone in Zig 0.17, and `src/compat.zig` sits outside
-/// the bench module path, so the benches carry their own.
+/// `**` on byte strings is gone, and the bench suite is compiled outside the
+/// `http` module, so it carries its own repeat.
 fn repeat(comptime s: []const u8, comptime n: usize) [s.len * n]u8 {
     @setEvalBranchQuota(n + 1000);
     var out: [s.len * n]u8 = undefined;

@@ -11,7 +11,6 @@
 
 const std = @import("std");
 const meta = std.meta;
-const compat = @import("compat.zig");
 const testing = std.testing;
 
 pub const Method = enum {
@@ -78,12 +77,8 @@ pub const Method = enum {
 };
 
 test "token and parse round-trip every tag" {
-    inline for (0..comptime compat.enumFieldCount(Method)) |index| {
-        const method = comptime compat.enumFieldValue(Method, index);
-        try testing.expectEqualStrings(
-            comptime compat.enumFieldName(Method, index),
-            method.token(),
-        );
+    inline for (std.enums.values(Method)) |method| {
+        try testing.expectEqualStrings(std.enums.tagName(Method, method).?, method.token());
         try testing.expectEqual(method, Method.parse(method.token()).?);
     }
 }
@@ -102,8 +97,7 @@ test "parse leaves unlisted methods as tokens" {
 }
 
 test "safe and idempotent agree with RFC 9110 §9.2" {
-    inline for (0..comptime compat.enumFieldCount(Method)) |index| {
-        const method = comptime compat.enumFieldValue(Method, index);
+    inline for (std.enums.values(Method)) |method| {
         // Safe implies idempotent, and GET and HEAD are both.
         if (method.safe()) try testing.expect(method.idempotent());
     }

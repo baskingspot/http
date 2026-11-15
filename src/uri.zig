@@ -89,7 +89,7 @@ pub const Url = struct {
             if (tail[0] == '/') {
                 url.target = tail;
             } else {
-                const owned = try std.fmt.allocPrint(allocator, "/{s}", .{tail});
+                const owned = try allocator.print("/{s}", .{tail});
                 url.target = owned;
                 url.owned_target = owned;
             }

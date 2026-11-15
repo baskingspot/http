@@ -713,15 +713,14 @@ test "a streaming body has no total-size cap" {
     while (remaining > 0) {
         const n = @min(remaining, chunk.len);
         var size_buf: [32]u8 = undefined;
-        try body.appendSlice(gpa, try std.fmt.bufPrint(&size_buf, "{x}\r\n", .{n}));
+        try body.appendSlice(gpa, try std.mem.print(&size_buf, "{x}\r\n", .{n}));
         try body.appendSlice(gpa, chunk[0..n]);
         try body.appendSlice(gpa, "\r\n");
         remaining -= n;
     }
     try body.appendSlice(gpa, "0\r\n\r\n");
 
-    const response = try std.fmt.allocPrint(
-        gpa,
+    const response = try gpa.print(
         "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{s}",
         .{body.items},
     );

@@ -14,12 +14,11 @@
   outputs =
     inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
-      # imports and inputsFrom below mirror each other, including the
-      # toolchain version: pick that once, in the import.
+      # imports and inputsFrom below mirror each other: the Zig toolchain is
+      # the 0.17 module's, so the shell and the linter agree on one std.
       imports = with inputs.baskingspot.flakeModules; [
         base
         docs
-        zig."0.16"
         zig."0.17"
       ];
 
@@ -43,8 +42,8 @@
             pkgs.openssl.out
             pkgs.pkg-config
             # ziglint with the target std's doc comments, so the deprecation
-            # rule checks the oldest API surface this repo supports.
-            config.packages."ziglint-0-16"
+            # rule checks the minimum supported API surface.
+            config.packages."ziglint-0-17"
           ];
         in
         {
@@ -53,15 +52,6 @@
               config.devShells.base
               config.devShells.docs
               config.devShells."zig-0-17"
-            ];
-            packages = project;
-          };
-
-          devShells.zig-old = pkgs.mkShell {
-            inputsFrom = [
-              config.devShells.base
-              config.devShells.docs
-              config.devShells."zig-0-16"
             ];
             packages = project;
           };

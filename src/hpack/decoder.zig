@@ -765,7 +765,7 @@ test "invalid HPACK after a local error, in the dropped path, poisons" {
         var table_memory: TableStorage.Buffer(64) = undefined;
         var decoder = Decoder.init(try .initBuffer(&table_memory, 64));
         var block: [16]u8 = undefined;
-        const joined = try std.fmt.bufPrint(&block, "\x82\x86{s}", .{tail});
+        const joined = try std.mem.print(&block, "\x82\x86{s}", .{tail});
         try testing.expectError(want, decoder.decode(joined, &out, &out_bytes));
         try testing.expect(decoder.poisoned);
         try testing.expectError(error.Desynchronized, decoder.decode("\x82", &out, &out_bytes));

@@ -138,8 +138,8 @@ pub fn benchmarkHpackEncodeMany(b: *testingx.B) !void {
     var values: [128][8]u8 = undefined;
     var headers: [128]http.Header = undefined;
     for (0..128) |i| {
-        const name = try std.fmt.bufPrint(&names[i], "x-field-{d}", .{i});
-        const value = try std.fmt.bufPrint(&values[i], "v{d}", .{i});
+        const name = try std.mem.print(&names[i], "x-field-{d}", .{i});
+        const value = try std.mem.print(&values[i], "v{d}", .{i});
         headers[i] = .{ .name = name, .value = value };
     }
 

@@ -16,7 +16,6 @@
 //! lives.
 
 const std = @import("std");
-const compat = @import("../compat.zig");
 const simd = @import("../simd.zig");
 const testing = std.testing;
 const mem = std.mem;
@@ -679,7 +678,7 @@ test "outbound response validation" {
         .headers = &.{.{ .name = "content-length", .value = "5" }},
     }));
     try testing.expectError(error.InvalidStatus, validateResponse(.{
-        .status = compat.enumFromInt(Status, 99),
+        .status = @fromBackingInt(99),
     }));
     try testing.expectError(error.InvalidFieldName, validateResponse(.{
         .status = .ok,

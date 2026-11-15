@@ -22,7 +22,6 @@ const testing = std.testing;
 
 const time = @import("stdx").time;
 
-const compat = @import("../../compat.zig");
 const shared = @import("../../engine/common.zig");
 const Header = @import("../../header.zig").Header;
 const Headers = @import("../../header.zig").Headers;
@@ -577,7 +576,7 @@ pub const Connection = struct {
             .reset => |reset| {
                 if (self.findSlot(reset.stream_id)) |handle| {
                     const slot = self.pool.get(handle);
-                    slot.reset_code = compatCode(reset.code);
+                    slot.reset_code = @backingInt(reset.code);
                     self.finishSlot(handle, slot.handler_called);
                 }
             },
@@ -949,10 +948,6 @@ fn mapSession(err: anyerror) common.Sink.SinkError {
         error.OutOfMemory => error.OutOfMemory,
         else => error.ConnectionClosed,
     };
-}
-
-fn compatCode(code: frame.ErrorCode) u32 {
-    return compat.enumToInt(code);
 }
 
 fn earliest(a: ?Io.Timestamp, b: Io.Timestamp) Io.Timestamp {
@@ -1577,6 +1572,9 @@ test "resident memory plateaus across consume, park, and deadline" {
     // the upload never trips it; what must not grow is the allocator total.
     // The baseline is taken at 16 chunks, so the loop runs to 32: a 16-chunk
     // test would compare the baseline with itself.
+    // ziglint-ignore: Z011
+    // The resident-memory total is the measurement here, and `total_requested_bytes`
+    // exists only on `DebugAllocator`; `SafeAllocator` reports leaks, not bytes.
     var counter: std.heap.DebugAllocator(.{
         .enable_memory_limit = true,
         .stack_trace_frames = 0,

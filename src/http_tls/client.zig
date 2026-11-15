@@ -190,7 +190,7 @@ pub const ConnectError = error{
     PlainUnsupported,
     /// The peer selected no protocol, or one that was not offered.
     WrongAlpn,
-    /// A deadline was set on a Zig version that cannot bound a socket wait.
+    /// A deadline was set on a connection that cannot bound a socket wait.
     DeadlineUnsupported,
 };
 
@@ -216,8 +216,6 @@ const connector_vtable: transport.Connector.VTable = .{ .connect = connectorConn
 fn connectorConnect(ptr: *anyopaque, context: transport.Context) anyerror!transport.Connection {
     const self: *Connector = @ptrCast(@alignCast(ptr));
     if (context.url.scheme == .http) return error.PlainUnsupported;
-    if (context.deadline.get() != null or context.connect_deadline.get() != null)
-        if (!plain.deadline_supported) return error.DeadlineUnsupported;
 
     const stream = try plain.connectStream(context, .{});
     errdefer stream.close(context.io);
@@ -301,8 +299,6 @@ fn wrappedSetDeadline(
     ptr: *anyopaque,
     deadline: time.OptionalTimestamp,
 ) error{DeadlineUnsupported}!void {
-    if (deadline.get() != null and !plain.deadline_supported)
-        return error.DeadlineUnsupported;
     const self: *Wrapped = @ptrCast(@alignCast(ptr));
     self.deadline = deadline;
     self.tls.setDeadline(deadline);

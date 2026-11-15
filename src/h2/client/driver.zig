@@ -221,15 +221,11 @@ pub const Driver = struct {
     ) !ReadResult {
         const instant = deadline.get() orelse {
             var data: [1][]u8 = .{self.read_buffer};
-            const n = if (comptime @hasField(Io.VTable, "netRead"))
-                try io.vtable.netRead(io.userdata, fd, &data)
-            else blk: {
-                const result = try io.operate(.{ .net_read = .{
-                    .socket_handle = fd,
-                    .data = &data,
-                } });
-                break :blk (try result.net_read).data_len;
-            };
+            const result = try io.operate(.{ .net_read = .{
+                .socket_handle = fd,
+                .data = &data,
+            } });
+            const n = (try result.net_read).data_len;
             if (n == 0) return .eof;
             self.absorb(n);
             return .ready;
@@ -240,14 +236,10 @@ pub const Driver = struct {
             .deadline = instant.toStd().withClock(.awake),
         };
 
-        if (comptime @hasField(Io.Operation, "net_read")) {
-            return self.readSocket17(io, fd, timeout);
-        } else {
-            return self.readSocket16(io, fd, timeout);
-        }
+        return self.readTimedSocket(io, fd, timeout);
     }
 
-    fn readSocket17(self: *Driver, io: Io, fd: std.posix.fd_t, timeout: Io.Timeout) !ReadResult {
+    fn readTimedSocket(self: *Driver, io: Io, fd: std.posix.fd_t, timeout: Io.Timeout) !ReadResult {
         var storage: [1]Io.Operation.Storage = undefined;
         var batch: Io.Batch = .init(&storage);
         var iovecs: [1][]u8 = .{self.read_buffer};
@@ -282,26 +274,6 @@ pub const Driver = struct {
             error.ConcurrencyUnavailable => error.DeadlineUnsupported,
         };
         return error.NoReadCompletion;
-    }
-
-    fn readSocket16(
-        self: *Driver,
-        io: Io,
-        fd: std.posix.fd_t,
-        timeout: Io.Timeout,
-    ) !ReadResult {
-        const socket: Io.net.Socket = .{ .handle = fd, .address = undefined };
-        const message = socket.receiveTimeout(
-            io,
-            self.read_buffer,
-            timeout,
-        ) catch |err| switch (err) {
-            error.Timeout => return .timeout,
-            else => return err,
-        };
-        if (message.data.len == 0) return .eof;
-        self.absorb(message.data.len);
-        return .ready;
     }
 
     fn absorb(self: *Driver, n: usize) void {
@@ -761,26 +733,11 @@ test "untimed socket reads preserve reset and cancellation causes" {
             if (self.canceled) return error.Canceled;
             return .{ .net_read = error.ConnectionResetByPeer };
         }
-
-        fn netRead(
-            context: ?*anyopaque,
-            _: Io.net.Socket.Handle,
-            _: [][]u8,
-        ) Io.net.Stream.Reader.Error!usize {
-            const self: *Self = @ptrCast(@alignCast(context.?));
-            self.reads += 1;
-            if (self.canceled) return error.Canceled;
-            return error.ConnectionResetByPeer;
-        }
     };
     for ([_]bool{ false, true }) |canceled| {
         var probe: Probe = .{ .canceled = canceled };
         var vtable = testing.io.vtable.*;
-        if (comptime @hasField(Io.VTable, "netRead")) {
-            vtable.netRead = Probe.netRead;
-        } else {
-            vtable.operate = Probe.operate;
-        }
+        vtable.operate = Probe.operate;
         const io: Io = .{ .userdata = &probe, .vtable = &vtable };
         var conn: Connection = undefined;
         try conn.init(.{ .allocator = testing.allocator });
@@ -809,62 +766,60 @@ test "untimed socket reads preserve reset and cancellation causes" {
 }
 
 test "timed reads reap pending batches and retain completions that race cancellation" {
-    if (comptime @hasField(Io.Operation, "net_read")) {
-        const Probe = @import("driver_test_io.zig").BatchProbe;
-        const Scenario = enum {
-            timeout,
-            canceled,
-            unsupported,
-            missing,
-            timeout_race,
-            canceled_race,
-        };
-        for (std.enums.values(Scenario)) |scenario| {
-            var probe: Probe = .init(
-                switch (scenario) {
-                    .timeout, .timeout_race => error.Timeout,
-                    .canceled, .canceled_race => error.Canceled,
-                    .unsupported => error.ConcurrencyUnavailable,
-                    .missing => null,
-                },
-                switch (scenario) {
-                    .timeout_race, .canceled_race => 0,
-                    else => null,
-                },
-            );
-            var vtable = testing.io.vtable.*;
-            vtable.batchAwaitConcurrent = Probe.awaitConcurrent;
-            vtable.batchCancel = Probe.cancel;
-            const io: Io = .{ .userdata = &probe, .vtable = &vtable };
-            var conn: Connection = undefined;
-            try conn.init(.{ .allocator = testing.allocator });
-            defer conn.deinit();
-            var reader = Io.Reader.fixed("");
-            var writer = Io.Writer.failing;
-            var read_buffer: [64]u8 = undefined;
-            var frame_buffer: [16 * 1024 + 9]u8 = undefined;
-            var driver: Driver = undefined;
-            driver.init(&conn, &reader, &writer, .{
-                .read_buffer = &read_buffer,
-                .frame_buffer = &frame_buffer,
-            });
-            const result = driver.readSocket17(io, -1, .none);
+    const Probe = @import("driver_test_io.zig").BatchProbe;
+    const Scenario = enum {
+        timeout,
+        canceled,
+        unsupported,
+        missing,
+        timeout_race,
+        canceled_race,
+    };
+    for (std.enums.values(Scenario)) |scenario| {
+        var probe: Probe = .init(
             switch (scenario) {
-                .timeout => try testing.expectEqual(Driver.ReadResult.timeout, try result),
-                .canceled, .canceled_race => try testing.expectError(error.Canceled, result),
-                .unsupported => try testing.expectError(error.DeadlineUnsupported, result),
-                .missing => try testing.expectError(error.NoReadCompletion, result),
-                .timeout_race => try testing.expectEqual(Driver.ReadResult.ready, try result),
-            }
-            try testing.expect(probe.cancel_called);
-            if (probe.complete_on_cancel != null) {
-                // The racing byte is the first byte of SETTINGS. Its remaining
-                // eight bytes must complete that frame, not a shifted header.
-                const rest = "\x00\x00\x04\x00\x00\x00\x00\x00";
-                try testing.expectEqual(rest.len, conn.receive(rest));
-                _ = try conn.poll();
-                try testing.expect(conn.session.settings_received);
-            }
+                .timeout, .timeout_race => error.Timeout,
+                .canceled, .canceled_race => error.Canceled,
+                .unsupported => error.ConcurrencyUnavailable,
+                .missing => null,
+            },
+            switch (scenario) {
+                .timeout_race, .canceled_race => 0,
+                else => null,
+            },
+        );
+        var vtable = testing.io.vtable.*;
+        vtable.batchAwaitConcurrent = Probe.awaitConcurrent;
+        vtable.batchCancel = Probe.cancel;
+        const io: Io = .{ .userdata = &probe, .vtable = &vtable };
+        var conn: Connection = undefined;
+        try conn.init(.{ .allocator = testing.allocator });
+        defer conn.deinit();
+        var reader = Io.Reader.fixed("");
+        var writer = Io.Writer.failing;
+        var read_buffer: [64]u8 = undefined;
+        var frame_buffer: [16 * 1024 + 9]u8 = undefined;
+        var driver: Driver = undefined;
+        driver.init(&conn, &reader, &writer, .{
+            .read_buffer = &read_buffer,
+            .frame_buffer = &frame_buffer,
+        });
+        const result = driver.readTimedSocket(io, -1, .none);
+        switch (scenario) {
+            .timeout => try testing.expectEqual(Driver.ReadResult.timeout, try result),
+            .canceled, .canceled_race => try testing.expectError(error.Canceled, result),
+            .unsupported => try testing.expectError(error.DeadlineUnsupported, result),
+            .missing => try testing.expectError(error.NoReadCompletion, result),
+            .timeout_race => try testing.expectEqual(Driver.ReadResult.ready, try result),
         }
-    } else return error.SkipZigTest;
+        try testing.expect(probe.cancel_called);
+        if (probe.complete_on_cancel != null) {
+            // The racing byte is the first byte of SETTINGS. Its remaining
+            // eight bytes must complete that frame, not a shifted header.
+            const rest = "\x00\x00\x04\x00\x00\x00\x00\x00";
+            try testing.expectEqual(rest.len, conn.receive(rest));
+            _ = try conn.poll();
+            try testing.expect(conn.session.settings_received);
+        }
+    }
 }

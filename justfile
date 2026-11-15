@@ -10,7 +10,7 @@ default:
 test:
     zig build test --summary all
 
-[doc("Per-Zig-version gate; run in both dev shells")]
+[doc("The unit tests alone, without the rest of the gate")]
 [group("ci")]
 check: test
 
@@ -20,7 +20,7 @@ fixture:
     cd tools/hpack-interop && go run . > ../../tests/hpack-interop.txtar.tmp
     mv tests/hpack-interop.txtar.tmp tests/hpack-interop.txtar
 
-[doc("Run the fuzzer with an iteration budget, for example `just fuzz 50M`. Uses the built-in test runner, which testingx does not replace in fuzz mode. ReleaseSafe forces the LLVM backend, dodging the 0.16.0 self-hosted-backend bug in Debug fuzz mode (ziglang/zig#30655)")]
+[doc("Run the fuzzer with an iteration budget, for example `just fuzz 50M`. Uses the built-in test runner, which testingx does not replace in fuzz mode. ReleaseSafe keeps the loop on optimized code with the safety checks on")]
 [group("test")]
 fuzz LIMIT="10M":
     zig build fuzz -Doptimize=ReleaseSafe --fuzz={{ LIMIT }}
@@ -137,10 +137,10 @@ conformance-run-tls-readiness *ARGS:
 load *ARGS:
     h2load -n 100 -c 1 -m 10 http://127.0.0.1:8081/ {{ ARGS }}
 
-[doc("Lint Zig, Nix, Markdown, the workflows, and this justfile: ziglint-0-16, the ast-grep house rules, zig fmt, nix fmt, oxfmt, actionlint, zizmor, and just --fmt")]
+[doc("Lint Zig, Nix, Markdown, the workflows, and this justfile: ziglint-0-17, the ast-grep house rules, zig fmt, nix fmt, oxfmt, actionlint, zizmor, and just --fmt")]
 [group("lint")]
 lint:
-    ziglint-0-16
+    ziglint-0-17
     baskingspot-lint src
     zig fmt --check src tests bench examples build.zig build.zig.zon
     nix fmt -- --ci

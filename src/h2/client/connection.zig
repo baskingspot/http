@@ -17,7 +17,6 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 const shared = @import("../../client/root.zig");
-const compat = @import("../../compat.zig");
 const Header = @import("../../header.zig").Header;
 const Headers = @import("../../header.zig").Headers;
 const frame = @import("../frame.zig");
@@ -401,13 +400,13 @@ pub const Connection = struct {
                 .reset => |reset| {
                     const slot = self.slotById(reset.stream_id) orelse
                         return error.UnexpectedStream;
-                    slot.close_reason = .{ .reset = compat.enumToInt(reset.code) };
+                    slot.close_reason = .{ .reset = @backingInt(reset.code) };
                     return self.takeClosed(slot, slot.close_reason.?);
                 },
                 .goaway => |goaway| {
                     self.goaway = .{
                         .last_stream_id = goaway.last_stream_id,
-                        .code = compat.enumToInt(goaway.code),
+                        .code = @backingInt(goaway.code),
                     };
                     for (self.slots) |*slot| {
                         if (!slot.used or slot.id <= goaway.last_stream_id) continue;

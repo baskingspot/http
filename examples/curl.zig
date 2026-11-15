@@ -11,7 +11,6 @@
 //! address, ALPN, cipher suite, and retained certificate chain.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const mem = std.mem;
 const Allocator = mem.Allocator;
@@ -211,11 +210,8 @@ fn parseUrl(arena: Allocator, io: Io, text: []const u8) !Url {
     const authority = after_scheme[0..authority_end];
 
     var host_buffer: [HostName.max_len]u8 = undefined;
-    // 0.17 moved std.Uri.getHost to Io.net.HostName.fromUri.
-    const host = if (builtin.zig_version.minor == 16)
-        (try uri.getHost(&host_buffer)).bytes
-    else
-        (try HostName.fromUri(uri, &host_buffer)).bytes;
+    // std.Uri has no host resolution; `Io.net.HostName` reads the authority.
+    const host = (try HostName.fromUri(uri, &host_buffer)).bytes;
     const literal = if (host.len > 1 and host[0] == '[') host[1 .. host.len - 1] else host;
 
     const port: u16 = uri.port orelse if (https) 443 else 80;
@@ -225,7 +221,7 @@ fn parseUrl(arena: Allocator, io: Io, text: []const u8) !Url {
         .authority = authority,
         .address = try resolve(io, literal, port),
         // Origin-form request target: the path, then the query when present.
-        .target = try std.fmt.allocPrint(arena, "{f}", .{
+        .target = try arena.print("{f}", .{
             std.Uri.fmt(&uri, .{ .path = true, .query = true }),
         }),
     };

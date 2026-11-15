@@ -476,7 +476,7 @@ test "negotiateFields: the rescan fallback past the tracked bound" {
     var names: [max_tracked + 8][4]u8 = undefined;
     var supported: [max_tracked + 8][]const u8 = undefined;
     for (&names, &supported, 0..) |*name, *coding, index| {
-        coding.* = fmt.bufPrint(name, "x{d}", .{index}) catch unreachable;
+        coding.* = mem.print(name, "x{d}", .{index}) catch unreachable;
     }
     supported[supported.len - 1] = "zstd";
 

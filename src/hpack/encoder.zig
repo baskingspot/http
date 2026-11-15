@@ -168,7 +168,7 @@ pub const Encoder = struct {
 
         if (response.content_length) |length| {
             var length_buf: [20]u8 = undefined;
-            const text = std.fmt.bufPrint(&length_buf, "{d}", .{length}) catch unreachable;
+            const text = mem.print(&length_buf, "{d}", .{length}) catch unreachable;
             self.writeField(out, &pos, .{
                 .name = "content-length",
                 .value = text,

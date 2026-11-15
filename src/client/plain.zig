@@ -12,10 +12,6 @@
 //! on a large payload waits for the whole payload regardless of how long the
 //! poll said the socket was ready.
 //!
-//! Zig 0.16 has no socket read or write operation in `Io.Operation`, so a
-//! deadline cannot be bounded there; `connect` reports
-//! `error.DeadlineUnsupported` instead of accepting one it would ignore.
-//!
 //! Name resolution is not bounded. `std.Io` has no lookup timeout, so the
 //! deadline starts once the host is a list of addresses.
 
@@ -31,7 +27,6 @@ const time = stdx.time;
 const HostName = Io.net.HostName;
 const IpAddress = Io.net.IpAddress;
 
-const compat = @import("../compat.zig");
 const common = @import("common.zig");
 const transport = @import("transport.zig");
 const Protocol = transport.Protocol;
@@ -44,9 +39,9 @@ pub const max_addresses = 8;
 /// hook is set; without one the wait runs to the deadline.
 const progress_slice_ms = 250;
 
-/// Zig 0.17 carries socket reads and writes in `Io.Operation`. Zig 0.16 has
-/// only `net_receive`, so a bounded stream wait does not exist there.
-pub const deadline_supported = @hasField(Io.Operation, "net_read");
+/// `Io.Operation` carries socket reads and writes, so every read on this
+/// connector can be bounded by the deadline.
+pub const deadline_supported = true;
 
 pub const Error = error{
     /// The URL uses a scheme this connector cannot speak.
@@ -128,8 +123,6 @@ pub const Connection = struct {
 
     fn open(context: transport.Context, config: Config) Error!*Connection {
         if (context.url.scheme == .https) return error.TlsUnsupported;
-        if (context.deadline.get() != null or context.connect_deadline.get() != null)
-            if (!deadline_supported) return error.DeadlineUnsupported;
 
         const stream = try connectStream(context, .{ .no_delay = config.no_delay });
         errdefer stream.close(context.io);
@@ -192,7 +185,6 @@ fn connectionSetDeadline(
     ptr: *anyopaque,
     deadline: time.OptionalTimestamp,
 ) error{DeadlineUnsupported}!void {
-    if (deadline.get() != null and !deadline_supported) return error.DeadlineUnsupported;
     const self: *Connection = @ptrCast(@alignCast(ptr));
     self.deadline = deadline;
 }
@@ -247,50 +239,26 @@ fn readerReadVec(erased: *Io.Reader, data: [][]u8) Io.Reader.Error!usize {
 /// failure latches its cause for `transport.Connection.readCause`.
 fn readOnce(self: *Connection, buffers: [][]u8) Error!usize {
     self.read_cause = null;
-    if (comptime deadline_supported) {
-        var storage: [1]Io.Operation.Storage = undefined;
-        var batch: Io.Batch = .init(&storage);
-        const index = batch.add(.{ .net_read = .{
-            .socket_handle = self.stream.socket.handle,
-            .data = buffers,
-        } });
-        waitForRead(self, &batch) catch |err| {
-            self.read_cause = err;
-            return err;
-        };
-        const completion = batch.next() orelse {
-            self.read_cause = error.ConcurrencyUnavailable;
-            return error.ConcurrencyUnavailable;
-        };
-        assert(completion.index == index);
-        const result = completion.result.net_read catch |err| {
-            self.read_cause = err;
-            return error.SystemResources;
-        };
-        return result.data_len;
-    }
-
-    // 0.16 keeps socket reads on the `Io` vtable and has no batch operation
-    // for them, so this call waits with no bound. `open` refuses a deadline on
-    // that lane rather than accept one it cannot honor.
-    if (comptime @hasField(Io.VTable, "netRead")) {
-        const count = self.io.vtable.netRead(
-            self.io.userdata,
-            self.stream.socket.handle,
-            buffers,
-        ) catch |err| switch (err) {
-            error.Canceled => {
-                self.read_cause = error.Stopped;
-                return error.Stopped;
-            },
-            else => {
-                self.read_cause = err;
-                return error.SystemResources;
-            },
-        };
-        return count;
-    }
-    unreachable;
+    var storage: [1]Io.Operation.Storage = undefined;
+    var batch: Io.Batch = .init(&storage);
+    const index = batch.add(.{ .net_read = .{
+        .socket_handle = self.stream.socket.handle,
+        .data = buffers,
+    } });
+    waitForRead(self, &batch) catch |err| {
+        self.read_cause = err;
+        return err;
+    };
+    const completion = batch.next() orelse {
+        self.read_cause = error.ConcurrencyUnavailable;
+        return error.ConcurrencyUnavailable;
+    };
+    assert(completion.index == index);
+    const result = completion.result.net_read catch |err| {
+        self.read_cause = err;
+        return error.SystemResources;
+    };
+    return result.data_len;
 }
 
 /// Wait for the read batch, bounded by the connection's deadline. A timeout
@@ -603,12 +571,12 @@ fn errnoToError(so_error: c_int) Error {
     // The value comes back from `getsockopt(SO_ERROR)` as a bare errno, not as
     // the enum `posix.system` maps, so it needs its own mapping.
     return switch (so_error) {
-        @intCast(compat.enumToInt(posix.E.CONNREFUSED)) => error.ConnectionRefused,
-        @intCast(compat.enumToInt(posix.E.NETUNREACH)) => error.NetworkUnreachable,
-        @intCast(compat.enumToInt(posix.E.HOSTUNREACH)) => error.HostUnreachable,
-        @intCast(compat.enumToInt(posix.E.TIMEDOUT)) => error.TimedOut,
-        @intCast(compat.enumToInt(posix.E.CONNRESET)) => error.ConnectionResetByPeer,
-        @intCast(compat.enumToInt(posix.E.AFNOSUPPORT)) => error.AddressFamilyUnsupported,
+        @intCast(@backingInt(posix.E.CONNREFUSED)) => error.ConnectionRefused,
+        @intCast(@backingInt(posix.E.NETUNREACH)) => error.NetworkUnreachable,
+        @intCast(@backingInt(posix.E.HOSTUNREACH)) => error.HostUnreachable,
+        @intCast(@backingInt(posix.E.TIMEDOUT)) => error.TimedOut,
+        @intCast(@backingInt(posix.E.CONNRESET)) => error.ConnectionResetByPeer,
+        @intCast(@backingInt(posix.E.AFNOSUPPORT)) => error.AddressFamilyUnsupported,
         else => error.SystemResources,
     };
 }
@@ -786,7 +754,7 @@ const Fixture = struct {
 };
 
 fn parseFor(port: u16, buffer: []u8, scheme: []const u8) !Url {
-    const text = try std.fmt.bufPrint(buffer, "{s}://127.0.0.1:{d}/", .{ scheme, port });
+    const text = try mem.print(buffer, "{s}://127.0.0.1:{d}/", .{ scheme, port });
     return Url.parse(testing.allocator, text);
 }
 
@@ -833,8 +801,6 @@ const StopState = struct {
 };
 
 test "an expired deadline ends the dial before it resolves" {
-    if (comptime !deadline_supported) return error.SkipZigTest;
-
     var text: [64]u8 = undefined;
     const url = try parseFor(1, &text, "http");
     defer url.deinit(testing.allocator);
@@ -896,8 +862,6 @@ test "the connector carries a request and a streaming body" {
 }
 
 test "a body read the deadline ended is a local timeout" {
-    if (comptime !deadline_supported) return error.SkipZigTest;
-
     var fixture: Fixture = undefined;
     try fixture.init(
         "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nshort",
@@ -947,27 +911,6 @@ test "a body read the deadline ended is a local timeout" {
     var writer: Io.Writer = .fixed(&got);
     try testing.expectError(error.ReadFailed, response.body.reader.streamRemaining(&writer));
     try testing.expectEqual(common.Outcome{ .local = .timed_out }, response.body.outcome().?);
-}
-
-test "a deadline the lane cannot honor is refused" {
-    if (comptime deadline_supported) return error.SkipZigTest;
-
-    var text: [64]u8 = undefined;
-    const url = try parseFor(1, &text, "http");
-    defer url.deinit(testing.allocator);
-
-    const soon = try time.OptionalTimestamp.init(
-        time.Timestamp.fromNanoseconds(
-            @as(u64, @intCast(time.now(.awake).nanoseconds)) + std.time.ns_per_s,
-        ),
-    );
-    var connector: Connector = .init(.{});
-    try testing.expectError(error.DeadlineUnsupported, connector.handle().connect(.{
-        .io = testing.io,
-        .gpa = testing.allocator,
-        .url = url,
-        .deadline = soon,
-    }));
 }
 
 test "the client dials and sends through its connector" {
