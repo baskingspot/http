@@ -1162,40 +1162,33 @@ with ALPN and on one cleartext listener that sniffs the preface.
 
 # Performance
 
-These are head-parser numbers, `ReleaseFast` on Linux aarch64, against hparse
-0.2.0 on identical buffers. hparse is a head-only parser with no body, no
-framing, no chunked coding, and no connection state, so the comparison is the
-scanner against the scanner.
+Head-parser numbers, `ReleaseFast` on Linux aarch64, `neoverse_v3`, over the
+corpus in `bench/h1_bench.zig`.
 
-| Input                     | http   | hparse 0.2.0 | Result      |
-| ------------------------- | ------ | ------------ | ----------- |
-| Typical request, 5 fields | 81 ns  | 79 ns        | parity      |
-| Wide request, 14 fields   | 255 ns | 334 ns       | 24% faster  |
-| Response, 4 fields        | 78 ns  | 78 ns        | parity      |
-| 1 KiB header value        | 85 ns  | 320 ns       | 3.8x faster |
+| Input                     | http   |
+| ------------------------- | ------ |
+| Typical request, 5 fields | 74 ns  |
+| Response, 4 fields        | 72 ns  |
+| 1 KiB header value        | 83 ns  |
+| Wide request, 14 fields   | 244 ns |
 
-Two of the four rows are parity. hparse is 2 ns faster on the shortest head,
-and the response head is a tie. The advantage arrives with the field count and
-the value length: 24% on the wide head and 3.8 times on the 1 KiB value.
-
-The hparse column is a fixed measurement: hparse 0.2.0 does not compile on Zig
-0.17, so its bench row is gone and `just bench -- --filter=Request` runs the
-`http` rows in `bench/h1_bench.zig` alone.
+Field count sets the cost. Fourteen fields take 3.3 times what five do,
+because the scanner reads every field. Value length is nearly free: a 1 KiB
+header value takes 83 ns against 74 ns for a whole five-field request, because
+the value is one vector pass whose length does not add iterations.
 
 ## Where the time goes
 
-Three changes produced the long-value row. `scanTarget` and `scanLine` are one
-vector pass that finds the delimiter and rejects an invalid byte in the same
-load, where the old code searched and then validated. `scanToken` is one scalar
-pass, because tokens are short in practice and the call into std's vector
-search cost more than the table lookups it replaced. The unused byte-set
-helpers went away, and the scanner tests drive the real scanners over every
-byte value at every position.
+`scanTarget` and `scanLine` find the delimiter and reject an invalid byte in
+the same vector load, so a 1 KiB value costs one pass whatever its length.
+`scanToken` is one scalar pass: header tokens are short, and calling into std's
+vector search costs more than the table lookups it replaces.
 
-The short heads are hparse's. It dispatches four method bytes at a time and
-scans a field name more loosely than this parser will. The looseness is not
-worth copying, and a known-method fast path measured 1 to 2 ns of a 100 ns
-request.
+The scanner tests drive the real scanners over every byte value at every
+position, across the vector and scalar paths.
+
+A known-method fast path measures 1 to 2 ns of a 100 ns request, and it closes
+the open method registry, so it is not here.
 
 HPACK was measured the same way: `hpack.static_table.findName` is 4.4 ns
 against 11.1 ns for the 61-entry scan it replaced, and `find` is 5.7 ns against
@@ -1205,8 +1198,8 @@ against 11.1 ns for the 61-entry scan it replaced, and `find` is 5.7 ns against
 
 `just bench` builds the suite at `ReleaseFast` and runs every row.
 `just bench-smoke` runs each one once to prove the suite builds. A number from
-another machine will differ, so compare the two rows of a pair rather than the
-absolute value against this table.
+another machine will differ, so compare rows against each other rather than
+against this table.
 
 # Limits
 
