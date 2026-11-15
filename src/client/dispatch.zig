@@ -169,7 +169,10 @@ pub const Client = struct {
             .progress = options.progress,
             .address = options.address,
         });
-        errdefer connection.deinit();
+        // The connection is deinit'ed exactly once: here until the client
+        // owns it, and through closeConnection after that.
+        var connection_owned = true;
+        errdefer if (connection_owned) connection.deinit();
 
         try self.openAdapter(connection.reader, connection.writer, .{
             .protocol = connection.protocol,
@@ -180,8 +183,9 @@ pub const Client = struct {
                 .read_cause = connection.cause(),
             },
         });
-        errdefer self.closeConnection();
         dialing.connection = connection;
+        connection_owned = false;
+        errdefer self.closeConnection();
 
         return self.request(.{
             .method_token = options.method_token,
@@ -300,4 +304,72 @@ test "a dialing client with no request yet has no protocol" {
         .authority = "example.com",
         .target = "/",
     }));
+}
+
+test "send releases the connection once when the head exchange fails" {
+    const Fake = struct {
+        const Self = @This();
+
+        reader: Io.Reader = Io.Reader.failing,
+        writer: Io.Writer = Io.Writer.failing,
+        deinits: *usize,
+
+        fn release(ptr: *anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            self.deinits.* += 1;
+            self.* = undefined;
+        }
+
+        fn setDeadline(
+            _: *anyopaque,
+            _: time.OptionalTimestamp,
+        ) error{DeadlineUnsupported}!void {}
+
+        fn readCause(_: *const anyopaque) ?anyerror {
+            return null;
+        }
+
+        fn writeCause(_: *const anyopaque) ?anyerror {
+            return null;
+        }
+
+        const connection_vtable: transport.Connection.VTable = .{
+            .deinit = release,
+            .setDeadline = setDeadline,
+            .readCause = readCause,
+            .writeCause = writeCause,
+        };
+
+        fn connect(ptr: *anyopaque, _: transport.Context) anyerror!transport.Connection {
+            const self: *Self = @ptrCast(@alignCast(ptr));
+            return .{
+                .reader = &self.reader,
+                .writer = &self.writer,
+                .protocol = .h1,
+                .ptr = self,
+                .vtable = &connection_vtable,
+            };
+        }
+
+        const connector_vtable: transport.Connector.VTable = .{ .connect = connect };
+
+        fn handle(self: *Self) transport.Connector {
+            return .{ .ptr = self, .vtable = &connector_vtable };
+        }
+    };
+
+    var deinits: usize = 0;
+    var fake: Fake = .{ .deinits = &deinits };
+    var client: Client = undefined;
+    try client.init(testing.allocator, testing.io, .{ .transport = fake.handle() });
+    defer client.deinit();
+
+    const url = try Url.parse(testing.allocator, "http://example.com/");
+    defer url.deinit(testing.allocator);
+
+    if (client.send(url, .{ .method_token = "GET" })) |_| {
+        return error.TestExpectedError;
+    } else |_| {}
+
+    try testing.expectEqual(@as(usize, 1), deinits);
 }
