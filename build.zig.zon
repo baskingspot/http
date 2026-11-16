@@ -42,7 +42,7 @@
         // TEMPORARY, branch pin for the handed-over trust store. Retarget to
         // the released tarball once baskingspot/tls tags a release with it.
         .tls = .{
-            .url = "git+https://github.com/baskingspot/tls#5269b394e6cdbec4fb33b44cc1628b4eaf9c90ca",
+            .url = "git+https://github.com/baskingspot/tls#7536c6df65205fefcab74a6edae10b0254fcccf8",
             .hash = "tls-0.4.3-nf2MKKyxKgDwfWBdHjEQiL5KQ3cYg3mIZ60ZnRNAVAMg",
             .lazy = true,
         },
