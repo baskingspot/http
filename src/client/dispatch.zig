@@ -133,7 +133,12 @@ pub const Client = struct {
         writer: *Io.Writer,
         config: Config,
     ) !void {
-        self.* = .{ .inner = null, .dialing = null, .last_read_cause = null, .last_write_cause = null };
+        self.* = .{
+            .inner = null,
+            .dialing = null,
+            .last_read_cause = null,
+            .last_write_cause = null,
+        };
         try self.openAdapter(reader, writer, config);
     }
 
@@ -160,6 +165,12 @@ pub const Client = struct {
     /// Dial `url` and send one request over the new connection. The previous
     /// connection is closed first, so the body of its response must already be
     /// closed.
+    ///
+    /// A stop from `RequestOptions.progress` leaves this function as
+    /// `error.Stopped` from a cleartext dial, `error.Canceled` from a TLS dial,
+    /// or `error.ReadFailed` when it ended a read, with `error.Canceled` on
+    /// `readCause`. The connection is closed by then, so the causes are kept
+    /// for exactly this check.
     pub fn send(self: *Client, url: Url, options: RequestOptions) !Response {
         const dialing = if (self.dialing) |*dialing| dialing else return error.NotDialing;
         self.closeConnection();
