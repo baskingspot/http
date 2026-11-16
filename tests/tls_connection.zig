@@ -89,6 +89,9 @@ const ServerThread = struct {
     /// echoing. A request can arrive in several TLS records, so the head is
     /// accumulated until the blank line.
     response: ?[]const u8 = null,
+    /// Milliseconds to hold the connection open after answering, so a test can
+    /// stall a body read.
+    hold_ms: u64 = 0,
     request: [2048]u8 = undefined,
     request_len: usize = 0,
     outcome: ?anyerror = null,
@@ -170,6 +173,12 @@ const ServerThread = struct {
                         const head = self.request[0..self.request_len];
                         if (std.mem.find(u8, head, "\r\n\r\n") != null) {
                             try sendPlain(&server, fd, response);
+                            if (self.hold_ms != 0) {
+                                const hold: Io.Duration = .{
+                                    .nanoseconds = self.hold_ms * std.time.ns_per_ms,
+                                };
+                                try self.io.sleep(hold, .awake);
+                            }
                             return;
                         }
                         continue;
@@ -222,6 +231,7 @@ const Harness = struct {
     const Options = struct {
         alpn: []const []const u8 = &.{"h2"},
         response: ?[]const u8 = null,
+        hold_ms: u64 = 0,
     };
 
     fn init(
@@ -243,6 +253,7 @@ const Harness = struct {
             .leaf = leaf,
             .alpn = options.alpn,
             .response = options.response,
+            .hold_ms = options.hold_ms,
         };
         _ = allocator;
         self.thread = try .spawn(.{}, ServerThread.run, .{&self.thread_data});
@@ -459,4 +470,75 @@ test "a progress hook aborts a handshake the peer never answers" {
     const elapsed = Io.Clock.awake.now(testing.io).nanoseconds - state.start;
     try testing.expect(elapsed < std.time.ns_per_s);
     try testing.expect(state.seen >= 2);
+}
+
+/// Stops a transfer 150 ms in, so a test proves the read came back on its own
+/// rather than when the peer closed.
+const TransferStop = struct {
+    io: Io,
+    start: i96 = 0,
+    after_ns: i96,
+    calls: usize = 0,
+
+    fn step(context: *anyopaque, phase: http.client.transport.Phase) bool {
+        const self: *TransferStop = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        if (phase != .transfer) return true;
+        const now = Io.Clock.awake.now(self.io).nanoseconds;
+        return now - self.start < self.after_ns;
+    }
+};
+
+test "a transfer hook ends a TLS body read the peer stalled" {
+    const allocator = testing.allocator;
+
+    const leaf_der = try derAlloc(allocator, leaf_b64);
+    defer allocator.free(leaf_der);
+    const ca_pem = try pemAlloc(allocator, ca_b64);
+    defer allocator.free(ca_pem);
+
+    var harness: Harness = undefined;
+    try harness.init(allocator, leaf_der, .{
+        .alpn = &.{"http/1.1"},
+        // Five of the twenty declared bytes, then four hundred milliseconds of
+        // silence: only the hook can end the read earlier.
+        .response = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort",
+        .hold_ms = 400,
+    });
+    defer harness.deinit();
+
+    var text: [96]u8 = undefined;
+    const url = try http.client.Url.parse(
+        allocator,
+        try std.mem.print(&text, "https://ztls.server.test:{d}/", .{harness.address.getPort()}),
+    );
+    defer url.deinit(allocator);
+
+    var state: TransferStop = .{ .io = harness.io, .after_ns = 150 * std.time.ns_per_ms };
+    state.start = Io.Clock.awake.now(harness.io).nanoseconds;
+
+    var connector: http_tls.client.Connector = .init(.{ .ca_pem = ca_pem });
+    var client: http.client.Client = undefined;
+    try client.init(allocator, harness.io, .{ .transport = connector.handle() });
+    defer client.deinit();
+
+    var response = try client.send(url, .{
+        .method_token = "GET",
+        .address = harness.address,
+        .progress = .{ .context = &state, .step = TransferStop.step },
+    });
+    defer response.body.abort();
+
+    var got: [20]u8 = undefined;
+    var writer: Io.Writer = .fixed(&got);
+    const started = Io.Clock.awake.now(harness.io).nanoseconds;
+    try testing.expectError(error.ReadFailed, response.body.reader.streamRemaining(&writer));
+    const elapsed = Io.Clock.awake.now(harness.io).nanoseconds - started;
+
+    try testing.expect(elapsed < std.time.ns_per_s);
+    try testing.expectEqual(
+        @as(?http.client.Outcome, .{ .local = .canceled }),
+        response.body.outcome(),
+    );
+    try testing.expect(state.calls >= 2);
 }

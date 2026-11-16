@@ -34,13 +34,14 @@ pub const WriteError = SocketClient.WriteError;
 /// The default offer: HTTP/2, then HTTP/1.1.
 pub const automatic_alpn = [_][]const u8{ "h2", "http/1.1" };
 
-/// A cancellation hook for one handshake. It runs on the task driving the
-/// handshake, never concurrently with the TLS state, and at least every 100 ms
-/// while a handshake read waits. Returning true ends `init` with
-/// `error.Canceled`. The transport clears it when the handshake ends.
-pub const HandshakeCancel = struct {
+/// A cancellation hook for one connection. It runs on the task driving the
+/// TLS state, never concurrently with it, and at least every 100 ms while a
+/// read waits. Returning true ends the handshake, or the pending read, with
+/// `error.Canceled`. `context` must outlive the connection, because the hook
+/// stays installed for its lifetime.
+pub const Cancel = struct {
     context: *anyopaque,
-    /// True ends the handshake.
+    /// True ends the handshake or the pending read.
     shouldCancel: *const fn (context: *anyopaque) bool,
 };
 
@@ -78,10 +79,11 @@ pub const Connection = struct {
         alpn: []const []const u8 = &automatic_alpn,
         /// Absolute monotonic deadline for the handshake and subsequent reads.
         deadline: time.OptionalTimestamp = .none,
-        /// Consulted between handshake steps and while a handshake read waits,
-        /// so a caller can abandon a black-holed handshake instead of waiting
-        /// for the deadline.
-        cancel: ?HandshakeCancel = null,
+        /// Consulted between handshake steps, between application reads, and
+        /// while a read waits, so a caller can abandon a black-holed handshake
+        /// or stop a stream it is blocked on. `context` must outlive the
+        /// connection.
+        cancel: ?Cancel = null,
     };
 
     /// Initialize in the final location. The socket stays caller-owned on
@@ -238,19 +240,13 @@ fn connectorConnect(ptr: *anyopaque, context: transport.Context) anyerror!transp
     const stream = try plain.connectStream(context, .{});
     errdefer stream.close(context.io);
 
-    // The caller's hook covers every phase; the handshake is the one that can
-    // otherwise wait out the whole connect budget.
-    var handshake_cancel: TransportCancel = .{ .progress = context.progress };
-    const cancel: ?HandshakeCancel = if (context.progress != null)
-        .{ .context = &handshake_cancel, .shouldCancel = TransportCancel.shouldCancel }
-    else
-        null;
-
     const wrapped = try context.gpa.create(Wrapped);
     errdefer {
         wrapped.tls.deinit();
         context.gpa.destroy(wrapped);
     }
+    // The hook lives in the connection, not on this stack: the transport keeps
+    // its context pointer for the life of the connection.
     wrapped.* = .{
         .allocator = context.gpa,
         .io = context.io,
@@ -258,7 +254,12 @@ fn connectorConnect(ptr: *anyopaque, context: transport.Context) anyerror!transp
         .tls = undefined,
         .protocol = undefined,
         .deadline = context.deadline,
+        .cancel = .{ .progress = context.progress, .phase = .handshake },
     };
+    const cancel: ?Cancel = if (context.progress != null)
+        .{ .context = &wrapped.cancel, .shouldCancel = TransportCancel.shouldCancel }
+    else
+        null;
     // The handshake gets the connect budget; everything after it gets the
     // exchange deadline.
     try wrapped.tls.init(context.gpa, context.io, stream, .{
@@ -271,22 +272,26 @@ fn connectorConnect(ptr: *anyopaque, context: transport.Context) anyerror!transp
         .cancel = cancel,
     });
     wrapped.tls.setDeadline(context.deadline);
+    // Past the handshake, the same hook covers reads on the live connection.
+    wrapped.cancel.phase = .transfer;
 
     const selected = wrapped.tls.selectedAlpn() orelse return error.WrongAlpn;
     wrapped.protocol = protocolFor(selected) orelse return error.WrongAlpn;
     return wrapped.handle();
 }
 
-/// Bridges the connector's phase-aware hook to the handshake's: every handshake
-/// step is one `.handshake` phase, and the polarity flips because
-/// `transport.Progress` returns true to keep going.
+/// Bridges the connector's phase-aware hook to the transport's: the handshake
+/// reports `.handshake`, a live read reports `.transfer`, and the polarity
+/// flips because `transport.Progress` returns true to keep going. It lives in
+/// the connection because the transport holds the pointer for its lifetime.
 const TransportCancel = struct {
     progress: ?transport.Progress = null,
+    phase: transport.Phase = .handshake,
 
     fn shouldCancel(context: *anyopaque) bool {
         const self: *TransportCancel = @ptrCast(@alignCast(context));
         const progress = self.progress orelse return false;
-        return !progress.run(.handshake);
+        return !progress.run(self.phase);
     }
 };
 
@@ -303,6 +308,9 @@ const Wrapped = struct {
     tls: Connection,
     protocol: client.Protocol,
     deadline: time.OptionalTimestamp,
+    /// The caller's hook, alive for the connection's life because the
+    /// transport holds its context pointer.
+    cancel: TransportCancel = .{},
 
     fn handle(self: *Wrapped) transport.Connection {
         return .{

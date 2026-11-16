@@ -32,11 +32,19 @@ pub const Phase = enum {
     connect,
     /// A transport handshake, such as TLS.
     handshake,
+    /// A read on an established connection. A transport consults this while a
+    /// read waits, so a caller can stop a stream it is blocked on.
+    transfer,
 };
 
 /// A caller hook between blocking steps. A connector calls it before each
-/// blocking step, and a handshake or connect that can wait in slices calls it
-/// between them.
+/// blocking step, and a read or handshake that waits in slices calls it between
+/// them. Returning false abandons the step: the dial reports `error.Stopped`,
+/// and a transfer read reports `error.Canceled` through the body's outcome.
+///
+/// A transport keeps the hook for the connection's lifetime, so `context` must
+/// outlive the connection. The flag behind it may change at any time, which is
+/// what lets another task stop a read.
 pub const Progress = struct {
     context: *anyopaque,
     /// Return false to abandon the attempt. A connector that sees false stops

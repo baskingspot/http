@@ -22,6 +22,12 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `RequestOptions.progress` runs during a body read as well as the dial, so a
+  watcher can stop a stream it is blocked on: the read waits at most 100 ms at
+  a time and a false return ends it with `error.Canceled`, which
+  `body.outcome()` reports as `.local = .canceled`. `transport.Phase` gains
+  `transfer`. A write already blocked on a full socket is not interrupted.
+
 - `client.transport` is the dial seam: a `Connector` turns a `client.Url` into
   a reader, a writer, the negotiated `Protocol`, and one absolute deadline for
   both directions. `http` names no TLS type, so an `https` connector is a

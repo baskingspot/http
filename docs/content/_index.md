@@ -872,6 +872,18 @@ watch with no exchange deadline still cannot hang on a black-holed connect.
 `transport.Connection.setDeadline` moves the deadline for later reads, which is
 how a long-lived watch loop keeps a per-read bound without reconnecting.
 
+`RequestOptions.progress` also runs during a body read. When the hook is set,
+a read waits at most a hundred milliseconds at a time, so returning false ends
+it as `error.ReadFailed` with `error.Canceled` latched, and `body.outcome()`
+reports `.local = .canceled`. That is how a watch loop stops a stream it is
+blocked on without a deadline and without shutting the socket down.
+`body.abort()` then finishes the connection. A write already blocked on a full
+socket is not interrupted.
+
+The connection keeps the hook for its lifetime, so the value behind
+`Progress.context` must outlive the connection; change the flag it points at to
+stop a read. Scoping the context to the connect call is a use-after-free.
+
 `client.Url.parse` splits a URL into the scheme, authority, host, port, and
 origin-form target, with the scheme default port. `client.Url.deinit` releases
 the one allocation a URL can take. `uri.percentEncode` encodes one query

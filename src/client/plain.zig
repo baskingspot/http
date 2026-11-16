@@ -54,6 +54,8 @@ pub const Error = error{
     TimedOut,
     /// The progress hook returned false.
     Stopped,
+    /// The transfer hook asked for a stop during a read.
+    Canceled,
     /// The peer refused the connection.
     ConnectionRefused,
     /// No route to the peer.
@@ -117,6 +119,9 @@ pub const Connection = struct {
     reader: Io.Reader,
     writer: Io.Writer,
     protocol: Protocol,
+    /// Consulted while a read waits, so a caller can stop a stream it is
+    /// blocked on. Borrowed from `Context.progress`.
+    cancel: ?transport.Progress,
     deadline: time.OptionalTimestamp,
     read_cause: ?anyerror,
     write_cause: ?anyerror,
@@ -144,6 +149,7 @@ pub const Connection = struct {
                 .end = 0,
             },
             .protocol = config.protocol,
+            .cancel = context.progress,
             .deadline = context.deadline,
             .read_cause = null,
             .write_cause = null,
@@ -239,43 +245,76 @@ fn readerReadVec(erased: *Io.Reader, data: [][]u8) Io.Reader.Error!usize {
 /// failure latches its cause for `transport.Connection.readCause`.
 fn readOnce(self: *Connection, buffers: [][]u8) Error!usize {
     self.read_cause = null;
-    var storage: [1]Io.Operation.Storage = undefined;
-    var batch: Io.Batch = .init(&storage);
-    const index = batch.add(.{ .net_read = .{
-        .socket_handle = self.stream.socket.handle,
-        .data = buffers,
-    } });
-    waitForRead(self, &batch) catch |err| {
-        self.read_cause = err;
-        return err;
-    };
-    const completion = batch.next() orelse {
-        self.read_cause = error.ConcurrencyUnavailable;
-        return error.ConcurrencyUnavailable;
-    };
-    assert(completion.index == index);
-    const result = completion.result.net_read catch |err| {
-        self.read_cause = err;
-        return error.SystemResources;
-    };
-    return result.data_len;
+    while (true) {
+        if (shouldCancel(self)) {
+            self.read_cause = error.Canceled;
+            return error.Canceled;
+        }
+        var storage: [1]Io.Operation.Storage = undefined;
+        var batch: Io.Batch = .init(&storage);
+        const index = batch.add(.{ .net_read = .{
+            .socket_handle = self.stream.socket.handle,
+            .data = buffers,
+        } });
+        // A cancel slice that expires without data only means the hook gets
+        // another turn; the caller's deadline is what actually ends a read.
+        const whole_wait = waitForRead(self, &batch) catch |err| {
+            self.read_cause = err;
+            return err;
+        };
+        if (!whole_wait) continue;
+        const completion = batch.next() orelse {
+            self.read_cause = error.ConcurrencyUnavailable;
+            return error.ConcurrencyUnavailable;
+        };
+        assert(completion.index == index);
+        const result = completion.result.net_read catch |err| {
+            self.read_cause = err;
+            return error.SystemResources;
+        };
+        return result.data_len;
+    }
 }
 
-/// Wait for the read batch, bounded by the connection's deadline. A timeout
-/// or a cancel has to be reaped before the batch's stack storage dies.
-fn waitForRead(self: *Connection, batch: *Io.Batch) Error!void {
-    const timeout: Io.Timeout = if (self.deadline.get()) |value|
+/// How long one read may wait before the transfer hook is consulted again.
+const cancel_poll_ns: u64 = 100 * std.time.ns_per_ms;
+
+fn shouldCancel(self: *const Connection) bool {
+    const cancel = self.cancel orelse return false;
+    return !cancel.run(.transfer);
+}
+
+/// Wait for the read batch. Returns false when the wait was one cancel slice,
+/// so the caller consults the hook and waits again. A timeout or a cancel is
+/// reaped before the batch's stack storage dies.
+fn waitForRead(self: *Connection, batch: *Io.Batch) Error!bool {
+    const timeout: Io.Timeout = if (waitDeadline(self)) |value|
         .{ .deadline = Io.Timestamp.fromNanoseconds(value.nanoseconds).withClock(.awake) }
     else
         .none;
     batch.awaitConcurrent(self.io, timeout) catch |err| {
         batch.cancel(self.io);
         return switch (err) {
-            error.Timeout => error.TimedOut,
+            error.Timeout => if (self.cancel != null and !expired(self.deadline))
+                false
+            else
+                error.TimedOut,
             error.Canceled => error.Stopped,
             error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
         };
     };
+    return true;
+}
+
+/// The earlier of the caller's deadline and one cancel slice, when the
+/// transfer hook is set.
+fn waitDeadline(self: *const Connection) ?time.Timestamp {
+    if (self.cancel == null) return self.deadline.get();
+    const now = @as(u64, @intCast(time.now(.awake).nanoseconds));
+    const slice = std.math.add(u64, now, cancel_poll_ns) catch std.math.maxInt(u64);
+    const at: time.Timestamp = .fromNanoseconds(slice);
+    const deadline = self.deadline.get() orelse return at;
+    return if (deadline.nanoseconds <= at.nanoseconds) deadline else at;
 }
 
 fn writerDrain(
@@ -938,4 +977,55 @@ test "the client dials and sends through its connector" {
     var writer: Io.Writer = .fixed(&got);
     const used = try response.body.reader.streamRemaining(&writer);
     try testing.expectEqualStrings("hello", got[0..used]);
+}
+
+const TransferStop = struct {
+    io: Io,
+    start: i96 = 0,
+    after_ns: i96,
+    calls: usize = 0,
+
+    fn step(context: *anyopaque, phase: transport.Phase) bool {
+        const self: *TransferStop = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        if (phase != .transfer) return true;
+        const now = Io.Clock.awake.now(self.io).nanoseconds;
+        return now - self.start < self.after_ns;
+    }
+};
+
+test "a transfer hook ends a body read the peer stalled" {
+    var fixture: Fixture = undefined;
+    try fixture.init(
+        "HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nshort",
+        400,
+    );
+    defer fixture.deinit();
+
+    var text: [64]u8 = undefined;
+    const url = try parseFor(fixture.address.getPort(), &text, "http");
+    defer url.deinit(testing.allocator);
+
+    var state: TransferStop = .{ .io = testing.io, .after_ns = 150 * std.time.ns_per_ms };
+    state.start = Io.Clock.awake.now(testing.io).nanoseconds;
+
+    var client: dispatch.Client = undefined;
+    try client.init(testing.allocator, testing.io, .{});
+    defer client.deinit();
+
+    var response = try client.send(url, .{
+        .method_token = "GET",
+        .progress = .{ .context = &state, .step = TransferStop.step },
+    });
+    defer response.body.abort();
+
+    var got: [20]u8 = undefined;
+    var writer: Io.Writer = .fixed(&got);
+    const started = Io.Clock.awake.now(testing.io).nanoseconds;
+    try testing.expectError(error.ReadFailed, response.body.reader.streamRemaining(&writer));
+    const elapsed = Io.Clock.awake.now(testing.io).nanoseconds - started;
+
+    try testing.expect(elapsed < std.time.ns_per_s);
+    try testing.expectEqual(common.Outcome{ .local = .canceled }, response.body.outcome().?);
+    try testing.expect(state.calls >= 2);
 }
