@@ -5,6 +5,17 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `http` requires Zig 0.17. The 0.16 lane is gone: `build.zig.zon` asks for
+  0.17.0, `flake.nix` carries only the 0.17 shell (there is no
+  `nix develop .#zig-old`), and the version shims are removed. `ziglint-0-17`
+  lints against 0.17, so the deprecated `bufPrint`, `allocPrint`, and
+  `StaticBitSet` spellings are now `mem.print`, `Allocator.print`, and
+  `bit_set.Static`. The `hparse` comparison bench row goes with the old lane:
+  hparse 0.2.0 does not compile on 0.17, so `zig build bench` runs the native
+  rows only.
+
 ## [0.5.0] - 2026-11-15
 
 ### Added
@@ -109,14 +120,6 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
-- `http` requires Zig 0.17. The 0.16 lane is gone: `build.zig.zon` asks for
-  0.17.0, `flake.nix` carries only the 0.17 shell (there is no
-  `nix develop .#zig-old`), and the version shims are removed. `ziglint-0-17`
-  lints against 0.17, so the deprecated `bufPrint`, `allocPrint`, and
-  `StaticBitSet` spellings are now `mem.print`, `Allocator.print`, and
-  `bit_set.Static`. The `hparse` comparison bench row goes with the old lane:
-  hparse 0.2.0 does not compile on 0.17, so `zig build bench` runs the native
-  rows only.
 - `client.Body` is `reader`, `outcome()`, and `close()`. Read it with
   `body.reader` and name a failure with `body.outcome()`, which is `.truncated`,
   `.protocol_error`, `.reset` with the RST_STREAM code, or `.local` with a
