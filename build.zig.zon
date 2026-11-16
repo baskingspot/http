@@ -45,8 +45,8 @@
             .lazy = true,
         },
         .cli = .{
-            .url = "https://baskingspot.dev/cli/v0.3.1.tar.gz",
-            .hash = "cli-0.3.1-nGM5m-sVAQB7tupXqokmZpPHajiV5eZPcbUVDRvGgNPb",
+            .url = "https://baskingspot.dev/cli/v0.4.0.tar.gz",
+            .hash = "cli-0.4.0-nGM5m7AQAQCI1x9m-vfTPk0vwfkSxK2Es2NdViVU0wFS",
             .lazy = true,
         },
         .stdx = .{
