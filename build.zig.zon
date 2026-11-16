@@ -39,9 +39,11 @@
             .hash = "testingx-0.5.0-ib95-9FWAwAzwy03e-h52udEnWkVzuV-gCFJTp1IQ5rV",
             .lazy = true,
         },
+        // TEMPORARY, branch pin for the handed-over trust store. Retarget to
+        // the released tarball once baskingspot/tls tags a release with it.
         .tls = .{
-            .url = "https://baskingspot.dev/tls/v0.4.3.tar.gz",
-            .hash = "tls-0.4.3-nf2MKCFQKgDqcxYQdKSVgZB8Rt69RAPb8LbVl6ti_MeY",
+            .url = "git+https://github.com/baskingspot/tls#5a543d7fdb0a05435a15d373f3d55d09957348c2",
+            .hash = "tls-0.4.3-nf2MKHNSKgAqcxtnavSvrgk-khJbnk1iaXKn77UP9t7r",
             .lazy = true,
         },
         .cli = .{

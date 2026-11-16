@@ -46,6 +46,8 @@ pub fn build(b: *std.Build) void {
     if (tls_dep) |dep| {
         http_tls_mod.?.addImport("tls", dep.module("tls"));
         http_tls_mod.?.addImport("tls_nonblocking", dep.module("tls_nonblocking"));
+        // The platform trust store, for the default high-level client.
+        http_tls_mod.?.addImport("tls_std", dep.module("tls_std"));
     }
 
     // Everything below is developer-only. Returning before CLI, the test

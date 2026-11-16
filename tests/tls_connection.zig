@@ -580,3 +580,49 @@ test "the high-level client reaches https with one call" {
     const used = try response.body.reader.streamRemaining(&writer);
     try testing.expectEqualStrings("hello", got[0..used]);
 }
+
+test "the high-level client accepts a trust store the caller loaded" {
+    const allocator = testing.allocator;
+
+    const leaf_der = try derAlloc(allocator, leaf_b64);
+    defer allocator.free(leaf_der);
+    const ca_pem = try pemAlloc(allocator, ca_b64);
+    defer allocator.free(ca_pem);
+
+    var bundle = try http_tls.anchors.build(allocator, ca_pem, now_sec);
+    defer bundle.deinit(allocator);
+
+    var harness: Harness = undefined;
+    try harness.init(allocator, leaf_der, .{
+        .alpn = &.{"http/1.1"},
+        .response = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+    });
+    defer harness.deinit();
+
+    var client: http_tls.Client = undefined;
+    try client.init(allocator, harness.io, .{ .ca_bundle = &bundle });
+    defer client.deinit();
+
+    var text: [96]u8 = undefined;
+    const url = try std.mem.print(
+        &text,
+        "https://ztls.server.test:{d}/v1/secret",
+        .{harness.address.getPort()},
+    );
+    var response = try client.fetch(url, .{
+        .method_token = "GET",
+        .address = harness.address,
+    });
+    defer response.body.close();
+
+    var got: [8]u8 = undefined;
+    var writer: Io.Writer = .fixed(&got);
+    const used = try response.body.reader.streamRemaining(&writer);
+    try testing.expectEqualStrings("hello", got[0..used]);
+}
+
+test "the high-level client loads the platform trust store by default" {
+    var client: http_tls.Client = undefined;
+    try client.init(testing.allocator, testing.io, .{});
+    defer client.deinit();
+}

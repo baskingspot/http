@@ -798,11 +798,12 @@ belongs above this layer, where the connection is opened.
 ## The client
 
 `http_tls.Client` is the one to reach for. It speaks `http` and `https`, picks
-the adapter from the ALPN selection, and keeps the trust anchors you hand it:
+the adapter from the ALPN selection, and trusts the platform store unless you
+hand it anchors:
 
 ```zig
 var client: http_tls.Client = undefined;
-try client.init(allocator, io, .{ .ca_pem = ca_pem });
+try client.init(allocator, io, .{});
 defer client.deinit();
 
 var response = try client.get("https://10.96.0.1:443/apis/v1");
@@ -813,6 +814,11 @@ defer response.body.close();
 `fetch` takes the same URL string with a `RequestOptions` for a method,
 headers, body, deadline, progress hook, or address override, and `send` takes a
 `client.Url` you already parsed.
+
+`init` with no anchors loads the platform trust store through
+`tls_std.trust_store`, and owns it until `deinit`. `.ca_pem` takes PEM bytes,
+or `.ca_bundle` borrows a store you loaded yourself. `.insecure_no_chain_anchor`
+skips the store entirely and is for tests only.
 
 A client keeps one connection alive. The next request to the same scheme, host,
 and port reuses it when the previous body finished cleanly and the peer did not

@@ -14,6 +14,8 @@ const mem = std.mem;
 const testing = std.testing;
 const tls = @import("tls");
 const tls_nonblocking = @import("tls_nonblocking");
+const tls_std = @import("tls_std");
+const anchors = @import("anchors.zig");
 const http = @import("http");
 const time = @import("stdx").time;
 const client = http.client;
@@ -62,8 +64,13 @@ pub const Connection = struct {
     pub const Options = struct {
         /// PEM certificate blocks, as handed by a caller that already holds
         /// them. At least one anchor must load, or `error.NoTrustAnchors`.
-        /// Null trusts nothing unless `insecure_no_chain_anchor` is set.
+        /// Null trusts nothing unless `insecure_no_chain_anchor` is set or
+        /// `ca_bundle` is given.
         ca_pem: ?[]const u8 = null,
+        /// A trust store the caller already loaded, such as the platform
+        /// store. At most one of `ca_pem` and `ca_bundle` may be set, and the
+        /// store must outlive the connection.
+        ca_bundle: ?*const anchors.Bundle = null,
         /// Test/demo opt-out from chain verification. Never set in production.
         /// Hostname verification still runs. Ignored when `ca_pem` is set.
         insecure_no_chain_anchor: bool = false,
@@ -103,6 +110,7 @@ pub const Connection = struct {
         errdefer self.inner.deinit();
         try self.inner.init(allocator, io, socket, .{
             .ca_pem = options.ca_pem,
+            .ca_bundle = options.ca_bundle,
             .insecure_no_chain_anchor = options.insecure_no_chain_anchor,
             .host_name = options.host_name,
             .now_sec = options.now_sec,
@@ -191,8 +199,11 @@ pub const Connection = struct {
 // ast-grep-ignore: public-struct-field-default -- options bag; h2 then h1 by default
 pub const Config = struct {
     /// PEM trust anchors. Null trusts nothing unless
-    /// `insecure_no_chain_anchor` is set.
+    /// `insecure_no_chain_anchor` is set or `ca_bundle` is given.
     ca_pem: ?[]const u8 = null,
+    /// A trust store the caller already loaded. At most one of `ca_pem` and
+    /// `ca_bundle`, and the store must outlive every connection.
+    ca_bundle: ?*const anchors.Bundle = null,
     /// Test/demo opt-out from chain verification. Hostname verification still
     /// runs. Ignored when `ca_pem` is set.
     insecure_no_chain_anchor: bool = false,
@@ -264,6 +275,7 @@ fn connectorConnect(ptr: *anyopaque, context: transport.Context) anyerror!transp
     // exchange deadline.
     try wrapped.tls.init(context.gpa, context.io, stream, .{
         .ca_pem = self.config.ca_pem,
+        .ca_bundle = self.config.ca_bundle,
         .insecure_no_chain_anchor = self.config.insecure_no_chain_anchor,
         .host_name = context.url.host,
         .now_sec = self.config.now_sec orelse realSeconds(),
@@ -392,15 +404,23 @@ test "ALPN selections map to the HTTP adapter" {
 ///
 /// Initialize it in its final location: the core client holds a connector that
 /// points at `tls`.
+// ast-grep-ignore: public-struct-field-default -- connoisseur state; init sets every field
 pub const Client = struct {
     tls: Connector,
     inner: client.Client,
+    allocator: Allocator,
+    /// The platform store, when the caller did not supply anchors.
+    bundle: anchors.Bundle = .empty,
+    owns_bundle: bool = false,
 
     // ast-grep-ignore: public-struct-field-default -- options bag; cleartext h1 and h2-then-h1 ALPN
     pub const Options = struct {
         /// PEM trust anchors. Null trusts nothing unless
-        /// `insecure_no_chain_anchor` is set.
+        /// `insecure_no_chain_anchor` is set or `ca_bundle` is given.
         ca_pem: ?[]const u8 = null,
+        /// A trust store you loaded yourself, borrowed for the client's
+        /// lifetime. At most one of `ca_pem` and `ca_bundle`.
+        ca_bundle: ?*const anchors.Bundle = null,
         /// Test/demo opt-out from chain verification. Hostname verification
         /// still runs. Ignored when `ca_pem` is set.
         insecure_no_chain_anchor: bool = false,
@@ -417,8 +437,32 @@ pub const Client = struct {
     };
 
     pub fn init(self: *Client, allocator: Allocator, io: Io, options: Options) !void {
+        self.* = .{
+            .tls = undefined,
+            .inner = undefined,
+            .allocator = allocator,
+        };
+        errdefer if (self.owns_bundle) self.bundle.deinit(allocator);
+
+        // No anchors and no opt-out means the platform store, which is what a
+        // caller expects from a client that just works.
+        var bundle = options.ca_bundle;
+        if (options.ca_pem == null and options.ca_bundle == null and
+            !options.insecure_no_chain_anchor)
+        {
+            try tls_std.trust_store.loadSystem(
+                &self.bundle,
+                allocator,
+                io,
+                Io.Clock.real.now(io),
+            );
+            self.owns_bundle = true;
+            bundle = &self.bundle;
+        }
+
         self.tls = .init(.{
             .ca_pem = options.ca_pem,
+            .ca_bundle = bundle,
             .insecure_no_chain_anchor = options.insecure_no_chain_anchor,
             .alpn = options.alpn,
         });
@@ -434,6 +478,7 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         self.inner.deinit();
+        if (self.owns_bundle) self.bundle.deinit(self.allocator);
         self.* = undefined;
     }
 
