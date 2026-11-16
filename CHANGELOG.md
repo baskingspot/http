@@ -16,10 +16,10 @@ All notable changes to http are recorded here. The format follows
   dial. The transport gains `setCancel`, because a pooled connection outlives
   the request that dialed it and its transfer hook must be rebound.
 - `http_tls.Client` trusts the platform store when `init` gets no anchors:
-  `ca_pem` takes PEM bytes, `ca_bundle` borrows a store the caller loaded, and
-  neither means `tls_std.trust_store` loads and owns the system store.
-  `http_tls.client.Options.ca_bundle` and the connector's `ca_bundle` pass a
-  loaded `anchors.Bundle` down to the TLS adapter.
+  `trust` takes `.pem` bytes, a borrowed `.bundle`, or `.none`, and `.none`
+  means `tls_std.trust_store` loads and owns the system store.
+  `http_tls.client.Options.trust` and the connector's `trust` pass it down to
+  the TLS adapter.
 - `http_tls.Client` is the high-level client: one type for `http` and `https`,
   a CA handed to `init` once, and the h1 or h2 adapter chosen from the ALPN
   selection. `get(url_text)` is the one-call case; `fetch(url_text, options)`

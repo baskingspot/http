@@ -286,7 +286,7 @@ test "the connection reads and writes plaintext over TLS" {
 
     var conn: Connection = undefined;
     try conn.init(allocator, harness.io, socket, .{
-        .ca_pem = ca_pem,
+        .trust = .{ .pem = ca_pem },
         .host_name = "ztls.server.test",
         .now_sec = now_sec,
         .alpn = &.{"h2"},
@@ -329,7 +329,7 @@ test "a passed deadline ends the wait and reports itself" {
 
     var conn: Connection = undefined;
     try conn.init(allocator, harness.io, socket, .{
-        .ca_pem = ca_pem,
+        .trust = .{ .pem = ca_pem },
         .host_name = "ztls.server.test",
         .now_sec = now_sec,
         .alpn = &.{"h2"},
@@ -377,7 +377,7 @@ test "the connector dials https and serves a request" {
     const url = try http.client.Url.parse(allocator, url_text);
     defer url.deinit(allocator);
 
-    var connector: http_tls.client.Connector = .init(.{ .ca_pem = ca_pem });
+    var connector: http_tls.client.Connector = .init(.{ .trust = .{ .pem = ca_pem } });
     var client: http.client.Client = undefined;
     try client.init(allocator, harness.io, .{ .tls = connector.handle() });
     defer client.deinit();
@@ -517,7 +517,7 @@ test "a transfer hook ends a TLS body read the peer stalled" {
     var state: TransferStop = .{ .io = harness.io, .after_ns = 150 * std.time.ns_per_ms };
     state.start = Io.Clock.awake.now(harness.io).nanoseconds;
 
-    var connector: http_tls.client.Connector = .init(.{ .ca_pem = ca_pem });
+    var connector: http_tls.client.Connector = .init(.{ .trust = .{ .pem = ca_pem } });
     var client: http.client.Client = undefined;
     try client.init(allocator, harness.io, .{ .tls = connector.handle() });
     defer client.deinit();
@@ -559,7 +559,7 @@ test "the high-level client reaches https with one call" {
     defer harness.deinit();
 
     var client: http_tls.Client = undefined;
-    try client.init(allocator, harness.io, .{ .ca_pem = ca_pem });
+    try client.init(allocator, harness.io, .{ .trust = .{ .pem = ca_pem } });
     defer client.deinit();
 
     var text: [96]u8 = undefined;
@@ -600,7 +600,7 @@ test "the high-level client accepts a trust store the caller loaded" {
     defer harness.deinit();
 
     var client: http_tls.Client = undefined;
-    try client.init(allocator, harness.io, .{ .ca_bundle = &bundle });
+    try client.init(allocator, harness.io, .{ .trust = .{ .bundle = &bundle } });
     defer client.deinit();
 
     var text: [96]u8 = undefined;

@@ -36,7 +36,7 @@ test "the client exposes the request surface" {
 test "the anchors builder is reachable through the module name" {
     try testing.expect(@hasDecl(http_tls.anchors, "build"));
     const options: http_tls.client.Connection.Options = .{
-        .ca_pem = "",
+        .trust = .{ .pem = "" },
         .host_name = "example.com",
         .now_sec = 0,
     };

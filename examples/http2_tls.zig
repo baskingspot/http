@@ -89,11 +89,12 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
     defer signer.deinit();
 
     var conn: tls_std.Server = undefined;
+    var scratch: tls_std.Server.Scratch = .init;
     try conn.accept(io, stream, .{
         .cert_chain = &.{cert},
         .signer = signer.signer(),
         .alpn = &.{"h2"},
-    });
+    }, &scratch);
     defer conn.deinit();
     defer conn.close();
 

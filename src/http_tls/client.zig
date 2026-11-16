@@ -62,17 +62,14 @@ pub const Connection = struct {
 
     // ast-grep-ignore: public-struct-field-default -- options bag; h2 is the offer
     pub const Options = struct {
-        /// PEM certificate blocks, as handed by a caller that already holds
-        /// them. At least one anchor must load, or `error.NoTrustAnchors`.
-        /// Null trusts nothing unless `insecure_no_chain_anchor` is set or
-        /// `ca_bundle` is given.
-        ca_pem: ?[]const u8 = null,
-        /// A trust store the caller already loaded, such as the platform
-        /// store. At most one of `ca_pem` and `ca_bundle` may be set, and the
-        /// store must outlive the connection.
-        ca_bundle: ?*const anchors.Bundle = null,
+        /// How to trust the peer: PEM the adapter parses and owns, a store the
+        /// caller loaded and keeps, or nothing (`insecure_no_chain_anchor`
+        /// must then be set). A borrowed store must outlive the connection and
+        /// must not be mutated or deinitialized while it is borrowed.
+        trust: SocketClient.Options.Trust = .none,
         /// Test/demo opt-out from chain verification. Never set in production.
-        /// Hostname verification still runs. Ignored when `ca_pem` is set.
+        /// Hostname verification still runs. Ignored when `trust` is not
+        /// `.none`.
         insecure_no_chain_anchor: bool = false,
         /// ASCII DNS name for SNI and the DNS-ID check. The caller owns the
         /// bytes and must keep them alive for the connection's lifetime.
@@ -109,8 +106,7 @@ pub const Connection = struct {
         };
         errdefer self.inner.deinit();
         try self.inner.init(allocator, io, socket, .{
-            .ca_pem = options.ca_pem,
-            .ca_bundle = options.ca_bundle,
+            .trust = options.trust,
             .insecure_no_chain_anchor = options.insecure_no_chain_anchor,
             .host_name = options.host_name,
             .now_sec = options.now_sec,
@@ -198,14 +194,10 @@ pub const Connection = struct {
 /// How a connector reaches `https` peers.
 // ast-grep-ignore: public-struct-field-default -- options bag; h2 then h1 by default
 pub const Config = struct {
-    /// PEM trust anchors. Null trusts nothing unless
-    /// `insecure_no_chain_anchor` is set or `ca_bundle` is given.
-    ca_pem: ?[]const u8 = null,
-    /// A trust store the caller already loaded. At most one of `ca_pem` and
-    /// `ca_bundle`, and the store must outlive every connection.
-    ca_bundle: ?*const anchors.Bundle = null,
+    /// How to trust the peer; see `Connection.Options.trust`.
+    trust: SocketClient.Options.Trust = .none,
     /// Test/demo opt-out from chain verification. Hostname verification still
-    /// runs. Ignored when `ca_pem` is set.
+    /// runs. Ignored when `trust` is not `.none`.
     insecure_no_chain_anchor: bool = false,
     /// The protocols to offer, in preference order. The peer's choice decides
     /// the HTTP adapter. An empty list offers none, and the connection then
@@ -274,8 +266,7 @@ fn connectorConnect(ptr: *anyopaque, context: transport.Context) anyerror!transp
     // The handshake gets the connect budget; everything after it gets the
     // exchange deadline.
     try wrapped.tls.init(context.gpa, context.io, stream, .{
-        .ca_pem = self.config.ca_pem,
-        .ca_bundle = self.config.ca_bundle,
+        .trust = self.config.trust,
         .insecure_no_chain_anchor = self.config.insecure_no_chain_anchor,
         .host_name = context.url.host,
         .now_sec = self.config.now_sec orelse realSeconds(),
@@ -415,12 +406,11 @@ pub const Client = struct {
 
     // ast-grep-ignore: public-struct-field-default -- options bag; cleartext h1 and h2-then-h1 ALPN
     pub const Options = struct {
-        /// PEM trust anchors. Null trusts nothing unless
-        /// `insecure_no_chain_anchor` is set or `ca_bundle` is given.
-        ca_pem: ?[]const u8 = null,
-        /// A trust store you loaded yourself, borrowed for the client's
-        /// lifetime. At most one of `ca_pem` and `ca_bundle`.
-        ca_bundle: ?*const anchors.Bundle = null,
+        /// How to trust the peer. `.none` loads the platform store, unless
+        /// `insecure_no_chain_anchor` is set. A `.bundle` you pass is borrowed
+        /// for the client's lifetime and must not be mutated while it is
+        /// borrowed.
+        trust: SocketClient.Options.Trust = .none,
         /// Test/demo opt-out from chain verification. Hostname verification
         /// still runs. Ignored when `ca_pem` is set.
         insecure_no_chain_anchor: bool = false,
@@ -446,10 +436,8 @@ pub const Client = struct {
 
         // No anchors and no opt-out means the platform store, which is what a
         // caller expects from a client that just works.
-        var bundle = options.ca_bundle;
-        if (options.ca_pem == null and options.ca_bundle == null and
-            !options.insecure_no_chain_anchor)
-        {
+        var trust = options.trust;
+        if (options.trust == .none and !options.insecure_no_chain_anchor) {
             try tls_std.trust_store.loadSystem(
                 &self.bundle,
                 allocator,
@@ -457,12 +445,11 @@ pub const Client = struct {
                 Io.Clock.real.now(io),
             );
             self.owns_bundle = true;
-            bundle = &self.bundle;
+            trust = .{ .bundle = &self.bundle };
         }
 
         self.tls = .init(.{
-            .ca_pem = options.ca_pem,
-            .ca_bundle = bundle,
+            .trust = trust,
             .insecure_no_chain_anchor = options.insecure_no_chain_anchor,
             .alpn = options.alpn,
         });
