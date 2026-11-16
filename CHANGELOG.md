@@ -5,6 +5,26 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-16
+
+### Added
+
+- `RequestOptions.progress` runs during the TLS handshake and while a handshake
+  read waits, so a cancelled dial stops a black-holed handshake instead of
+  waiting for the connect deadline. `Connection.Options.cancel` exposes the
+  same hook one level down, and a polled read never sets the expired flag.
+- `RequestOptions.progress` runs during a body read as well as the dial, so a
+  watcher can stop a stream it is blocked on: the read waits at most 100 ms at
+  a time and a false return ends it with `error.Canceled`, which
+  `body.outcome()` reports as `.local = .canceled`. `transport.Phase` gains
+  `transfer`. A write already blocked on a full socket is not interrupted.
+
+### Changed
+
+- `client.Client.readCause` and `writeCause` keep the cause after a failing
+  `send` closed the connection, so a canceled or expired head read is still
+  nameable by the caller.
+
 ## [0.6.0] - 2026-11-16
 
 ### Changed
@@ -21,12 +41,6 @@ All notable changes to http are recorded here. The format follows
 ## [0.5.0] - 2026-11-15
 
 ### Added
-
-- `RequestOptions.progress` runs during a body read as well as the dial, so a
-  watcher can stop a stream it is blocked on: the read waits at most 100 ms at
-  a time and a false return ends it with `error.Canceled`, which
-  `body.outcome()` reports as `.local = .canceled`. `transport.Phase` gains
-  `transfer`. A write already blocked on a full socket is not interrupted.
 
 - `client.transport` is the dial seam: a `Connector` turns a `client.Url` into
   a reader, a writer, the negotiated `Protocol`, and one absolute deadline for
@@ -58,18 +72,12 @@ All notable changes to http are recorded here. The format follows
   that may never finish. `close` still drains a bounded amount so an h1
   connection can be reused.
 - `client.Client.readCause` and `writeCause` report why the last read or write
-  failed. They now keep the cause after a failing `send` closed the connection,
-  so a canceled or expired head read is still nameable by the caller.
+  on the open connection failed, for a caller that needs reset versus
+  truncation versus a deadline while a body is still open.
 - `client.transport.Context.connect_deadline`, `client.Options.connect_deadline`,
   and `client.RequestOptions.connect_deadline` bound resolve, connect, and
   handshake independently of the exchange deadline, so a black-holed dial is
   bounded even when the overall deadline is `.none`.
-- `RequestOptions.progress` now also runs during the TLS handshake, and while a
-  handshake read waits, so a cancelled dial stops a black-holed handshake
-  instead of waiting for the connect deadline. `Connection.Options.cancel`
-  exposes the same hook one level down; a polled read never sets the expired
-  flag, and the hook is cleared when the handshake ends so a live connection
-  does not slice reads it cannot cancel.
 - `client.Client.init(io, allocator, options)` takes a transport and
   `send(url, options)` dials, picks the adapter from the negotiated protocol,
   and sends one request. `Options.transport` defaults to cleartext HTTP/1.1,

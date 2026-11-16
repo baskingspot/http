@@ -63,7 +63,7 @@ Not implemented:
 ## Install
 
 ```sh
-zig fetch --save https://baskingspot.dev/http/v0.6.0.tar.gz
+zig fetch --save https://baskingspot.dev/http/v0.6.1.tar.gz
 ```
 
 Add the module in `build.zig`:
