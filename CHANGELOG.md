@@ -5,6 +5,8 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-16
+
 ### Changed
 
 - `http` requires Zig 0.17. The 0.16 lane is gone: `build.zig.zon` asks for
