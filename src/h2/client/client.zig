@@ -172,6 +172,11 @@ pub const Client = struct {
         return self.connection_poisoned;
     }
 
+    /// True when this connection can carry another request.
+    pub fn reusable(self: *const Client) bool {
+        return !self.active and !self.connection_poisoned;
+    }
+
     /// The connection-level GOAWAY boundary, if one arrived. Compare with
     /// `streamId()`: a body result of `truncated` above this boundary was not
     /// processed by the peer.

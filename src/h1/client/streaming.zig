@@ -51,6 +51,9 @@ pub const Client = struct {
     max_header_bytes: usize,
     max_headers: usize,
     read_cause: ?ReadCause,
+    /// Whether the peer said the connection survives this response
+    /// (RFC 9112 §9.3). Set from the head, read by `reusable`.
+    persistent: bool,
     active: bool,
     body_eof: bool,
     body_outcome: ?Outcome,
@@ -84,6 +87,7 @@ pub const Client = struct {
             .max_header_bytes = config.max_header_bytes,
             .max_headers = config.max_headers,
             .read_cause = config.read_cause,
+            .persistent = false,
             .active = false,
             .body_eof = false,
             .body_outcome = null,
@@ -116,6 +120,7 @@ pub const Client = struct {
         if (value.authority.len == 0) return error.InvalidAuthority;
 
         _ = self.arena.reset(.free_all);
+        self.persistent = false;
         self.body_eof = false;
         self.body_outcome = null;
         self.pending = &.{};
@@ -155,6 +160,10 @@ pub const Client = struct {
                         self.dirty = true;
                         return err;
                     };
+                    self.persistent = h1.persistence.persistent(
+                        response.head.version,
+                        response.head.headers,
+                    );
                     self.active = true;
                     return .{
                         .head = head,
@@ -307,6 +316,12 @@ pub const Client = struct {
             error.EmptyBody => .protocol_error,
             else => .protocol_error,
         };
+    }
+
+    /// True when this connection can carry another request: the body finished
+    /// cleanly and the peer kept it alive.
+    pub fn reusable(self: *const Client) bool {
+        return !self.active and !self.dirty and self.persistent;
     }
 
     /// True when the last failure left the response recoverable: our own

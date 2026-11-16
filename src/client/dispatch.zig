@@ -14,6 +14,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
+const mem = std.mem;
 const testing = std.testing;
 const time = @import("stdx").time;
 
@@ -26,6 +27,7 @@ const h1 = @import("../h1/client/streaming.zig");
 const h2 = @import("../h2/client/client.zig");
 
 pub const Protocol = common.Protocol;
+pub const Scheme = common.Scheme;
 pub const Request = common.Request;
 pub const Response = common.Response;
 
@@ -101,6 +103,42 @@ pub const Client = struct {
         connect_deadline: time.OptionalTimestamp,
         /// The byte transport behind `inner`, when one is open.
         connection: ?transport.Connection = null,
+        /// What the open connection reaches, for reuse. Null when nothing is
+        /// open.
+        key: ?Key = null,
+        /// Whether the open connection was dialed with a transfer hook. A hook
+        /// cannot be installed after the fact, so reuse requires a match.
+        hooked: bool = false,
+    };
+
+    /// The origin a pooled connection serves: scheme, host, and port.
+    const Key = struct {
+        scheme: Scheme,
+        port: u16,
+        host_len: u8,
+        host: [Io.net.HostName.max_len]u8,
+
+        fn fromUrl(url: Url) ?Key {
+            if (url.host.len > Io.net.HostName.max_len) return null;
+            var key: Key = .{
+                .scheme = url.scheme,
+                .port = url.port,
+                .host_len = @intCast(url.host.len),
+                .host = undefined,
+            };
+            @memcpy(key.host[0..url.host.len], url.host);
+            return key;
+        }
+
+        fn hostSlice(self: *const Key) []const u8 {
+            return self.host[0..self.host_len];
+        }
+
+        fn matches(self: *const Key, url: Url) bool {
+            return self.scheme == url.scheme and
+                self.port == url.port and
+                mem.eql(u8, self.hostSlice(), url.host);
+        }
     };
 
     /// Initialize a client that dials for itself. Initialize in the final
@@ -191,7 +229,6 @@ pub const Client = struct {
     /// for exactly this check.
     pub fn send(self: *Client, url: Url, options: RequestOptions) !Response {
         const dialing = if (self.dialing) |*dialing| dialing else return error.NotDialing;
-        self.closeConnection();
         self.last_read_cause = null;
         self.last_write_cause = null;
 
@@ -199,6 +236,40 @@ pub const Client = struct {
             options.deadline
         else
             dialing.deadline;
+
+        // A kept-alive connection to the same origin carries the request when
+        // the previous body was finished and the hook shape still fits.
+        if (self.canReuse(&url, options)) {
+            const connection = &dialing.connection.?;
+            try connection.setDeadline(deadline);
+            connection.setCancel(options.progress);
+            return self.request(.{
+                .method_token = options.method_token,
+                .scheme = url.scheme,
+                .authority = url.authority,
+                .target = url.target,
+                .headers = options.headers,
+                .body = options.body,
+            }) catch |err| {
+                // An idle connection can be closed by the peer between
+                // requests. Nothing was received, so one fresh dial is safe.
+                if (err != error.EndOfStream) return err;
+                self.closeConnection();
+                return self.dialAndSend(url, options, deadline);
+            };
+        }
+
+        self.closeConnection();
+        return self.dialAndSend(url, options, deadline);
+    }
+
+    fn dialAndSend(
+        self: *Client,
+        url: Url,
+        options: RequestOptions,
+        deadline: time.OptionalTimestamp,
+    ) !Response {
+        const dialing = if (self.dialing) |*dialing| dialing else return error.NotDialing;
         const connect_deadline = if (options.connect_deadline.get() != null)
             options.connect_deadline
         else
@@ -233,6 +304,8 @@ pub const Client = struct {
             },
         });
         dialing.connection = connection;
+        dialing.key = Key.fromUrl(url);
+        dialing.hooked = options.progress != null;
         connection_owned = false;
         errdefer self.closeConnection();
 
@@ -304,6 +377,21 @@ pub const Client = struct {
         }
     }
 
+    /// True when the open connection reaches `url` and can carry another
+    /// request: its last body was finished and the connection stayed clean.
+    fn canReuse(self: *Client, url: *const Url, options: RequestOptions) bool {
+        const dialing = if (self.dialing) |*dialing| dialing else return false;
+        if (dialing.connection == null) return false;
+        const key = dialing.key orelse return false;
+        if (!key.matches(url.*)) return false;
+        // A hook cannot be added to a connection dialed without one.
+        if ((options.progress != null) != dialing.hooked) return false;
+        return switch (self.inner orelse return false) {
+            .h1 => |*client| client.reusable(),
+            .h2 => |*client| client.reusable(),
+        };
+    }
+
     fn closeConnection(self: *Client) void {
         if (self.inner) |*inner| switch (inner.*) {
             .h1 => |*client| client.deinit(),
@@ -313,6 +401,8 @@ pub const Client = struct {
         if (self.dialing) |*dialing| {
             if (dialing.connection) |*connection| connection.deinit();
             dialing.connection = null;
+            dialing.key = null;
+            dialing.hooked = false;
         }
     }
 };
@@ -392,11 +482,14 @@ test "send releases the connection once when the head exchange fails" {
             return error.TimedOut;
         }
 
+        fn setCancel(_: *anyopaque, _: ?transport.Progress) void {}
+
         const connection_vtable: transport.Connection.VTable = .{
             .deinit = release,
             .setDeadline = setDeadline,
             .readCause = readCause,
             .writeCause = writeCause,
+            .setCancel = setCancel,
         };
 
         fn connect(ptr: *anyopaque, _: transport.Context) anyerror!transport.Connection {

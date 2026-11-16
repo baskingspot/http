@@ -334,7 +334,16 @@ const wrapped_vtable: transport.Connection.VTable = .{
     .setDeadline = wrappedSetDeadline,
     .readCause = wrappedReadCause,
     .writeCause = wrappedWriteCause,
+    .setCancel = wrappedSetCancel,
 };
+
+fn wrappedSetCancel(ptr: *anyopaque, cancel: ?transport.Progress) void {
+    const self: *Wrapped = @ptrCast(@alignCast(ptr));
+    // The tls layer holds `&self.cancel` for the connection's life, so only
+    // the payload changes. A connection dialed without a hook has no bridge;
+    // the client refuses reuse in that case.
+    self.cancel.progress = cancel;
+}
 
 fn wrappedDeinit(ptr: *anyopaque) void {
     const self: *Wrapped = @ptrCast(@alignCast(ptr));

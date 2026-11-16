@@ -178,7 +178,13 @@ const connection_vtable: transport.Connection.VTable = .{
     .setDeadline = connectionSetDeadline,
     .readCause = connectionReadCause,
     .writeCause = connectionWriteCause,
+    .setCancel = connectionSetCancel,
 };
+
+fn connectionSetCancel(ptr: *anyopaque, cancel: ?transport.Progress) void {
+    const self: *Connection = @ptrCast(@alignCast(ptr));
+    self.cancel = cancel;
+}
 
 fn connectionDeinit(ptr: *anyopaque) void {
     const self: *Connection = @ptrCast(@alignCast(ptr));
@@ -1056,4 +1062,142 @@ test "client.get takes a URL and returns the body" {
     var writer: Io.Writer = .fixed(&got);
     const used = try response.body.reader.streamRemaining(&writer);
     try testing.expectEqualStrings("hello", got[0..used]);
+}
+
+/// A loopback peer that answers `connection_budget` connections. On each one it
+/// answers requests until the client closes or the response says `close`.
+const KeepAlive = struct {
+    io: Io,
+    listener: Io.net.Server,
+    address: IpAddress,
+    response: []const u8,
+    connection_budget: usize,
+    accepted: usize = 0,
+    requests: usize = 0,
+    result: ?anyerror = null,
+    thread: std.Thread,
+
+    fn init(
+        self: *KeepAlive,
+        response: []const u8,
+        connection_budget: usize,
+    ) !void {
+        self.* = .{
+            .io = testing.io,
+            .listener = undefined,
+            .address = try .parseLiteral("127.0.0.1:0"),
+            .response = response,
+            .connection_budget = connection_budget,
+            .thread = undefined,
+        };
+        self.listener = try self.address.listen(self.io, .{
+            .mode = .stream,
+            .reuse_address = true,
+        });
+        self.address.setPort(self.listener.socket.address.getPort());
+        self.thread = try .spawn(.{}, run, .{self});
+    }
+
+    fn deinit(self: *KeepAlive) void {
+        self.thread.join();
+        self.listener.deinit(self.io);
+        if (self.result) |err| @panic(@errorName(err));
+        self.* = undefined;
+    }
+
+    fn run(self: *KeepAlive) void {
+        self.serve() catch |err| {
+            self.result = err;
+        };
+    }
+
+    fn serve(self: *KeepAlive) !void {
+        while (self.accepted < self.connection_budget) {
+            const stream = try self.listener.accept(self.io);
+            self.accepted += 1;
+            defer stream.close(self.io);
+
+            var reader = stream.reader(self.io, &.{});
+            var buffer: [256]u8 = undefined;
+            var writer = stream.writer(self.io, &buffer);
+            while (true) {
+                var request: [1024]u8 = undefined;
+                var used: usize = 0;
+                while (used < request.len) {
+                    var iovecs: [1][]u8 = .{request[used..]};
+                    const n = reader.interface.readVec(&iovecs) catch return;
+                    if (n == 0) return;
+                    used += n;
+                    if (mem.find(u8, request[0..used], "\r\n\r\n") != null) break;
+                }
+                self.requests += 1;
+                try writer.interface.writeAll(self.response);
+                try writer.interface.flush();
+                if (mem.find(u8, self.response, "Connection: close") != null) break;
+            }
+        }
+    }
+};
+
+test "a second request reuses the kept-alive connection" {
+    var fixture: KeepAlive = undefined;
+    try fixture.init(
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+        1,
+    );
+    defer fixture.deinit();
+
+    var text: [64]u8 = undefined;
+    const url_text = try mem.print(
+        &text,
+        "http://127.0.0.1:{d}/",
+        .{fixture.address.getPort()},
+    );
+
+    var client: dispatch.Client = undefined;
+    try client.init(testing.allocator, testing.io, .{});
+    defer client.deinit();
+
+    for (0..2) |_| {
+        var response = try client.get(url_text);
+        var got: [2]u8 = undefined;
+        var writer: Io.Writer = .fixed(&got);
+        const used = try response.body.reader.streamRemaining(&writer);
+        try testing.expectEqualStrings("ok", got[0..used]);
+        response.body.close();
+    }
+
+    try testing.expectEqual(@as(usize, 1), fixture.accepted);
+    try testing.expectEqual(@as(usize, 2), fixture.requests);
+}
+
+test "a Connection: close response is not reused" {
+    var fixture: KeepAlive = undefined;
+    try fixture.init(
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        2,
+    );
+    defer fixture.deinit();
+
+    var text: [64]u8 = undefined;
+    const url_text = try mem.print(
+        &text,
+        "http://127.0.0.1:{d}/",
+        .{fixture.address.getPort()},
+    );
+
+    var client: dispatch.Client = undefined;
+    try client.init(testing.allocator, testing.io, .{});
+    defer client.deinit();
+
+    for (0..2) |_| {
+        var response = try client.get(url_text);
+        var got: [2]u8 = undefined;
+        var writer: Io.Writer = .fixed(&got);
+        const used = try response.body.reader.streamRemaining(&writer);
+        try testing.expectEqualStrings("ok", got[0..used]);
+        response.body.close();
+    }
+
+    try testing.expectEqual(@as(usize, 2), fixture.accepted);
 }

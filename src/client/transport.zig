@@ -135,6 +135,10 @@ pub const Connection = struct {
         readCause: *const fn (ptr: *const anyopaque) ?anyerror,
         /// Why the last write failed.
         writeCause: *const fn (ptr: *const anyopaque) ?anyerror,
+        /// Replace the transfer hook. A pooled connection outlives the request
+        /// that dialed it, so the hook must be re-bound before each use; the
+        /// old context may be gone.
+        setCancel: *const fn (ptr: *anyopaque, cancel: ?Progress) void,
     };
 
     pub fn deinit(self: *Connection) void {
@@ -155,6 +159,10 @@ pub const Connection = struct {
 
     pub fn writeCause(self: *const Connection) ?anyerror {
         return self.vtable.writeCause(self.ptr);
+    }
+
+    pub fn setCancel(self: *Connection, cancel: ?Progress) void {
+        self.vtable.setCancel(self.ptr, cancel);
     }
 
     /// Bind this transport to a response body, so a deadline expiry reads as

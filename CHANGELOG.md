@@ -9,6 +9,12 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `Client.send` reuses the open connection for a request to the same scheme,
+  host, and port when the previous body finished and the peer kept the
+  connection alive, so a second request to a host skips the TCP and TLS
+  handshake. A connection the peer closed while idle is retried once on a fresh
+  dial. The transport gains `setCancel`, because a pooled connection outlives
+  the request that dialed it and its transfer hook must be rebound.
 - `http_tls.Client` is the high-level client: one type for `http` and `https`,
   a CA handed to `init` once, and the h1 or h2 adapter chosen from the ALPN
   selection. `get(url_text)` is the one-call case; `fetch(url_text, options)`

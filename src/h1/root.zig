@@ -58,7 +58,8 @@ pub const ClientConn = @import("ClientConn.zig");
 pub const client = @import("client/root.zig");
 pub const engine = @import("engine/root.zig");
 pub const framing = @import("framing.zig");
-pub const persistent = @import("persistence.zig").persistent;
+pub const persistence = @import("persistence.zig");
+pub const persistent = persistence.persistent;
 const syntax = @import("syntax.zig");
 pub const Writer = @import("Writer.zig");
 

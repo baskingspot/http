@@ -812,8 +812,14 @@ defer response.body.close();
 `get` parses the URL with the client's allocator and sends one request.
 `fetch` takes the same URL string with a `RequestOptions` for a method,
 headers, body, deadline, progress hook, or address override, and `send` takes a
-`client.Url` you already parsed. A client holds one connection, and `send`
-closes the previous one, so close the body before the next call.
+`client.Url` you already parsed.
+
+A client keeps one connection alive. The next request to the same scheme, host,
+and port reuses it when the previous body finished cleanly and the peer did not
+send `Connection: close`; otherwise the old connection is closed and a new one
+dialed. So close the body before the next call, and the second request to a
+host pays no TCP or TLS handshake. A reused connection the peer has since
+closed is retried once on a fresh dial.
 
 `http.client.Client` is the same client without TLS: it reaches `http` URLs and
 reports `error.TlsUnsupported` for `https`. `Options.plain` configures the
