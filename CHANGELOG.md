@@ -58,8 +58,8 @@ All notable changes to http are recorded here. The format follows
   that may never finish. `close` still drains a bounded amount so an h1
   connection can be reused.
 - `client.Client.readCause` and `writeCause` report why the last read or write
-  on the open connection failed, for a caller that needs reset versus
-  truncation versus a deadline while a body is still open.
+  failed. They now keep the cause after a failing `send` closed the connection,
+  so a canceled or expired head read is still nameable by the caller.
 - `client.transport.Context.connect_deadline`, `client.Options.connect_deadline`,
   and `client.RequestOptions.connect_deadline` bound resolve, connect, and
   handshake independently of the exchange deadline, so a black-holed dial is

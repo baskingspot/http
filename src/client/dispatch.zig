@@ -73,6 +73,11 @@ pub const Client = struct {
     inner: ?Inner,
     /// The dialing form. Null when the caller attached a reader and writer.
     dialing: ?Dialing,
+    /// A transport cause latched when a failing exchange closed the connection
+    /// before the caller could ask it. `readCause` and `writeCause` fall back
+    /// to these.
+    last_read_cause: ?anyerror,
+    last_write_cause: ?anyerror,
 
     const Inner = union(Protocol) {
         h1: h1.Client,
@@ -101,6 +106,8 @@ pub const Client = struct {
         if (options.max_headers == 0) return error.InvalidConfig;
         self.* = .{
             .inner = null,
+            .last_read_cause = null,
+            .last_write_cause = null,
             .dialing = .{
                 .io = io,
                 .allocator = allocator,
@@ -126,7 +133,7 @@ pub const Client = struct {
         writer: *Io.Writer,
         config: Config,
     ) !void {
-        self.* = .{ .inner = null, .dialing = null };
+        self.* = .{ .inner = null, .dialing = null, .last_read_cause = null, .last_write_cause = null };
         try self.openAdapter(reader, writer, config);
     }
 
@@ -142,6 +149,11 @@ pub const Client = struct {
         return switch (self.inner orelse return error.NotOpen) {
             .h1 => |*client| client.request(value),
             .h2 => |*client| client.request(value),
+        } catch |err| {
+            // A failing send closes the connection on the way out, so keep the
+            // cause the caller can no longer reach.
+            self.latchCause();
+            return err;
         };
     }
 
@@ -151,6 +163,8 @@ pub const Client = struct {
     pub fn send(self: *Client, url: Url, options: RequestOptions) !Response {
         const dialing = if (self.dialing) |*dialing| dialing else return error.NotDialing;
         self.closeConnection();
+        self.last_read_cause = null;
+        self.last_write_cause = null;
 
         const deadline = if (options.deadline.get() != null)
             options.deadline
@@ -208,17 +222,27 @@ pub const Client = struct {
     /// local cause such as a deadline. `Body.outcome` carries the same
     /// information on the body itself.
     pub fn readCause(self: *const Client) ?anyerror {
-        const dialing = self.dialing orelse return null;
-        if (dialing.connection) |*connection| return connection.readCause();
-        return null;
+        if (self.dialing) |dialing| {
+            if (dialing.connection) |connection| return connection.readCause();
+        }
+        return self.last_read_cause;
     }
 
-    /// Why the last write on the open connection failed. Valid while a response
-    /// body is open.
+    /// Why the last write on the open connection failed. Falls back to the cause
+    /// latched by a failing exchange, which closed the connection.
     pub fn writeCause(self: *const Client) ?anyerror {
-        const dialing = self.dialing orelse return null;
-        if (dialing.connection) |*connection| return connection.writeCause();
-        return null;
+        if (self.dialing) |dialing| {
+            if (dialing.connection) |connection| return connection.writeCause();
+        }
+        return self.last_write_cause;
+    }
+
+    /// Keep the transport's causes before a failure closes the connection.
+    fn latchCause(self: *Client) void {
+        const dialing = if (self.dialing) |*dialing| dialing else return;
+        const connection = if (dialing.connection) |*connection| connection else return;
+        self.last_read_cause = connection.readCause();
+        self.last_write_cause = connection.writeCause();
     }
 
     fn openAdapter(
@@ -326,11 +350,11 @@ test "send releases the connection once when the head exchange fails" {
         ) error{DeadlineUnsupported}!void {}
 
         fn readCause(_: *const anyopaque) ?anyerror {
-            return null;
+            return error.Canceled;
         }
 
         fn writeCause(_: *const anyopaque) ?anyerror {
-            return null;
+            return error.TimedOut;
         }
 
         const connection_vtable: transport.Connection.VTable = .{
@@ -372,4 +396,7 @@ test "send releases the connection once when the head exchange fails" {
     } else |_| {}
 
     try testing.expectEqual(@as(usize, 1), deinits);
+    // The connection is gone by now, so the causes have to survive it.
+    try testing.expectEqual(@as(?anyerror, error.Canceled), client.readCause());
+    try testing.expectEqual(@as(?anyerror, error.TimedOut), client.writeCause());
 }
