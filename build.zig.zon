@@ -50,8 +50,8 @@
             .lazy = true,
         },
         .stdx = .{
-            .url = "https://baskingspot.dev/stdx/v0.5.0.tar.gz",
-            .hash = "stdx-0.5.0-CcWegogqEQAvbEzD5F1r02a42hPX7GV82njuREakeC3a",
+            .url = "https://baskingspot.dev/stdx/v0.6.0.tar.gz",
+            .hash = "stdx-0.6.0-CcWegpsXEQBPvqhuSRRDiRjq08s5gXavvTuvoL-Bo3BE",
         },
     },
     .paths = .{
