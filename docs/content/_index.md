@@ -797,18 +797,27 @@ belongs above this layer, where the connection is opened.
 
 ## The client
 
-`client.Client` has two modes. `init` gives it a dialer, and `send` opens the
-connection, picks the adapter from the negotiated protocol, and sends one
-request:
+`http_tls.Client` is the one to reach for. It speaks `http` and `https`, picks
+the adapter from the ALPN selection, and keeps the trust anchors you hand it:
 
 ```zig
-var client: http.client.Client = undefined;
-try client.init(gpa, io, .{ .transport = tls_connector.handle() });
+var client: http_tls.Client = undefined;
+try client.init(allocator, io, .{ .ca_pem = ca_pem });
 defer client.deinit();
 
-var response = try client.send(url, .{ .method_token = "GET" });
+var response = try client.get("https://10.96.0.1:443/apis/v1");
 defer response.body.close();
 ```
+
+`get` parses the URL with the client's allocator and sends one request.
+`fetch` takes the same URL string with a `RequestOptions` for a method,
+headers, body, deadline, progress hook, or address override, and `send` takes a
+`client.Url` you already parsed. A client holds one connection, and `send`
+closes the previous one, so close the body before the next call.
+
+`http.client.Client` is the same client without TLS: it reaches `http` URLs and
+reports `error.TlsUnsupported` for `https`. `Options.plain` configures the
+cleartext side, and `Options.tls` supplies the connector `http_tls` builds.
 
 `attached` is the mode for a socket you already own: it takes a reader and a
 writer and never dials, bounds, or closes anything. That is the layer
@@ -828,22 +837,24 @@ reused.
 negotiated `Protocol`, and one absolute deadline for both directions. The
 dialer is the only thing that needs to know how a socket is opened.
 
-`client.plain` is the cleartext connector and the default: a client with no
-`.transport` speaks cleartext HTTP/1.1 with these options. `Connector.init(.{ .protocol = .h1 })`
-gives a value whose `handle()` is a `client.transport.Connector`. It resolves
-the host, tries each address in order, sets `TCP_NODELAY`, and reports
-`error.TlsUnsupported` for an `https` URL rather than sending cleartext to a
-TLS port.
+`client.plain` is the cleartext connector and the default for `http` URLs.
+`Options.plain` configures it: `.protocol = .h2` is h2c prior knowledge.
+It resolves the host, tries each address in order, sets `TCP_NODELAY`, and
+reports `error.TlsUnsupported` for an `https` URL rather than sending cleartext
+to a TLS port.
 
 `http_tls.client.Connector` is the same seam for `https`. It reuses the
 cleartext dial, runs the handshake with the caller's CA, offers an ALPN list,
 and reports the selected protocol, so the client picks the h1 or h2 adapter
 without the caller looking at ALPN:
 
+`http_tls.Client` wires this for you. To do it by hand, hand the connector to
+the core client as `Options.tls`:
+
 ```zig
 var connector: http_tls.client.Connector = .init(.{ .ca_pem = ca_pem });
 var client: http.client.Client = undefined;
-try client.init(io, gpa, .{ .transport = connector.handle() });
+try client.init(gpa, io, .{ .tls = connector.handle() });
 ```
 
 `Config.alpn` defaults to `h2` then `http/1.1`; a peer that selects neither is

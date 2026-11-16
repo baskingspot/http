@@ -23,6 +23,9 @@ pub const Bundle = anchors.Bundle;
 /// A plaintext connection over TLS: reader, writer, one deadline.
 pub const client = @import("http_tls/client.zig");
 
+/// The high-level client: `http` and `https` through one type.
+pub const Client = client.Client;
+
 pub const h2 = struct {
     pub const transport = struct {
         pub const tls_client = tls_client_impl;

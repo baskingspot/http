@@ -9,6 +9,16 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `http_tls.Client` is the high-level client: one type for `http` and `https`,
+  a CA handed to `init` once, and the h1 or h2 adapter chosen from the ALPN
+  selection. `get(url_text)` is the one-call case; `fetch(url_text, options)`
+  adds method, headers, body, deadline, progress, and address override.
+- `client.Client.get` and `client.Client.fetch` take a URL string, parse it
+  with the client's allocator, and release it before returning.
+- `client.Options.plain` configures the cleartext connector, and
+  `client.Options.tls` supplies the `https` connector. `send` picks by scheme,
+  so one client reaches both protocols and an `https` URL without a TLS
+  connector is `error.TlsUnsupported`.
 - `RequestOptions.progress` runs during the TLS handshake and while a handshake
   read waits, so a cancelled dial stops a black-holed handshake instead of
   waiting for the connect deadline. `Connection.Options.cancel` exposes the

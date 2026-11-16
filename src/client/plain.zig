@@ -1029,3 +1029,31 @@ test "a transfer hook ends a body read the peer stalled" {
     try testing.expectEqual(common.Outcome{ .local = .canceled }, response.body.outcome().?);
     try testing.expect(state.calls >= 2);
 }
+
+test "client.get takes a URL and returns the body" {
+    var fixture: Fixture = undefined;
+    try fixture.init(
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+        0,
+    );
+    defer fixture.deinit();
+
+    var text: [64]u8 = undefined;
+    const url_text = try mem.print(
+        &text,
+        "http://127.0.0.1:{d}/",
+        .{fixture.address.getPort()},
+    );
+
+    var client: dispatch.Client = undefined;
+    try client.init(testing.allocator, testing.io, .{});
+    defer client.deinit();
+
+    var response = try client.get(url_text);
+    defer response.body.close();
+
+    var got: [8]u8 = undefined;
+    var writer: Io.Writer = .fixed(&got);
+    const used = try response.body.reader.streamRemaining(&writer);
+    try testing.expectEqualStrings("hello", got[0..used]);
+}

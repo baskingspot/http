@@ -368,3 +368,96 @@ test "ALPN selections map to the HTTP adapter" {
     try testing.expectEqual(@as(?client.Protocol, null), protocolFor("acme/1"));
     try testing.expectEqual(@as(?client.Protocol, null), protocolFor(""));
 }
+
+/// The easiest client in the package: one type for `http` and `https`, with the
+/// adapter picked from the ALPN selection.
+///
+/// ```zig
+/// var client: http_tls.Client = undefined;
+/// try client.init(allocator, io, .{ .ca_pem = ca_pem });
+/// defer client.deinit();
+///
+/// var response = try client.get("https://10.96.0.1:443/apis/v1");
+/// defer response.body.close();
+/// ```
+///
+/// Initialize it in its final location: the core client holds a connector that
+/// points at `tls`.
+pub const Client = struct {
+    tls: Connector,
+    inner: client.Client,
+
+    // ast-grep-ignore: public-struct-field-default -- options bag; cleartext h1 and h2-then-h1 ALPN
+    pub const Options = struct {
+        /// PEM trust anchors. Null trusts nothing unless
+        /// `insecure_no_chain_anchor` is set.
+        ca_pem: ?[]const u8 = null,
+        /// Test/demo opt-out from chain verification. Hostname verification
+        /// still runs. Ignored when `ca_pem` is set.
+        insecure_no_chain_anchor: bool = false,
+        /// Protocols offered on a TLS connection, in preference order.
+        alpn: []const []const u8 = &automatic_alpn,
+        /// Cleartext settings, used for `http` URLs.
+        plain: plain.Config = .{},
+        /// Deadline for every exchange that does not set its own.
+        deadline: time.OptionalTimestamp = .none,
+        /// Dial budget for every exchange that does not set its own.
+        connect_deadline: time.OptionalTimestamp = .none,
+        max_header_bytes: usize = 16 * 1024,
+        max_headers: usize = 128,
+    };
+
+    pub fn init(self: *Client, allocator: Allocator, io: Io, options: Options) !void {
+        self.tls = .init(.{
+            .ca_pem = options.ca_pem,
+            .insecure_no_chain_anchor = options.insecure_no_chain_anchor,
+            .alpn = options.alpn,
+        });
+        try self.inner.init(allocator, io, .{
+            .plain = options.plain,
+            .tls = self.tls.handle(),
+            .max_header_bytes = options.max_header_bytes,
+            .max_headers = options.max_headers,
+            .deadline = options.deadline,
+            .connect_deadline = options.connect_deadline,
+        });
+    }
+
+    pub fn deinit(self: *Client) void {
+        self.inner.deinit();
+        self.* = undefined;
+    }
+
+    /// One `GET` to an `http` or `https` URL.
+    pub fn get(self: *Client, url_text: []const u8) !client.Response {
+        return self.inner.get(url_text);
+    }
+
+    pub fn fetch(
+        self: *Client,
+        url_text: []const u8,
+        options: client.RequestOptions,
+    ) !client.Response {
+        return self.inner.fetch(url_text, options);
+    }
+
+    pub fn send(
+        self: *Client,
+        url: client.Url,
+        options: client.RequestOptions,
+    ) !client.Response {
+        return self.inner.send(url, options);
+    }
+
+    pub fn protocol(self: *const Client) ?client.Protocol {
+        return self.inner.protocol();
+    }
+
+    pub fn readCause(self: *const Client) ?anyerror {
+        return self.inner.readCause();
+    }
+
+    pub fn writeCause(self: *const Client) ?anyerror {
+        return self.inner.writeCause();
+    }
+};

@@ -3,6 +3,8 @@
 pub const common = @import("common.zig");
 pub const frame_queue = @import("frame_queue.zig");
 pub const Client = @import("dispatch.zig").Client;
+pub const Options = @import("dispatch.zig").Options;
+pub const RequestOptions = @import("dispatch.zig").RequestOptions;
 pub const Url = @import("../uri.zig").Url;
 pub const transport = @import("transport.zig");
 pub const plain = @import("plain.zig");

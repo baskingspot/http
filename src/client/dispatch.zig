@@ -37,9 +37,13 @@ pub const Config = struct {
 
 // ast-grep-ignore: public-struct-field-default -- options bag; cleartext h1 by default
 pub const Options = struct {
-    /// How to reach a peer. Null speaks cleartext HTTP/1.1 through
-    /// `client.plain` with its defaults.
-    transport: ?transport.Connector = null,
+    /// Cleartext settings, used for `http` URLs. `.protocol = .h2` is h2c
+    /// prior knowledge.
+    plain: plain.Config = .{},
+    /// Connector for `https` URLs, from `http_tls.client.Connector.handle` or
+    /// another transport. Null makes an `https` URL `error.TlsUnsupported`.
+    /// The connector behind it must outlive the client.
+    tls: ?transport.Connector = null,
     /// Largest response field section, in bytes.
     max_header_bytes: usize = 16 * 1024,
     /// Largest response field count.
@@ -87,11 +91,10 @@ pub const Client = struct {
     const Dialing = struct {
         io: Io,
         allocator: Allocator,
-        /// Either the caller's handle or `default_transport.handle()`.
-        connector: transport.Connector,
-        /// Stable storage for the handle above, so the client does not have to
-        /// carry a pointer to something the caller keeps alive.
-        default_transport: plain.Connector,
+        /// The cleartext connector, in place so the client owns its storage.
+        plain_transport: plain.Connector,
+        /// The caller's `https` connector, borrowed for the client's lifetime.
+        tls: ?transport.Connector,
         max_header_bytes: usize,
         max_headers: usize,
         deadline: time.OptionalTimestamp,
@@ -111,8 +114,8 @@ pub const Client = struct {
             .dialing = .{
                 .io = io,
                 .allocator = allocator,
-                .connector = undefined,
-                .default_transport = .init(.{}),
+                .plain_transport = .init(options.plain),
+                .tls = options.tls,
                 .max_header_bytes = options.max_header_bytes,
                 .max_headers = options.max_headers,
                 .deadline = options.deadline,
@@ -120,8 +123,6 @@ pub const Client = struct {
                 .connection = null,
             },
         };
-        const dialing = &self.dialing.?;
-        dialing.connector = options.transport orelse dialing.default_transport.handle();
     }
 
     /// Initialize a client over a reader and writer somebody else opened, and
@@ -162,6 +163,23 @@ pub const Client = struct {
         };
     }
 
+    /// Dial and send one request to `url_text`. The URL is parsed with this
+    /// client's allocator and released before the response is returned.
+    pub fn fetch(self: *Client, url_text: []const u8, options: RequestOptions) !Response {
+        const allocator = if (self.dialing) |dialing|
+            dialing.allocator
+        else
+            return error.NotDialing;
+        var url = try Url.parse(allocator, url_text);
+        defer url.deinit(allocator);
+        return self.send(url, options);
+    }
+
+    /// One `GET`. The common case.
+    pub fn get(self: *Client, url_text: []const u8) !Response {
+        return self.fetch(url_text, .{ .method_token = "GET" });
+    }
+
     /// Dial `url` and send one request over the new connection. The previous
     /// connection is closed first, so the body of its response must already be
     /// closed.
@@ -185,7 +203,13 @@ pub const Client = struct {
             options.connect_deadline
         else
             dialing.connect_deadline;
-        var connection = try dialing.connector.connect(.{
+        // The scheme chooses the transport: cleartext, or the TLS connector the
+        // caller supplied. A client without one cannot reach `https`.
+        const connector = switch (url.scheme) {
+            .http => dialing.plain_transport.handle(),
+            .https => dialing.tls orelse return error.TlsUnsupported,
+        };
+        var connection = try connector.connect(.{
             .io = dialing.io,
             .gpa = dialing.allocator,
             .url = url,
@@ -396,10 +420,11 @@ test "send releases the connection once when the head exchange fails" {
     var deinits: usize = 0;
     var fake: Fake = .{ .deinits = &deinits };
     var client: Client = undefined;
-    try client.init(testing.allocator, testing.io, .{ .transport = fake.handle() });
+    try client.init(testing.allocator, testing.io, .{ .tls = fake.handle() });
     defer client.deinit();
 
-    const url = try Url.parse(testing.allocator, "http://example.com/");
+    // https selects the fake TLS connector; http would dial the real plain one.
+    const url = try Url.parse(testing.allocator, "https://example.com/");
     defer url.deinit(testing.allocator);
 
     if (client.send(url, .{ .method_token = "GET" })) |_| {
@@ -410,4 +435,22 @@ test "send releases the connection once when the head exchange fails" {
     // The connection is gone by now, so the causes have to survive it.
     try testing.expectEqual(@as(?anyerror, error.Canceled), client.readCause());
     try testing.expectEqual(@as(?anyerror, error.TimedOut), client.writeCause());
+}
+
+test "an https URL needs a TLS connector" {
+    var client: Client = undefined;
+    try client.init(testing.allocator, testing.io, .{});
+    defer client.deinit();
+    try testing.expectError(error.TlsUnsupported, client.get("https://example.com/"));
+}
+
+test "a client that only attached a socket has no URL entry point" {
+    var failing_reader = Io.Reader.failing;
+    var failing_writer = Io.Writer.failing;
+    var client: Client = undefined;
+    try client.attached(&failing_reader, &failing_writer, .{
+        .common = .{ .allocator = testing.allocator },
+    });
+    defer client.deinit();
+    try testing.expectError(error.NotDialing, client.get("http://127.0.0.1:1/"));
 }
