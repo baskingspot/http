@@ -5,8 +5,6 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
-## [0.6.1] - 2026-11-16
-
 ### Added
 
 - `Client.send` reuses the open connection for a request to the same scheme,
@@ -30,6 +28,11 @@ All notable changes to http are recorded here. The format follows
   `client.Options.tls` supplies the `https` connector. `send` picks by scheme,
   so one client reaches both protocols and an `https` URL without a TLS
   connector is `error.TlsUnsupported`.
+
+## [0.6.1] - 2026-11-16
+
+### Added
+
 - `RequestOptions.progress` runs during the TLS handshake and while a handshake
   read waits, so a cancelled dial stops a black-holed handshake instead of
   waiting for the connect deadline. `Connection.Options.cancel` exposes the
