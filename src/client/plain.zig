@@ -30,6 +30,7 @@ const IpAddress = Io.net.IpAddress;
 const Header = @import("../header.zig").Header;
 const common = @import("common.zig");
 const transport = @import("transport.zig");
+const BufferedWriter = @import("buffered_writer.zig").BufferedWriter;
 const Protocol = transport.Protocol;
 const Url = @import("../uri.zig").Url;
 
@@ -118,7 +119,9 @@ pub const Connection = struct {
     io: Io,
     stream: Io.net.Stream,
     reader: Io.Reader,
-    writer: Io.Writer,
+    raw_writer: Io.Writer,
+    /// Batches the request head and body chunks into one write each.
+    out: BufferedWriter,
     protocol: Protocol,
     /// Consulted while a read waits, so a caller can stop a stream it is
     /// blocked on. Borrowed from `Context.progress`.
@@ -144,24 +147,26 @@ pub const Connection = struct {
                 .seek = 0,
                 .end = 0,
             },
-            .writer = .{
+            .raw_writer = .{
                 .vtable = &writer_vtable,
                 .buffer = &.{},
                 .end = 0,
             },
+            .out = undefined,
             .protocol = config.protocol,
             .cancel = context.progress,
             .deadline = context.deadline,
             .read_cause = null,
             .write_cause = null,
         };
+        self.out.init(&self.raw_writer);
         return self;
     }
 
     fn handle(self: *Connection) transport.Connection {
         return .{
             .reader = &self.reader,
-            .writer = &self.writer,
+            .writer = self.out.writer(),
             .protocol = self.protocol,
             .ptr = self,
             .vtable = &connection_vtable,
@@ -329,7 +334,7 @@ fn writerDrain(
     data: []const []const u8,
     splat: usize,
 ) Io.Writer.Error!usize {
-    const self: *Connection = @alignCast(@fieldParentPtr("writer", w));
+    const self: *Connection = @alignCast(@fieldParentPtr("raw_writer", w));
     self.write_cause = null;
     var total: usize = 0;
     for (data, 0..) |slice, index| {

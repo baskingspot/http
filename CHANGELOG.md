@@ -59,6 +59,9 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
+- The cleartext connector buffers its writes, so a request head leaves as one
+  write instead of one syscall per field. A loopback request through
+  `client.Client` drops from about 39 µs to 14 µs in `bench/compare`.
 - `client.Client.readCause` and `writeCause` keep the cause after a failing
   `send` closed the connection, so a canceled or expired head read is still
   nameable by the caller.

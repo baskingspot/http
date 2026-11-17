@@ -318,7 +318,7 @@ const Wrapped = struct {
     /// write straight to a TLS record, so without this the h1 head crosses the
     /// wire as one record per field and a peer that reads per record sees a
     /// partial head. One buffer batches the head and each body chunk.
-    out: Buffered = .{},
+    out: client.BufferedWriter = .{},
 
     fn handle(self: *Wrapped) transport.Connection {
         self.out.init(self.tls.writer());
@@ -335,54 +335,6 @@ const Wrapped = struct {
         self.tls.deinit();
         self.stream.close(self.io);
         self.* = undefined;
-    }
-};
-
-const Buffered = struct {
-    data: [16 * 1024]u8 = undefined,
-    inner: *Io.Writer = undefined,
-    interface: Io.Writer = undefined,
-
-    fn init(self: *Buffered, inner: *Io.Writer) void {
-        self.inner = inner;
-        self.interface = .{
-            .vtable = &vtable,
-            .buffer = &self.data,
-            .end = 0,
-        };
-    }
-
-    fn writer(self: *Buffered) *Io.Writer {
-        return &self.interface;
-    }
-
-    const vtable: Io.Writer.VTable = .{ .drain = drain };
-
-    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const self: *Buffered = @fieldParentPtr("interface", w);
-        var total: usize = 0;
-        const buffered = w.buffered();
-        if (buffered.len != 0) {
-            _ = self.inner.vtable.drain(self.inner, &.{buffered}, 1) catch
-                return error.WriteFailed;
-            total += buffered.len;
-        }
-        if (data.len != 0) {
-            for (data[0 .. data.len - 1]) |slice| {
-                if (slice.len == 0) continue;
-                _ = self.inner.vtable.drain(self.inner, &.{slice}, 1) catch
-                    return error.WriteFailed;
-                total += slice.len;
-            }
-            const last = data[data.len - 1];
-            for (0..splat) |_| {
-                if (last.len == 0) continue;
-                _ = self.inner.vtable.drain(self.inner, &.{last}, 1) catch
-                    return error.WriteFailed;
-                total += last.len;
-            }
-        }
-        return w.consume(total);
     }
 };
 

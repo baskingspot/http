@@ -7,6 +7,7 @@ pub const Options = @import("dispatch.zig").Options;
 pub const RequestOptions = @import("dispatch.zig").RequestOptions;
 pub const Url = @import("../uri.zig").Url;
 pub const transport = @import("transport.zig");
+pub const BufferedWriter = @import("buffered_writer.zig").BufferedWriter;
 pub const plain = @import("plain.zig");
 pub const Protocol = common.Protocol;
 pub const Scheme = common.Scheme;
@@ -31,6 +32,7 @@ test {
     _ = Client;
     _ = Url;
     _ = transport;
+    _ = BufferedWriter;
     _ = plain;
     _ = @import("../uri.zig");
     _ = frame_queue;
