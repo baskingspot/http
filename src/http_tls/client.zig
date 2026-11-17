@@ -393,11 +393,13 @@ test "ALPN selections map to the HTTP adapter" {
 /// defer response.body.close();
 /// ```
 ///
-/// Initialize it in its final location: the core client holds a connector that
-/// points at `tls`.
+/// Initialize it with `create`, or in place; the connector is allocated, so the
+/// struct may move after `init`.
 // ast-grep-ignore: public-struct-field-default -- connoisseur state; init sets every field
 pub const Client = struct {
-    tls: Connector,
+    /// Allocated so the client can move after `init`; the core client holds a
+    /// connector pointing here.
+    tls: *Connector,
     inner: client.Client,
     allocator: Allocator,
     /// The platform store, when the caller did not supply anchors.
@@ -434,6 +436,10 @@ pub const Client = struct {
         };
         errdefer if (self.owns_bundle) self.bundle.deinit(allocator);
 
+        const connector = try allocator.create(Connector);
+        errdefer allocator.destroy(connector);
+        self.tls = connector;
+
         // No anchors and no opt-out means the platform store, which is what a
         // caller expects from a client that just works.
         var trust = options.trust;
@@ -448,7 +454,7 @@ pub const Client = struct {
             trust = .{ .bundle = &self.bundle };
         }
 
-        self.tls = .init(.{
+        connector.* = .init(.{
             .trust = trust,
             .insecure_no_chain_anchor = options.insecure_no_chain_anchor,
             .alpn = options.alpn,
@@ -463,9 +469,25 @@ pub const Client = struct {
         });
     }
 
+    /// Allocate a client and initialize it. Release it with `destroy`.
+    pub fn create(allocator: Allocator, io: Io, options: Options) !*Client {
+        const self = try allocator.create(Client);
+        errdefer allocator.destroy(self);
+        try self.init(allocator, io, options);
+        return self;
+    }
+
+    /// Release a client made by `create`.
+    pub fn destroy(self: *Client) void {
+        const allocator = self.allocator;
+        self.deinit();
+        allocator.destroy(self);
+    }
+
     pub fn deinit(self: *Client) void {
         self.inner.deinit();
         if (self.owns_bundle) self.bundle.deinit(self.allocator);
+        self.allocator.destroy(self.tls);
         self.* = undefined;
     }
 

@@ -27,6 +27,7 @@ const time = stdx.time;
 const HostName = Io.net.HostName;
 const IpAddress = Io.net.IpAddress;
 
+const Header = @import("../header.zig").Header;
 const common = @import("common.zig");
 const transport = @import("transport.zig");
 const Protocol = transport.Protocol;
@@ -1071,6 +1072,12 @@ const KeepAlive = struct {
     listener: Io.net.Server,
     address: IpAddress,
     response: []const u8,
+    /// Answers served in order when non-empty, one per request.
+    responses: []const []const u8 = &.{},
+    served: usize = 0,
+    /// Everything the peer received, for asserting the wire form.
+    captured: [4096]u8 = undefined,
+    captured_len: usize = 0,
     connection_budget: usize,
     accepted: usize = 0,
     requests: usize = 0,
@@ -1130,10 +1137,21 @@ const KeepAlive = struct {
                     used += n;
                     if (mem.find(u8, request[0..used], "\r\n\r\n") != null) break;
                 }
+                const room = self.captured.len - self.captured_len;
+                const capture = self.captured[self.captured_len..][0..@min(used, room)];
+                @memcpy(capture, request[0..capture.len]);
+                self.captured_len += capture.len;
+
                 self.requests += 1;
-                try writer.interface.writeAll(self.response);
+                const response = if (self.responses.len != 0)
+                    self.responses[@min(self.served, self.responses.len - 1)]
+                else
+                    self.response;
+                self.served += 1;
+                try writer.interface.writeAll(response);
                 try writer.interface.flush();
-                if (mem.find(u8, self.response, "Connection: close") != null) break;
+                if (mem.find(u8, response, "Connection: close") != null) break;
+                if (self.responses.len != 0 and self.served == self.responses.len) break;
             }
         }
     }
@@ -1200,4 +1218,134 @@ test "a Connection: close response is not reused" {
     }
 
     try testing.expectEqual(@as(usize, 2), fixture.accepted);
+}
+
+test "Client.create returns a heap client and readBody collects the body" {
+    var fixture: Fixture = undefined;
+    try fixture.init(
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+        0,
+    );
+    defer fixture.deinit();
+
+    var text: [64]u8 = undefined;
+    const url_text = try mem.print(
+        &text,
+        "http://127.0.0.1:{d}/",
+        .{fixture.address.getPort()},
+    );
+
+    const client = try dispatch.Client.create(testing.allocator, testing.io, .{});
+    defer client.destroy();
+
+    var response = try client.get(url_text);
+    defer response.body.close();
+    const bytes = try response.readBody(testing.allocator, .limited(1024));
+    defer testing.allocator.free(bytes);
+    try testing.expectEqualStrings("hello", bytes);
+}
+
+test "a 302 is followed to a relative Location with GET" {
+    var fixture: KeepAlive = undefined;
+    try fixture.init("", 1);
+    fixture.responses = &.{
+        "HTTP/1.1 302 Found\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+    };
+    defer fixture.deinit();
+
+    var text: [64]u8 = undefined;
+    const url_text = try mem.print(
+        &text,
+        "http://127.0.0.1:{d}/start",
+        .{fixture.address.getPort()},
+    );
+
+    const client = try dispatch.Client.create(testing.allocator, testing.io, .{});
+    defer client.destroy();
+
+    var response = try client.get(url_text);
+    defer response.body.close();
+    try testing.expectEqual(@as(u16, 200), response.head.status.code());
+
+    const body = try response.readBody(testing.allocator, .limited(16));
+    defer testing.allocator.free(body);
+    try testing.expectEqualStrings("ok", body);
+
+    // One connection carried both requests, and the second was a GET /next.
+    try testing.expectEqual(@as(usize, 1), fixture.accepted);
+    try testing.expectEqual(@as(usize, 2), fixture.requests);
+    const wire = fixture.captured[0..fixture.captured_len];
+    try testing.expect(mem.find(u8, wire, "GET /next") != null);
+}
+
+test "a 307 keeps the method and replays the body" {
+    var fixture: KeepAlive = undefined;
+    try fixture.init("", 1);
+    fixture.responses = &.{
+        "HTTP/1.1 307 Temporary Redirect\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+    };
+    defer fixture.deinit();
+
+    var text: [64]u8 = undefined;
+    const url_text = try mem.print(
+        &text,
+        "http://127.0.0.1:{d}/start",
+        .{fixture.address.getPort()},
+    );
+
+    const client = try dispatch.Client.create(testing.allocator, testing.io, .{});
+    defer client.destroy();
+
+    const url = try Url.parse(testing.allocator, url_text);
+    defer url.deinit(testing.allocator);
+    var response = try client.send(url, .{
+        .method_token = "POST",
+        .body = "hello",
+    });
+    defer response.body.close();
+    try testing.expectEqual(@as(u16, 200), response.head.status.code());
+
+    const second = fixture.captured[0..fixture.captured_len];
+    try testing.expectEqual(2, mem.count(u8, second, "POST /"));
+    try testing.expect(mem.find(u8, second, "hello") != null);
+}
+
+test "a redirect chain longer than max_redirects is refused" {
+    var fixture: KeepAlive = undefined;
+    try fixture.init("", 1);
+    const loop = "HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\n\r\n";
+    fixture.responses = &.{ loop, loop, loop, loop };
+    defer fixture.deinit();
+
+    var text: [64]u8 = undefined;
+    const url_text = try mem.print(
+        &text,
+        "http://127.0.0.1:{d}/loop",
+        .{fixture.address.getPort()},
+    );
+
+    const client = try dispatch.Client.create(testing.allocator, testing.io, .{});
+    defer client.destroy();
+
+    const url = try Url.parse(testing.allocator, url_text);
+    defer url.deinit(testing.allocator);
+    try testing.expectError(error.TooManyRedirects, client.send(url, .{
+        .method_token = "GET",
+        .max_redirects = 2,
+    }));
+}
+
+test "credentials are stripped when a redirect leaves the origin" {
+    const headers = [_]Header{
+        .{ .name = "Authorization", .value = "Bearer x" },
+        .{ .name = "Cookie", .value = "a=b" },
+        .{ .name = "Proxy-Authorization", .value = "Basic y" },
+        .{ .name = "Accept", .value = "*/*" },
+    };
+    const kept = try dispatch.Client.stripForTest(testing.allocator, &headers);
+    defer testing.allocator.free(kept);
+    try testing.expectEqual(@as(usize, 1), kept.len);
+    try testing.expectEqualStrings("Accept", kept[0].name);
 }

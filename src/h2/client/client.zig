@@ -255,6 +255,28 @@ pub const Client = struct {
         return self.body_writer;
     }
 
+    /// Send a request whose body is read from `body_reader` until end of
+    /// stream, then wait for the response head. The body goes out as DATA
+    /// while the reader has bytes; this call owns both sides of the exchange.
+    pub fn requestStream(
+        self: *Client,
+        value: Request,
+        body_reader: *Io.Reader,
+    ) !Response {
+        const writer = try self.begin(value);
+        var body_buffer: [16 * 1024]u8 = undefined;
+        while (true) {
+            const read = body_reader.readSliceShort(&body_buffer) catch |err| {
+                writer.close();
+                return err;
+            };
+            if (read == 0) break;
+            try writer.write(body_buffer[0..read]);
+        }
+        writer.close();
+        return self.response();
+    }
+
     /// Drop the in-flight request without reading its response. Idempotent.
     /// A caller that stopped after `begin` or a failed `response` uses this so
     /// the client can take another request.

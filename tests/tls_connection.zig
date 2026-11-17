@@ -626,3 +626,19 @@ test "the high-level client loads the platform trust store by default" {
     try client.init(testing.allocator, testing.io, .{});
     defer client.deinit();
 }
+
+test "the high-level client can be created on the heap" {
+    const client = try http_tls.Client.create(testing.allocator, testing.io, .{
+        .insecure_no_chain_anchor = true,
+    });
+    client.destroy();
+}
+
+test "the core client can be created on the heap" {
+    const client = try http.client.Client.create(
+        testing.allocator,
+        testing.io,
+        .{},
+    );
+    client.destroy();
+}

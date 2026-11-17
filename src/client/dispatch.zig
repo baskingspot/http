@@ -19,7 +19,8 @@ const testing = std.testing;
 const time = @import("stdx").time;
 
 const Header = @import("../header.zig").Header;
-const Url = @import("../uri.zig").Url;
+const uri = @import("../uri.zig");
+const Url = uri.Url;
 const common = @import("common.zig");
 const plain = @import("plain.zig");
 const transport = @import("transport.zig");
@@ -62,7 +63,11 @@ pub const RequestOptions = struct {
     /// The exact wire method token.
     method_token: []const u8,
     headers: []const Header = &.{},
+    /// The whole body, sent in one call. Empty when `body_reader` is used.
     body: []const u8 = "",
+    /// The body is read from here until end of stream. On h1 the request is
+    /// chunked; on h2 it goes out as DATA. Mutually exclusive with `body`.
+    body_reader: ?*Io.Reader = null,
     /// Absolute deadline for this exchange, overriding the client's.
     deadline: time.OptionalTimestamp = .none,
     /// Dial budget for this exchange, overriding the client's.
@@ -71,6 +76,10 @@ pub const RequestOptions = struct {
     progress: ?transport.Progress = null,
     /// Connect here instead of resolving the URL's host.
     address: ?Io.net.IpAddress = null,
+    /// Follow a `Location` on 301, 302, 303, 307, and 308.
+    follow_redirects: bool = true,
+    /// Refuse a chain longer than this with `error.TooManyRedirects`.
+    max_redirects: u8 = 10,
 };
 
 pub const Client = struct {
@@ -79,6 +88,8 @@ pub const Client = struct {
     inner: ?Inner,
     /// The dialing form. Null when the caller attached a reader and writer.
     dialing: ?Dialing,
+    /// The allocator this client was made with, so `destroy` can free it.
+    allocator: Allocator,
     /// A transport cause latched when a failing exchange closed the connection
     /// before the caller could ask it. `readCause` and `writeCause` fall back
     /// to these.
@@ -147,6 +158,7 @@ pub const Client = struct {
         if (options.max_headers == 0) return error.InvalidConfig;
         self.* = .{
             .inner = null,
+            .allocator = allocator,
             .last_read_cause = null,
             .last_write_cause = null,
             .dialing = .{
@@ -163,6 +175,22 @@ pub const Client = struct {
         };
     }
 
+    /// Allocate a client and initialize it. Release it with `destroy`, which
+    /// also frees the client itself.
+    pub fn create(allocator: Allocator, io: Io, options: Options) !*Client {
+        const self = try allocator.create(Client);
+        errdefer allocator.destroy(self);
+        try self.init(allocator, io, options);
+        return self;
+    }
+
+    /// Release a client made by `create`.
+    pub fn destroy(self: *Client) void {
+        const allocator = self.allocator;
+        self.deinit();
+        allocator.destroy(self);
+    }
+
     /// Initialize a client over a reader and writer somebody else opened, and
     /// which the caller keeps alive. Nothing about that socket is dialed,
     /// bounded, or closed here.
@@ -175,6 +203,7 @@ pub const Client = struct {
         self.* = .{
             .inner = null,
             .dialing = null,
+            .allocator = config.common.allocator,
             .last_read_cause = null,
             .last_write_cause = null,
         };
@@ -199,6 +228,39 @@ pub const Client = struct {
             self.latchCause();
             return err;
         };
+    }
+
+    /// Send one request whose body is read from `body_reader` until end of
+    /// stream. The adapter frames it: chunked on h1, DATA on h2.
+    pub fn requestStream(
+        self: *Client,
+        value: Request,
+        body_reader: *Io.Reader,
+    ) !Response {
+        return switch (self.inner orelse return error.NotOpen) {
+            .h1 => |*client| client.requestStream(value, body_reader),
+            .h2 => |*client| client.requestStream(value, body_reader),
+        } catch |err| {
+            self.latchCause();
+            return err;
+        };
+    }
+
+    /// The request call that both the fresh and the reused path share.
+    fn exchange(self: *Client, url: Url, options: RequestOptions) !Response {
+        if (options.body_reader != null and options.body.len != 0) {
+            return error.BodyNotAllowed;
+        }
+        const value: Request = .{
+            .method_token = options.method_token,
+            .scheme = url.scheme,
+            .authority = url.authority,
+            .target = url.target,
+            .headers = options.headers,
+            .body = options.body,
+        };
+        if (options.body_reader) |reader| return self.requestStream(value, reader);
+        return self.request(value);
     }
 
     /// Dial and send one request to `url_text`. The URL is parsed with this
@@ -228,6 +290,90 @@ pub const Client = struct {
     /// `readCause`. The connection is closed by then, so the causes are kept
     /// for exactly this check.
     pub fn send(self: *Client, url: Url, options: RequestOptions) !Response {
+        var attempt = options;
+        var current = url;
+        var hops: u8 = 0;
+        // Two buffers ping-pong: the URL being resolved borrows one while the
+        // next one is written into the other.
+        var storage = [2]std.ArrayList(u8){ .empty, .empty };
+        defer for (&storage) |*buffer| buffer.deinit(self.allocator);
+        var next_storage: usize = 0;
+        var filtered: ?[]Header = null;
+        defer if (filtered) |headers| self.allocator.free(headers);
+
+        while (true) {
+            attempt.headers = if (filtered) |headers| headers else options.headers;
+            var response = try self.sendOnce(current, attempt);
+
+            if (!options.follow_redirects) return response;
+            const code = response.head.status.code();
+            const follows = switch (code) {
+                301, 302, 303, 307, 308 => true,
+                else => false,
+            };
+            if (!follows) return response;
+            const location = response.head.headers.get("Location") orelse return response;
+            if (hops >= options.max_redirects) {
+                response.body.close();
+                return error.TooManyRedirects;
+            }
+
+            const next = try uri.resolveInto(
+                self.allocator,
+                current,
+                location,
+                &storage[next_storage],
+            );
+
+            // 303 always becomes GET; 301 and 302 do for a non-GET, non-HEAD.
+            const to_get = code == 303 or
+                ((code == 301 or code == 302) and
+                    !mem.eql(u8, attempt.method_token, "GET") and
+                    !mem.eql(u8, attempt.method_token, "HEAD"));
+            if (to_get) {
+                attempt.method_token = "GET";
+                attempt.body = "";
+                attempt.body_reader = null;
+            } else if (attempt.body_reader != null) {
+                // The reader is spent, so a method-preserving redirect cannot
+                // replay the body. Report the redirect instead.
+                return response;
+            }
+
+            // Credentials are for the origin that was asked, not the next one.
+            if (next.port != current.port or !mem.eql(u8, next.host, current.host)) {
+                if (filtered) |headers| self.allocator.free(headers);
+                filtered = try stripCredentials(self.allocator, options.headers);
+            }
+
+            response.body.close();
+            current = next;
+            next_storage = 1 - next_storage;
+            hops += 1;
+        }
+    }
+
+    /// Expose the credential filter to the tests next to the client.
+    pub fn stripForTest(allocator: Allocator, headers: []const Header) ![]Header {
+        return stripCredentials(allocator, headers);
+    }
+
+    /// The caller's fields minus the credentials, for a redirect that leaves
+    /// the origin. Names compare case-insensitively.
+    fn stripCredentials(allocator: Allocator, headers: []const Header) ![]Header {
+        var kept: std.ArrayList(Header) = .empty;
+        errdefer kept.deinit(allocator);
+        for (headers) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "authorization") or
+                std.ascii.eqlIgnoreCase(header.name, "cookie") or
+                std.ascii.eqlIgnoreCase(header.name, "proxy-authorization")) continue;
+            try kept.append(allocator, header);
+        }
+        return kept.toOwnedSlice(allocator);
+    }
+
+    /// One exchange, no redirect policy. The caller owns `url` and `options`.
+    fn sendOnce(self: *Client, url: Url, options: RequestOptions) !Response {
         const dialing = if (self.dialing) |*dialing| dialing else return error.NotDialing;
         self.last_read_cause = null;
         self.last_write_cause = null;
@@ -243,14 +389,7 @@ pub const Client = struct {
             const connection = &dialing.connection.?;
             try connection.setDeadline(deadline);
             connection.setCancel(options.progress);
-            return self.request(.{
-                .method_token = options.method_token,
-                .scheme = url.scheme,
-                .authority = url.authority,
-                .target = url.target,
-                .headers = options.headers,
-                .body = options.body,
-            }) catch |err| {
+            return self.exchange(url, options) catch |err| {
                 // An idle connection can be closed by the peer between
                 // requests. Nothing was received, so one fresh dial is safe.
                 if (err != error.EndOfStream) return err;
@@ -309,14 +448,7 @@ pub const Client = struct {
         connection_owned = false;
         errdefer self.closeConnection();
 
-        return self.request(.{
-            .method_token = options.method_token,
-            .scheme = url.scheme,
-            .authority = url.authority,
-            .target = url.target,
-            .headers = options.headers,
-            .body = options.body,
-        });
+        return self.exchange(url, options);
     }
 
     /// The protocol of the open connection, or null when none is open.

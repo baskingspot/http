@@ -291,6 +291,17 @@ pub fn localFromCause(cause: anyerror) Outcome {
 pub const Response = struct {
     head: ResponseHead,
     body: Body,
+
+    /// Read the rest of the body into `allocator`. The caller frees it.
+    /// `error.StreamTooLong` means the body passed `limit`; `limit` keeps a
+    /// response from a hostile peer out of memory.
+    pub fn readBody(
+        self: *Response,
+        allocator: Allocator,
+        limit: Io.Limit,
+    ) ![]u8 {
+        return self.body.reader.allocRemaining(allocator, limit);
+    }
 };
 
 /// A connection-level GOAWAY. Streams at or below `last_stream_id` remain

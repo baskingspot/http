@@ -126,6 +126,60 @@ pub const Client = struct {
         self.pending = &.{};
 
         const method = Method.parse(value.method_token);
+        const framing: Framing = if (value.body.len != 0)
+            .{ .length = value.body.len }
+        else
+            .none;
+        var w = try self.writeHead(value, framing);
+        if (value.body.len != 0) try w.body(value.body);
+        try self.writer.flush();
+        return self.readResponse(method);
+    }
+
+    /// Send a request whose body is read from `body_reader` until end of
+    /// stream. The body is chunked unless the caller framed it.
+    pub fn requestStream(
+        self: *Client,
+        value: Request,
+        body_reader: *Io.Reader,
+    ) !Response {
+        if (self.active) return error.RequestInProgress;
+        if (self.dirty) return error.ConnectionDirty;
+        if (value.authority.len == 0) return error.InvalidAuthority;
+        if (value.body.len != 0) return error.BodyNotAllowed;
+
+        _ = self.arena.reset(.free_all);
+        self.persistent = false;
+        self.body_eof = false;
+        self.body_outcome = null;
+        self.pending = &.{};
+
+        const method = Method.parse(value.method_token);
+        var w = try self.writeHead(value, .chunked);
+        var buffer: [16 * 1024]u8 = undefined;
+        while (true) {
+            const read = body_reader.readSliceShort(&buffer) catch |err| {
+                // The head is on the wire; the connection cannot be reused.
+                self.dirty = true;
+                return err;
+            };
+            if (read == 0) break;
+            try w.chunk(buffer[0..read]);
+        }
+        try w.lastChunk(&.{});
+        try self.writer.flush();
+        return self.readResponse(method);
+    }
+
+    const Framing = union(enum) {
+        none,
+        length: u64,
+        chunked,
+    };
+
+    /// Write the request line and field section, then return the writer so the
+    /// caller can frame the body.
+    fn writeHead(self: *Client, value: Request, framing: Framing) !h1.Writer {
         var w: h1.Writer = .init(self.writer);
         try w.requestLineToken(value.method_token, value.target, .@"HTTP/1.1");
         var has_length = false;
@@ -138,13 +192,18 @@ pub const Client = struct {
             try w.field(header.name, header.value);
         }
         try w.field("Host", value.authority);
-        if (value.body.len != 0 and !has_length and !has_transfer) {
-            try w.contentLength(value.body.len);
+        switch (framing) {
+            // The caller framed its own body.
+            .none => {},
+            .length => |length| if (!has_length and !has_transfer) try w.contentLength(length),
+            .chunked => if (!has_length and !has_transfer) try w.chunked(),
         }
         try w.endFields();
-        if (value.body.len != 0) try w.body(value.body);
-        try self.writer.flush();
+        return w;
+    }
 
+    /// Read the response head for a request already on the wire.
+    fn readResponse(self: *Client, method: ?Method) !Response {
         self.conn.start(method);
         var event = try self.conn.next();
         while (true) {
@@ -882,4 +941,29 @@ test "a body reader serves readSliceAll and allocRemaining" {
     );
     defer fixture.deinit();
     try withBody(&fixture, @as(void, {}), readWithStdHelpers);
+}
+
+test "a streamed request body is chunked and ends with the last chunk" {
+    var out: [512]u8 = undefined;
+    var writer: Io.Writer = .fixed(&out);
+    var response: Io.Reader = .fixed(
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+    );
+    var client: Client = undefined;
+    try client.init(&response, &writer, .{ .allocator = testing.allocator });
+    defer client.deinit();
+
+    var body: Io.Reader = .fixed("hello");
+    var res = try client.requestStream(.{
+        .method_token = "POST",
+        .scheme = .http,
+        .authority = "example.com",
+        .target = "/upload",
+    }, &body);
+    defer res.body.close();
+
+    const wire = writer.buffered();
+    try testing.expect(std.mem.find(u8, wire, "Transfer-Encoding: chunked") != null);
+    try testing.expect(std.mem.find(u8, wire, "\r\n5\r\nhello\r\n") != null);
+    try testing.expect(std.mem.endsWith(u8, wire, "0\r\n\r\n"));
 }

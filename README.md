@@ -52,8 +52,8 @@ Not implemented:
 - Streaming request bodies: `client.Request.body` is a `[]const u8`, and an engine's `Exchange.request.body` is the whole body up to `Config.body_bytes`.
 - Chunked request bodies on the server: `h1.ServerConn` answers 501 with `RejectReason.chunked_unsupported`.
 - Response trailers: `h1.ClientConn` parses them into `Config.trailers`, and `client.ResponseHead` has no trailer list, so the fields are dropped.
-- Connection reuse and pooling: `h1.client.buffered.fetch` does not reuse the connection, and nothing in `http.client` pools one.
-- Redirects: a 3xx comes back as a `client.Response` with its `Status`; nothing follows it.
+- Connection pooling: `client.Client` reuses one kept-alive connection, but there is no pool of several and `h1.client.buffered.fetch` still does not reuse one.
+- HTTP/2 multiplexing: one request is in flight per connection, even on h2. Content decoding: `Accept-Encoding` is not sent, so a `Content-Encoding` body arrives encoded.
 - Cookies: `Headers` never combines `Set-Cookie`, h2 `cookie` lines stay separate, and there is no jar.
 - Routing: `h1.targetForm` classifies the target and stops. There is no router and no method dispatch.
 - Middleware: `engine.Handler` is one vtable with four entries, and nothing chains around it.

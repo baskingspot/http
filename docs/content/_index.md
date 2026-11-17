@@ -895,6 +895,17 @@ watch with no exchange deadline still cannot hang on a black-holed connect.
 `transport.Connection.setDeadline` moves the deadline for later reads, which is
 how a long-lived watch loop keeps a per-read bound without reconnecting.
 
+`Client.create(allocator, io, options)` allocates the client and returns a
+pointer; `destroy` frees it. `init` remains for a client that lives on the
+stack. A 3xx with a `Location` is followed up to `max_redirects` (10) times:
+303 and a 301/302 after a non-GET become a `GET` without the body, 307 and 308
+keep the method and replay the body, and `Authorization`, `Cookie`, and
+`Proxy-Authorization` are dropped when the redirect changes origin. A streamed
+body cannot be replayed, so a method-preserving redirect returns the 3xx
+instead. `Response.readBody(allocator, limit)` reads the rest of the body, and
+`RequestOptions.body_reader` sends a body from a reader until it ends: chunked
+on h1, DATA on h2.
+
 `RequestOptions.progress` also runs during a body read. When the hook is set,
 a read waits at most a hundred milliseconds at a time, so returning false ends
 it as `error.ReadFailed` with `error.Canceled` latched, and `body.outcome()`
@@ -1244,8 +1255,9 @@ Not implemented:
 - A streaming request body through `client.Client`. The protocol-neutral facade has no `begin`; use the h2 adapter when the body does not exist up front.
 - Chunked request bodies on the server. `h1.ServerConn` answers 501 with `RejectReason.chunked_unsupported`; `h1.chunked.Decoder` is there for a caller that drives the body itself.
 - Response trailers on the shared client. `h1.ClientConn` parses them into `Config.trailers`, and `client.Response` has no trailer list, so `h1.client` and `h2.client` drop the fields. Use `h2.client.Connection` to receive complete h2 trailers; snapshots live in the stream arena.
-- Connection reuse and pooling. `h1.client.buffered.fetch` reads one response and does not reuse the connection, and nothing in `http.client` pools connections. `h2.client.Client` keeps the one connection it was given.
-- Redirects. A 3xx comes back as a `client.Response` with its `Status`; nothing follows it.
+- Connection pooling. `Client` keeps one connection alive and reuses it for the next request to the same origin; there is no pool of several, and `h1.client.buffered.fetch` still does not reuse the connection it was given.
+- HTTP/2 multiplexing. One request is in flight per connection, even on h2. Concurrent streams need the sans-I/O `h2.Session` and a pump of your own.
+- Content decoding. `Accept-Encoding` is not sent and a `Content-Encoding` body arrives in its encoded bytes; `baskingspot/compress` has the decoders, and the client does not depend on it.
 - Cookies. `Headers` never combines `Set-Cookie`, h2 `cookie` lines stay separate, and there is no jar.
 - Routing. `h1.targetForm` classifies the target and stops. There is no router, no path parameter, and no method dispatch.
 - Middleware. `engine.Handler` is one vtable with four entries, and there is no chain, interceptor, or deferral hook.

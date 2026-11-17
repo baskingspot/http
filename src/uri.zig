@@ -224,3 +224,89 @@ test "query components are percent-encoded to the unreserved set" {
     try percentEncode(&empty_writer, "");
     try testing.expectEqual(@as(usize, 0), empty_writer.buffered().len);
 }
+
+/// Resolve `location` against `base`, writing the absolute URL into `out` so
+/// the returned fields stay valid as long as `out` does.
+///
+/// Covers the reference forms a redirect uses: absolute, scheme-relative,
+/// absolute-path, relative-path, query-only, and empty.
+pub fn resolveInto(
+    allocator: Allocator,
+    base: Url,
+    location: []const u8,
+    out: *std.ArrayList(u8),
+) ParseError!Url {
+    out.clearRetainingCapacity();
+
+    if (mem.find(u8, location, "://") != null) {
+        try out.appendSlice(allocator, location);
+        return Url.parse(allocator, out.items);
+    }
+
+    const scheme = base.scheme.token();
+    if (mem.startsWith(u8, location, "//")) {
+        try out.appendSlice(allocator, scheme);
+        try out.append(allocator, ':');
+        try out.appendSlice(allocator, location);
+    } else if (location.len == 0 or location[0] == '#') {
+        try out.appendSlice(allocator, scheme);
+        try out.appendSlice(allocator, "://");
+        try out.appendSlice(allocator, base.authority);
+        try out.appendSlice(allocator, base.target);
+    } else if (location[0] == '?') {
+        try out.appendSlice(allocator, scheme);
+        try out.appendSlice(allocator, "://");
+        try out.appendSlice(allocator, base.authority);
+        try out.appendSlice(allocator, upToQuery(base.target));
+        try out.appendSlice(allocator, location);
+    } else if (location[0] == '/') {
+        try out.appendSlice(allocator, scheme);
+        try out.appendSlice(allocator, "://");
+        try out.appendSlice(allocator, base.authority);
+        try out.appendSlice(allocator, location);
+    } else {
+        try out.appendSlice(allocator, scheme);
+        try out.appendSlice(allocator, "://");
+        try out.appendSlice(allocator, base.authority);
+        try out.appendSlice(allocator, directory(base.target));
+        try out.appendSlice(allocator, location);
+    }
+    return Url.parse(allocator, out.items);
+}
+
+fn upToQuery(target: []const u8) []const u8 {
+    return target[0 .. mem.findScalar(u8, target, '?') orelse target.len];
+}
+
+/// The path through its last slash, which is the base a relative reference
+/// replaces.
+fn directory(target: []const u8) []const u8 {
+    const path = upToQuery(target);
+    const slash = mem.findScalarLast(u8, path, '/') orelse return "/";
+    return path[0 .. slash + 1];
+}
+
+test "a redirect location resolves against the base URL" {
+    var storage: std.ArrayList(u8) = .empty;
+    defer storage.deinit(testing.allocator);
+    const base = try Url.parse(testing.allocator, "https://example.com/a/b?q=1");
+    const cases = [_]struct { location: []const u8, expected: []const u8 }{
+        .{ .location = "https://other.test/x", .expected = "https://other.test/x" },
+        .{ .location = "//other.test/x", .expected = "https://other.test/x" },
+        .{ .location = "/x", .expected = "https://example.com/x" },
+        .{ .location = "c", .expected = "https://example.com/a/c" },
+        .{ .location = "?q=2", .expected = "https://example.com/a/b?q=2" },
+        .{ .location = "", .expected = "https://example.com/a/b?q=1" },
+        .{ .location = "#frag", .expected = "https://example.com/a/b?q=1" },
+    };
+    for (cases) |case| {
+        const resolved = try resolveInto(testing.allocator, base, case.location, &storage);
+        const text = try testing.allocator.print("{s}://{s}{s}", .{
+            resolved.scheme.token(),
+            resolved.authority,
+            resolved.target,
+        });
+        defer testing.allocator.free(text);
+        try testing.expectEqualStrings(case.expected, text);
+    }
+}

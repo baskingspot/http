@@ -7,6 +7,20 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `client.Client.create` and `http_tls.Client.create` allocate the client and
+  return a pointer, so the self-referential connector storage no longer needs
+  an `undefined` local. `destroy` frees it; `init` and `deinit` stay for a
+  client on the stack.
+- `Client.send` follows a `Location` on 301, 302, 303, 307, and 308, up to
+  `RequestOptions.max_redirects` (10), then `error.TooManyRedirects`. A 303 and
+  a 301/302 after a non-GET become `GET` without a body; 307 and 308 keep the
+  method and replay the body; `Authorization`, `Cookie`, and
+  `Proxy-Authorization` are dropped when the origin changes. `follow_redirects`
+  turns the policy off.
+- `Response.readBody(allocator, limit)` reads the rest of the body into one
+  allocation, bounded so a hostile peer cannot exhaust memory.
+- `RequestOptions.body_reader` sends a request body from a reader until end of
+  stream: chunked on h1, DATA on h2. Mutually exclusive with `body`.
 - `Client.send` reuses the open connection for a request to the same scheme,
   host, and port when the previous body finished and the peer kept the
   connection alive, so a second request to a host skips the TCP and TLS
