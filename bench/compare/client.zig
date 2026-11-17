@@ -14,6 +14,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const print = std.debug.print;
 
+const http = @import("http");
 const http_tls = @import("http_tls");
 
 pub fn main(init: std.process.Init) !void {
@@ -26,13 +27,45 @@ pub fn main(init: std.process.Init) !void {
     const requests = try std.fmt.parseInt(usize, args.next() orelse return usage(), 10);
     const workers = try std.fmt.parseInt(usize, args.next() orelse return usage(), 10);
     const mode = args.next() orelse return usage();
-    const h2 = if (std.mem.eql(u8, mode, "h2"))
-        true
-    else if (std.mem.eql(u8, mode, "h1"))
-        false
+    const dial_address: ?Io.net.IpAddress = if (args.next()) |text|
+        try .parseLiteral(text)
     else
-        return usage();
+        null;
+    const use_mux = std.mem.eql(u8, mode, "h2mux");
+    const h2 = use_mux or std.mem.eql(u8, mode, "h2");
+    if (!h2 and !std.mem.eql(u8, mode, "h1")) return usage();
     if (workers == 0 or requests == 0) return usage();
+
+    // The mux mode dials once and shares the connection: the h2 multiplexing
+    // case. The other modes dial one connection per worker.
+    var tls_connector: http_tls.client.Connector = .init(.{
+        .insecure_no_chain_anchor = true,
+        .alpn = &.{"h2"},
+    });
+    var plain_connector: http.client.plain.Connector = .init(.{ .protocol = .h2 });
+    var parsed = if (use_mux) try http.client.Url.parse(allocator, url) else undefined;
+    defer if (use_mux) parsed.deinit(allocator);
+    if (use_mux and parsed.scheme == .https) {
+        print("h2mux needs a cleartext h2c peer; TLS muxing waits on a poll pump\n", .{});
+        return error.HttpsUnsupported;
+    }
+    const mux: ?*http.h2.client.mux.Mux = if (use_mux) blk: {
+        const dial: http.client.transport.Context = .{
+            .io = io,
+            .gpa = allocator,
+            .url = parsed,
+            .address = dial_address,
+        };
+        const connection = switch (parsed.scheme) {
+            .http => try plain_connector.handle().connect(dial),
+            .https => try tls_connector.handle().connect(dial),
+        };
+        break :blk try http.h2.client.mux.Mux.create(allocator, io, connection, .{
+            .allocator = allocator,
+            .max_streams = @intCast(workers),
+        });
+    } else null;
+    defer if (mux) |value| value.destroy();
 
     const errors = try allocator.alloc(?anyerror, workers);
     defer allocator.free(errors);
@@ -44,6 +77,10 @@ pub fn main(init: std.process.Init) !void {
         .url = url,
         .per_worker = requests / workers,
         .h2 = h2,
+        .mux = mux,
+        .scheme = if (use_mux) parsed.scheme else .http,
+        .authority = if (use_mux) parsed.authority else "",
+        .target = if (use_mux) parsed.target else "/",
         .errors = errors,
     };
 
@@ -83,6 +120,10 @@ const Context = struct {
     url: []const u8,
     per_worker: usize,
     h2: bool,
+    mux: ?*http.h2.client.mux.Mux,
+    scheme: http.client.Scheme,
+    authority: []const u8,
+    target: []const u8,
     errors: []?anyerror,
 };
 
@@ -92,7 +133,23 @@ fn run(context: *const Context, index: usize) void {
     };
 }
 
+fn loopMux(context: *const Context, mux: *http.h2.client.mux.Mux) !void {
+    for (0..context.per_worker) |_| {
+        var response = try mux.request(.{
+            .method_token = "GET",
+            .scheme = context.scheme,
+            .authority = context.authority,
+            .target = context.target,
+        }, .none);
+        defer response.body.close();
+        var sink: Io.Writer.Discarding = .init(&.{});
+        _ = try response.body.reader.streamRemaining(&sink.writer);
+    }
+}
+
 fn loop(context: *const Context) !void {
+    if (context.mux) |mux| return loopMux(context, mux);
+
     const client = try http_tls.Client.create(context.allocator, context.io, .{
         .insecure_no_chain_anchor = true,
         .alpn = if (context.h2) &.{"h2"} else &.{"http/1.1"},

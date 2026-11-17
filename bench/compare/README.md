@@ -57,8 +57,21 @@ Eight workers, 40,000 requests:
 | h2, TLS | 122,928 | 53,826 | 50,179 |
 
 Read the second table as per-connection scaling, not a pooling comparison: the
-Zig client has no connection pool and no h2 multiplexing yet, so eight workers
-are eight connections.
+Zig client has no connection pool, so eight workers are eight connections.
+
+## Multiplexed h2c
+
+`bench-client URL N WORKERS h2mux` puts every worker on one h2c connection
+through `h2.client.mux.Mux`. Against `just example-h2` (one server thread per
+connection) on this host, eight workers and 40,000 requests took 445 ms, about
+90,000 requests per second, on one connection. Eight separate connections took
+126 ms, about 318,000: the example server is the bound there, not the client.
+
+TLS is not in that mode yet. `tls_nonblocking.SocketClient` requires every call
+on a connection to be serial, so a pump that reads on one thread while another
+writes is not legal; TLS multiplexing needs the poll-driven pump (the
+step-shaped `h2.client.Connection` plus `http_tls.h2.transport.tls_client`),
+which this benchmark does not have yet.
 
 The first run of this harness found the cleartext connector writing the request
 head once per field, which cost about 24 µs per request. Buffering the writes
