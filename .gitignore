@@ -10,3 +10,4 @@ docs/data/
 docs/public/
 docs/themes/
 docs/content/changelog.md
+bench/compare/reqwest/target/

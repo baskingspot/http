@@ -737,6 +737,32 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    // The client comparison harness. Developer-only, like the examples:
+    // `just bench-compare` drives it against a Go reference server.
+    const compare_client_bin = b.step(
+        "compare-client-bin",
+        "Build the Go/reqwest client comparison binary",
+    );
+    if (tls_dep != null) {
+        const compare_mod = b.createModule(.{
+            .root_source_file = b.path("bench/compare/client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "http_tls", .module = http_tls_mod.? },
+            },
+        });
+        compare_mod.link_libc = true;
+        compare_mod.linkSystemLibrary("crypto", .{});
+        const compare_client = b.addExecutable(.{
+            .name = "bench-client",
+            .root_module = compare_mod,
+        });
+        const install_compare = b.addInstallArtifact(compare_client, .{});
+        compare_client_bin.dependOn(&install_compare.step);
+    }
+
     // The poll example is Linux-only for now. The steps exist everywhere so
     // `check-example` is portable; only Linux gets a target to build.
     const poll_example_bin = b.step("example-poll-bin", "Build the HTTP/1.1 poll example server");

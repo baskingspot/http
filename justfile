@@ -35,6 +35,11 @@ bench *ARGS:
 bench-smoke:
     zig build bench -- --benchtime=8x --count=1 --no-env
 
+[doc("Compare the high-level client with Go net/http and reqwest on loopback")]
+[group("bench")]
+bench-compare *ARGS:
+    N={{env("N", "20000")}} CONC={{env("CONC", "1")}} RUNS={{env("RUNS", "3")}} bench/compare/run.sh {{ ARGS }}
+
 [doc("Run h2spec against the example on 127.0.0.1:8081 (start `just example-h2` first); args select sections, e.g. `just conformance http2/5.1`")]
 [group("test")]
 conformance *ARGS:
