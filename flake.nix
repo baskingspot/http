@@ -35,6 +35,10 @@
           # toolchain from the module's go.mod, not from nixpkgs.
           project = [
             (inputs.mattware.packages.${system}.go-bin.fromGoMod ./tools/hpack-interop/go.mod)
+            # Cargo builds the reqwest side of `bench/compare`; the versioned
+            # binary keeps the comparison reproducible from the flake.
+            pkgs.cargo
+            pkgs.rustc
             pkgs.gopls
             pkgs.h2spec
             pkgs.nghttp2

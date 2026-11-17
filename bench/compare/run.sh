@@ -18,9 +18,7 @@ echo "building" >&2
 zig build compare-client-bin -Doptimize=ReleaseFast
 go build -o zig-out/bin/bench-server bench/compare/server.go
 go build -o zig-out/bin/bench-go bench/compare/go_client.go
-if [ ! -x bench/compare/reqwest/target/release/reqwest-bench ]; then
-    ( cd bench/compare/reqwest && nix shell nixpkgs#cargo nixpkgs#rustc -c cargo build --release )
-fi
+( cd bench/compare/reqwest && cargo build --release )
 cp bench/compare/reqwest/target/release/reqwest-bench zig-out/bin/bench-reqwest
 
 server_pid=

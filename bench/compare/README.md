@@ -14,9 +14,8 @@ The runner builds three clients against one Go server and prints a summary:
 
 - `bench-client` — `http_tls.Client` from this repo, built `ReleaseFast`.
 - `bench-go` — `net/http` with keep-alive and, for h2, Go's automatic h2.
-- `bench-reqwest` — `reqwest::blocking` with rustls. Cargo is not in the
-  project devShell; the runner uses `nix shell nixpkgs#cargo nixpkgs#rustc`
-  when the binary is missing.
+- `bench-reqwest` — `reqwest::blocking` with rustls. Cargo and rustc come
+  from the devShell; the runner builds it in `bench/compare/reqwest`.
 
 Scenarios: cleartext h1, TLS h1, and TLS h2. The server sets an explicit
 `Content-Length`, so h1 has no chunked framing. Every client reads the body to
@@ -38,23 +37,24 @@ against the server's certificate. That favors Go and reqwest.
 ## Results
 
 NixOS, 8-core arm64, loopback, Go 1.27.3, reqwest 0.12.28 (rustls), Zig 0.17.1
-`ReleaseFast`, 2026-11-16. Requests per second, mean of three runs.
+`ReleaseFast`, 2026-11-17. Requests per second, mean of three runs. Run-to-run
+variation on this host is five to ten percent; the ratios held across runs.
 
 One worker, 20,000 requests:
 
 | scenario | http | Go net/http | reqwest |
 | --- | --- | --- | --- |
-| h1, cleartext | 70,360 | 37,965 | 34,687 |
-| h1, TLS | 64,250 | 37,332 | 33,846 |
-| h2, TLS | 25,246 | 20,401 | 20,908 |
+| h1, cleartext | 68,355 | 36,318 | 33,729 |
+| h1, TLS | 60,549 | 33,835 | 31,950 |
+| h2, TLS | 24,952 | 19,119 | 20,042 |
 
 Eight workers, 40,000 requests:
 
 | scenario | http | Go net/http | reqwest |
 | --- | --- | --- | --- |
-| h1, cleartext | 273,105 | 139,849 | 78,061 |
-| h1, TLS | 258,894 | 135,229 | 74,967 |
-| h2, TLS | 140,564 | 57,015 | 51,879 |
+| h1, cleartext | 247,331 | 131,394 | 73,317 |
+| h1, TLS | 228,050 | 122,614 | 73,152 |
+| h2, TLS | 122,928 | 53,826 | 50,179 |
 
 Read the second table as per-connection scaling, not a pooling comparison: the
 Zig client has no connection pool and no h2 multiplexing yet, so eight workers
