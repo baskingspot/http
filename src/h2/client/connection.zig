@@ -26,7 +26,7 @@ const SessionEvent = session_mod.Event;
 
 // ast-grep-ignore: public-struct-field-default -- request shape; headers are optional
 pub const Request = struct {
-    method_token: []const u8,
+    method: shared.Method,
     scheme: shared.Scheme,
     authority: []const u8,
     target: []const u8,
@@ -258,7 +258,7 @@ pub const Connection = struct {
         const fields = try self.allocator.alloc(Header, field_count);
         defer self.allocator.free(fields);
 
-        fields[0] = .{ .name = ":method", .value = request.method_token };
+        fields[0] = .{ .name = ":method", .value = request.method.token() };
         fields[1] = .{ .name = ":scheme", .value = request.scheme.token() };
         fields[2] = .{ .name = ":authority", .value = request.authority };
         fields[3] = .{ .name = ":path", .value = request.target };
@@ -611,7 +611,7 @@ test "a bidi stream carries request and response DATA and trailers" {
 
     _ = try client.poll();
     const stream = try client.open(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/service/Method",
@@ -735,7 +735,7 @@ test "a gRPC trailers-only response arrives as a head with END_STREAM" {
 
     // A unary gRPC call: one message, then END_STREAM on the request.
     const stream = try client.open(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/service/Method",
@@ -823,7 +823,7 @@ test "a local cancel and a peer reset are distinguishable" {
     _ = try client.poll();
 
     const request: Request = .{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/service/Method",
@@ -944,7 +944,7 @@ test "GOAWAY keeps accepted streams readable and rejects new streams" {
     _ = try client.poll();
 
     const accepted = try client.open(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/accepted",

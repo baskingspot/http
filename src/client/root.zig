@@ -9,6 +9,7 @@ pub const Url = @import("../uri.zig").Url;
 pub const transport = @import("transport.zig");
 pub const BufferedWriter = @import("buffered_writer.zig").BufferedWriter;
 pub const plain = @import("plain.zig");
+pub const Method = @import("../method.zig").Method;
 pub const Protocol = common.Protocol;
 pub const Scheme = common.Scheme;
 pub const Request = common.Request;

@@ -383,7 +383,7 @@ test "the connector dials https and serves a request" {
     defer client.deinit();
 
     var response = try client.send(url, .{
-        .method_token = "GET",
+        .method = .GET,
         .address = harness.address,
     });
     defer response.body.close();
@@ -523,7 +523,7 @@ test "a transfer hook ends a TLS body read the peer stalled" {
     defer client.deinit();
 
     var response = try client.send(url, .{
-        .method_token = "GET",
+        .method = .GET,
         .address = harness.address,
         .progress = .{ .context = &state, .step = TransferStop.step },
     });
@@ -569,7 +569,7 @@ test "the high-level client reaches https with one call" {
         .{harness.address.getPort()},
     );
     var response = try client.fetch(url, .{
-        .method_token = "GET",
+        .method = .GET,
         .address = harness.address,
     });
     defer response.body.close();
@@ -610,7 +610,7 @@ test "the high-level client accepts a trust store the caller loaded" {
         .{harness.address.getPort()},
     );
     var response = try client.fetch(url, .{
-        .method_token = "GET",
+        .method = .GET,
         .address = harness.address,
     });
     defer response.body.close();

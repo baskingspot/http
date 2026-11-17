@@ -98,7 +98,14 @@ pub fn main(init: std.process.Init) !void {
     defer url.deinit(gpa);
 
     const request: client.RequestOptions = .{
-        .method_token = if (head) "HEAD" else (method orelse if (body != null) "POST" else "GET"),
+        .method = if (head)
+            .HEAD
+        else if (method) |text|
+            client.Method.parse(text)
+        else if (body != null)
+            .POST
+        else
+            .GET,
         .headers = headers[0..header_count],
         .body = body orelse "",
         .follow_redirects = follow,
@@ -114,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
     defer http_client.deinit();
 
     if (verbose) {
-        err.print("> {s} {s}\n", .{ request.method_token, url.target });
+        err.print("> {s} {s}\n", .{ request.method.token(), url.target });
         for (request.headers) |header| {
             err.print("> {s}: {s}\n", .{ header.name, header.value });
         }

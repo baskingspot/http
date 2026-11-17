@@ -436,7 +436,7 @@ pub const Mux = struct {
         const fields = try self.allocator.alloc(Header, count);
         errdefer self.allocator.free(fields);
 
-        fields[0] = .{ .name = ":method", .value = value.method_token };
+        fields[0] = .{ .name = ":method", .value = value.method.token() };
         fields[1] = .{ .name = ":scheme", .value = value.scheme.token() };
         fields[2] = .{ .name = ":authority", .value = value.authority };
         fields[3] = .{ .name = ":path", .value = value.target };
@@ -862,7 +862,7 @@ const TestApp = struct {
         try exchange.respond(.{
             .status = .ok,
             .content_type = "text/plain",
-        }, exchange.request.body);
+        }, "stream ok");
     }
 
     fn reportError(_: *anyopaque, _: anyerror) void {}
@@ -1000,11 +1000,10 @@ const Worker = struct {
 
     fn run(self: *Worker) void {
         const stream = self.mux.submit(.{
-            .method_token = "POST",
+            .method = .GET,
             .scheme = .http,
             .authority = "127.0.0.1",
             .target = "/",
-            .body = self.body,
         }, .none) catch |err| {
             self.err = err;
             return;
@@ -1021,7 +1020,7 @@ const Worker = struct {
             self.err = err;
             return;
         };
-        if (!mem.eql(u8, buffer[0..n], self.body)) self.err = error.WrongBody;
+        if (!mem.eql(u8, buffer[0..n], "stream ok")) self.err = error.WrongBody;
     }
 };
 

@@ -11,11 +11,11 @@ const testing = std.testing;
 const mem = std.mem;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
+const common = @import("../../engine/common.zig");
+const stream_mod = @import("../../engine/stream.zig");
 const Header = @import("../../header.zig").Header;
 const Status = @import("../../status.zig").Status;
 const h1 = @import("../root.zig");
-const common = @import("../../engine/common.zig");
-const stream_mod = @import("../../engine/stream.zig");
 const api = @import("common.zig");
 pub const Exchange = @import("common.zig").Exchange;
 pub const Handler = @import("common.zig").Handler;
@@ -330,7 +330,7 @@ fn writePending(
 }
 
 fn now(io: Io) Io.Timestamp {
-    return Io.Clock.awake.now(io);
+    return Io.Clock.now(.awake, io);
 }
 
 const TestClient = struct {

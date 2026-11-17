@@ -26,6 +26,7 @@ const shared = @import("../../engine/common.zig");
 const Header = @import("../../header.zig").Header;
 const Headers = @import("../../header.zig").Headers;
 const frame = @import("../frame.zig");
+const Method = @import("../../method.zig").Method;
 const head = @import("../head.zig");
 const session_mod = @import("../session.zig");
 const Session = session_mod.Session;
@@ -962,20 +963,19 @@ fn copyHead(arena: Allocator, source: head.RequestHead) !head.RequestHead {
     // arena's lifetime, so two bumps serve what per-field dupes paid six
     // for, plus the `copyHeaders` block below for the fields.
     const empty: []const u8 = "";
-    const scalars_len = source.method_token.len +
+    const scalars_len = source.method.token().len +
         (source.scheme orelse empty).len + (source.authority orelse empty).len +
         (source.path orelse empty).len + (source.protocol orelse empty).len;
     const scalars = try arena.alloc(u8, scalars_len);
     var at: usize = 0;
-    const method_token = carve(scalars, &at, source.method_token);
+    const method_token = carve(scalars, &at, source.method.token());
     const scheme = if (source.scheme) |value| carve(scalars, &at, value) else null;
     const authority = if (source.authority) |value| carve(scalars, &at, value) else null;
     const path = if (source.path) |value| carve(scalars, &at, value) else null;
     const protocol = if (source.protocol) |value| carve(scalars, &at, value) else null;
 
     return .{
-        .method = source.method,
-        .method_token = method_token,
+        .method = Method.parse(method_token),
         .scheme = scheme,
         .authority = authority,
         .path = path,

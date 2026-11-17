@@ -13,17 +13,17 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const fd_t = std.posix.fd_t;
 
+const shared = @import("../../engine/common.zig");
+const wait = @import("../../transport/wait.zig");
+const wait_kqueue_test = @import("../../transport/wait_kqueue.zig");
+const wait_poll_test = @import("../../transport/wait_poll.zig");
 const session_mod = @import("../session.zig");
 const SessionOptions = session_mod.Options;
-const connection_mod = @import("connection.zig");
-const Connection = connection_mod.Connection;
 const common = @import("common.zig");
-const shared = @import("../../engine/common.zig");
 pub const Exchange = common.Exchange;
 pub const Handler = common.Handler;
-const wait = @import("../../transport/wait.zig");
-const wait_poll_test = @import("../../transport/wait_poll.zig");
-const wait_kqueue_test = @import("../../transport/wait_kqueue.zig");
+const connection_mod = @import("connection.zig");
+const Connection = connection_mod.Connection;
 const PlainTransport = @import("transport/plain.zig").Transport;
 const transport_events = @import("transport.zig");
 const Event = transport_events.Event;
@@ -601,7 +601,7 @@ fn earliest(a: ?Io.Timestamp, b: Io.Timestamp) Io.Timestamp {
 }
 
 fn clock(io: Io) Io.Timestamp {
-    return Io.Clock.awake.now(io);
+    return Io.Clock.now(.awake, io);
 }
 
 const DeadListenerHandler = struct {

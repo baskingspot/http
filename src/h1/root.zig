@@ -89,20 +89,17 @@ pub const SearchState = struct {
 
 /// A parsed request head.
 ///
-/// The head borrows. `method_token`, `target`, and every `headers.items` name
+/// The head borrows. `method.token()`, `target`, and every `headers.items` name
 /// and value point into the buffer passed to `parseRequest`; `headers.items`
 /// itself points into the caller's `Header` storage. The value is valid only
 /// while both are unchanged: reading more bytes into the buffer, rebasing it,
 /// or reusing the storage invalidates it. Copy anything that must outlive the
 /// parse.
 ///
-/// `method`, `version`, and `wire_version` are plain values.
+/// `method.version` and `wire_version` are plain values.
 pub const RequestHead = struct {
-    /// The common method, or null when the wire token is not one of them.
-    method: ?Method,
-    /// The exact wire token, always. Methods are case-sensitive (RFC 9110
-    /// §9.1), and the registry is open.
-    method_token: []const u8,
+    /// The method. An unnamed token is `.other`, borrowing the request bytes.
+    method: Method,
     target: []const u8,
     /// The effective version, after RFC 9110 §6.2.
     version: Version,
@@ -164,7 +161,7 @@ pub const TargetForm = enum {
 /// Classify the request-target by the form RFC 9112 §3.2 allows for `method`.
 /// Returns null when the bytes do not fit an allowed form. This is syntax only:
 /// it does not resolve the authority or normalize the path.
-pub fn targetForm(method: ?Method, target: []const u8) ?TargetForm {
+pub fn targetForm(method: Method, target: []const u8) ?TargetForm {
     if (target.len == 0) return null;
 
     if (method == .CONNECT) {
@@ -289,7 +286,6 @@ fn parseRequestInner(buf: []const u8, storage: []Header) Error!ParsedRequest {
     return .{
         .head = .{
             .method = Method.parse(method_token),
-            .method_token = method_token,
             .target = target,
             .version = version,
             .wire_version = wire_version,
@@ -655,7 +651,7 @@ test "target form: the four RFC 9112 §3.2 forms" {
     try testing.expectEqual(TargetForm.authority, targetForm(.CONNECT, "www.example.com:80").?);
     try testing.expectEqual(TargetForm.authority, targetForm(.CONNECT, "[::1]:443").?);
     try testing.expectEqual(TargetForm.asterisk, targetForm(.OPTIONS, "*").?);
-    try testing.expectEqual(TargetForm.absolute, targetForm(null, "http://example.com/").?);
+    try testing.expectEqual(TargetForm.absolute, targetForm(.GET, "http://example.com/").?);
 
     try testing.expect(targetForm(.GET, "*") == null);
     try testing.expect(targetForm(.GET, "www.example.com:80") == null);
@@ -672,7 +668,7 @@ test "fuzz target form" {
             var buf: [128]u8 = undefined;
             const target = buf[0..smith.slice(&buf)];
 
-            _ = targetForm(null, target);
+            _ = targetForm(.GET, target);
             _ = targetForm(.CONNECT, target);
             _ = targetForm(.OPTIONS, target);
             _ = targetForm(.GET, target);
@@ -738,7 +734,7 @@ test "request: a typical head (RFC 9112 §2.1, §3, §5)" {
     var storage: [8]Header = undefined;
     const parsed = try parseRequestOnce(typical, &storage);
 
-    try testing.expectEqualStrings("GET", parsed.head.method_token);
+    try testing.expectEqualStrings("GET", parsed.head.method.token());
     try testing.expect(parsed.head.method == .GET);
     try testing.expectEqualStrings("/metrics?x=1", parsed.head.target);
     try testing.expectEqual(.@"HTTP/1.1", parsed.head.version);
@@ -758,7 +754,7 @@ test "request: method is a token (RFC 9112 §3.1, RFC 9110 §5.6.2)" {
         defer testing.allocator.free(buf);
         var storage: [1]Header = undefined;
         const parsed = try parseRequestOnce(buf, &storage);
-        try testing.expectEqualStrings(method, parsed.head.method_token);
+        try testing.expectEqualStrings(method, parsed.head.method.token());
     }
 
     for ([_][]const u8{ "GE(T", "GE T", "" }) |method| {
@@ -825,14 +821,14 @@ test "request: leading empty lines are skipped (RFC 9112 §2.2)" {
     const buf = "\r\n\r\nGET / HTTP/1.1\r\n\r\n";
     const parsed = try parseRequestOnce(buf, &storage);
     try testing.expectEqual(buf.len, parsed.consumed);
-    try testing.expectEqualStrings("GET", parsed.head.method_token);
+    try testing.expectEqualStrings("GET", parsed.head.method.token());
 
     // An empty line is LF or CRLF, on its own and mixed.
     const lf = try parseRequestOnce("\n\nGET / HTTP/1.1\n\n", &storage);
     try testing.expectEqual(18, lf.consumed);
     const mixed = try parseRequestOnce("\r\n\nGET / HTTP/1.1\n\n", &storage);
     try testing.expectEqual(19, mixed.consumed);
-    try testing.expectEqualStrings("GET", mixed.head.method_token);
+    try testing.expectEqualStrings("GET", mixed.head.method.token());
 }
 
 test "field-line: name colon OWS value OWS (RFC 9112 §5, §5.1)" {
@@ -882,7 +878,7 @@ test "field-line: obs-fold is rejected (RFC 9112 §5.2)" {
 test "line endings: a bare LF ends a line (RFC 9112 §2.2)" {
     var storage: [2]Header = undefined;
     const parsed = try parseRequestOnce("GET / HTTP/1.1\nHost: x\n\n", &storage);
-    try testing.expectEqualStrings("GET", parsed.head.method_token);
+    try testing.expectEqualStrings("GET", parsed.head.method.token());
     try testing.expectEqual(@as(usize, 1), parsed.head.headers.len());
     try testing.expectEqualStrings("Host", parsed.head.headers.items[0].name);
     try testing.expectEqualStrings("x", parsed.head.headers.items[0].value);
@@ -1207,7 +1203,7 @@ test "fuzz request head" {
             };
 
             try testing.expect(parsed.consumed <= input.len);
-            try testing.expect(parsed.head.method_token.len != 0);
+            try testing.expect(parsed.head.method.token().len != 0);
             try testing.expect(parsed.head.target.len != 0);
             for (parsed.head.headers.items) |header| {
                 try testing.expect(within(input, header.name));

@@ -76,10 +76,8 @@ const Pseudo = enum {
 };
 
 pub const RequestHead = struct {
-    /// The common method, or null when the token is not one of them.
-    method: ?Method,
-    /// The exact `:method` token. Always present.
-    method_token: []const u8,
+    /// The method. A token outside the named set is `.other`.
+    method: Method,
     scheme: ?[]const u8,
     authority: ?[]const u8,
     path: ?[]const u8,
@@ -147,14 +145,14 @@ pub fn request(fields: Headers) Error!RequestHead {
     }
 
     const method_token = method orelse return error.MissingPseudo;
-    const method_enum = Method.parse(method_token);
+    const request_method = Method.parse(method_token);
 
-    if (method_enum == .CONNECT) {
+    if (request_method == .CONNECT) {
         if (protocol) |_| {
             // RFC 8441: extended CONNECT carries scheme, path, and authority.
             if (scheme == null or path == null) return error.MissingPseudo;
             if (authority == null) return error.MissingPseudo;
-            if (!validPath(path.?, method_enum)) return error.InvalidPath;
+            if (!validPath(path.?, request_method)) return error.InvalidPath;
         } else {
             // RFC 9113 §8.5: CONNECT omits scheme and path.
             if (scheme != null) return error.InvalidScheme;
@@ -164,7 +162,7 @@ pub fn request(fields: Headers) Error!RequestHead {
     } else {
         if (protocol != null) return error.InvalidProtocol;
         if (scheme == null or path == null) return error.MissingPseudo;
-        if (!validPath(path.?, method_enum)) return error.InvalidPath;
+        if (!validPath(path.?, request_method)) return error.InvalidPath;
     }
 
     if (scheme) |s| {
@@ -176,8 +174,7 @@ pub fn request(fields: Headers) Error!RequestHead {
     }
 
     return .{
-        .method = method_enum,
-        .method_token = method_token,
+        .method = request_method,
         .scheme = scheme,
         .authority = authority,
         .path = path,
@@ -282,7 +279,7 @@ fn parseStatus(value: []const u8) Error!Status {
     return Status.parse(code) orelse error.InvalidStatus;
 }
 
-fn validPath(path: []const u8, method: ?Method) bool {
+fn validPath(path: []const u8, method: Method) bool {
     if (path.len == 0) return false;
     if (path[0] == '/') return true;
     return method == .OPTIONS and mem.eql(u8, path, "*");
@@ -420,8 +417,7 @@ const request_fields = [_]Header{
 
 test "request: pseudo-headers ahead of the regular fields" {
     const head = try request(.{ .items = &request_fields });
-    try testing.expectEqual(Method.GET, head.method.?);
-    try testing.expectEqualStrings("GET", head.method_token);
+    try testing.expectEqual(Method.GET, head.method);
     try testing.expectEqualStrings("https", head.scheme.?);
     try testing.expectEqualStrings("/metrics?x=1", head.path.?);
     try testing.expectEqualStrings("example.com", head.authority.?);
@@ -437,8 +433,8 @@ test "request: an unlisted method keeps its token" {
         .{ .name = ":path", .value = "/" },
     };
     const head = try request(.{ .items = &fields });
-    try testing.expect(head.method == null);
-    try testing.expectEqualStrings("QUERY", head.method_token);
+    try testing.expect(std.meta.activeTag(head.method) == .other);
+    try testing.expectEqualStrings("QUERY", head.method.token());
 }
 
 test "response: status is three digits, regular fields follow" {

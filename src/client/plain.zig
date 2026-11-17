@@ -906,7 +906,7 @@ test "the connector carries a request and a streaming body" {
     defer client.deinit();
 
     var response = try client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = url.authority,
         .target = url.target,
@@ -957,7 +957,7 @@ test "a body read the deadline ended is a local timeout" {
     defer client.deinit();
 
     var response = try client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = url.authority,
         .target = url.target,
@@ -989,7 +989,7 @@ test "the client dials and sends through its connector" {
     defer client.deinit();
     try testing.expectEqual(@as(?Protocol, null), client.protocol());
 
-    var response = try client.send(url, .{ .method_token = "GET" });
+    var response = try client.send(url, .{ .method = .GET });
     defer response.body.close();
     try testing.expectEqual(@as(?Protocol, .h1), client.protocol());
 
@@ -1034,7 +1034,7 @@ test "a transfer hook ends a body read the peer stalled" {
     defer client.deinit();
 
     var response = try client.send(url, .{
-        .method_token = "GET",
+        .method = .GET,
         .progress = .{ .context = &state, .step = TransferStop.step },
     });
     defer response.body.abort();
@@ -1314,7 +1314,7 @@ test "a 307 keeps the method and replays the body" {
     const url = try Url.parse(testing.allocator, url_text);
     defer url.deinit(testing.allocator);
     var response = try client.send(url, .{
-        .method_token = "POST",
+        .method = .POST,
         .body = "hello",
     });
     defer response.body.close();
@@ -1345,7 +1345,7 @@ test "a redirect chain longer than max_redirects is refused" {
     const url = try Url.parse(testing.allocator, url_text);
     defer url.deinit(testing.allocator);
     try testing.expectError(error.TooManyRedirects, client.send(url, .{
-        .method_token = "GET",
+        .method = .GET,
         .max_redirects = 2,
     }));
 }

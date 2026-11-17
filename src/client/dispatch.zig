@@ -13,24 +13,25 @@
 
 const std = @import("std");
 const Io = std.Io;
-const Allocator = std.mem.Allocator;
 const mem = std.mem;
 const testing = std.testing;
+const Allocator = mem.Allocator;
+
 const time = @import("stdx").time;
 
+const h1 = @import("../h1/client/streaming.zig");
+const h2 = @import("../h2/client/client.zig");
 const Header = @import("../header.zig").Header;
+const Method = @import("../method.zig").Method;
 const uri = @import("../uri.zig");
 const Url = uri.Url;
 const common = @import("common.zig");
-const plain = @import("plain.zig");
-const transport = @import("transport.zig");
-const h1 = @import("../h1/client/streaming.zig");
-const h2 = @import("../h2/client/client.zig");
-
 pub const Protocol = common.Protocol;
 pub const Scheme = common.Scheme;
 pub const Request = common.Request;
 pub const Response = common.Response;
+const plain = @import("plain.zig");
+const transport = @import("transport.zig");
 
 // ast-grep-ignore: public-struct-field-default -- options bag; h1 is the cleartext default
 pub const Config = struct {
@@ -60,8 +61,8 @@ pub const Options = struct {
 
 // ast-grep-ignore: public-struct-field-default -- options bag; a GET without a body
 pub const RequestOptions = struct {
-    /// The exact wire method token.
-    method_token: []const u8,
+    /// The request method.
+    method: Method,
     headers: []const Header = &.{},
     /// The whole body, sent in one call. Empty when `body_reader` is used.
     body: []const u8 = "",
@@ -252,7 +253,7 @@ pub const Client = struct {
             return error.BodyNotAllowed;
         }
         const value: Request = .{
-            .method_token = options.method_token,
+            .method = options.method,
             .scheme = url.scheme,
             .authority = url.authority,
             .target = url.target,
@@ -277,7 +278,7 @@ pub const Client = struct {
 
     /// One `GET`. The common case.
     pub fn get(self: *Client, url_text: []const u8) !Response {
-        return self.fetch(url_text, .{ .method_token = "GET" });
+        return self.fetch(url_text, .{ .method = .GET });
     }
 
     /// Dial `url` and send one request over the new connection. The previous
@@ -328,10 +329,10 @@ pub const Client = struct {
             // 303 always becomes GET; 301 and 302 do for a non-GET, non-HEAD.
             const to_get = code == 303 or
                 ((code == 301 or code == 302) and
-                    !mem.eql(u8, attempt.method_token, "GET") and
-                    !mem.eql(u8, attempt.method_token, "HEAD"));
+                    attempt.method != .GET and
+                    attempt.method != .HEAD);
             if (to_get) {
-                attempt.method_token = "GET";
+                attempt.method = .GET;
                 attempt.body = "";
                 attempt.body_reader = null;
             } else if (attempt.body_reader != null) {
@@ -552,7 +553,7 @@ test "attached mode reaches the h1 adapter" {
 
     try testing.expectEqual(@as(?Protocol, .h1), client.protocol());
     try testing.expectError(error.ReadFailed, client.request(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -571,7 +572,7 @@ test "a client that only attached a socket cannot dial" {
 
     const url = try Url.parse(testing.allocator, "http://127.0.0.1:1/");
     defer url.deinit(testing.allocator);
-    try testing.expectError(error.NotDialing, client.send(url, .{ .method_token = "GET" }));
+    try testing.expectError(error.NotDialing, client.send(url, .{ .method = .GET }));
 }
 
 test "a dialing client with no request yet has no protocol" {
@@ -580,7 +581,7 @@ test "a dialing client with no request yet has no protocol" {
     defer client.deinit();
     try testing.expectEqual(@as(?Protocol, null), client.protocol());
     try testing.expectError(error.NotOpen, client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -652,7 +653,7 @@ test "send releases the connection once when the head exchange fails" {
     const url = try Url.parse(testing.allocator, "https://example.com/");
     defer url.deinit(testing.allocator);
 
-    if (client.send(url, .{ .method_token = "GET" })) |_| {
+    if (client.send(url, .{ .method = .GET })) |_| {
         return error.TestExpectedError;
     } else |_| {}
 

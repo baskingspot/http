@@ -39,7 +39,7 @@ const App = struct {
     }
 
     fn handle(_: *anyopaque, exchange: *http.h2.engine.Exchange) anyerror!void {
-        const is_head = std.mem.eql(u8, exchange.request.head.method_token, "HEAD");
+        const is_head = std.mem.eql(u8, exchange.request.head.method.token(), "HEAD");
         try exchange.respond(.{
             .status = .ok,
             .content_type = "text/plain; charset=utf-8",

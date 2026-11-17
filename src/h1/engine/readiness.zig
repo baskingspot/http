@@ -11,21 +11,21 @@ const Io = std.Io;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
-
 const fd_t = std.posix.fd_t;
+
+const common = @import("../../engine/common.zig");
+const stream_mod = @import("../../engine/stream.zig");
 const Header = @import("../../header.zig").Header;
 const Status = @import("../../status.zig").Status;
+const wait = @import("../../transport/wait.zig");
+const wait_kqueue_test = @import("../../transport/wait_kqueue.zig");
+const wait_poll_test = @import("../../transport/wait_poll.zig");
 const h1 = @import("../root.zig");
+const api = @import("common.zig");
 pub const Exchange = @import("common.zig").Exchange;
 pub const Handler = @import("common.zig").Handler;
 pub const PolicyContext = @import("common.zig").PolicyContext;
 pub const PolicyResponse = @import("common.zig").PolicyResponse;
-const wait = @import("../../transport/wait.zig");
-const wait_poll_test = @import("../../transport/wait_poll.zig");
-const wait_kqueue_test = @import("../../transport/wait_kqueue.zig");
-const common = @import("../../engine/common.zig");
-const api = @import("common.zig");
-const stream_mod = @import("../../engine/stream.zig");
 
 // ast-grep-ignore: public-struct-field-default -- options bag; the defaults are the buffer policy
 pub const Config = struct {
@@ -1027,7 +1027,7 @@ fn earliest(a: ?Io.Timestamp, b: Io.Timestamp) Io.Timestamp {
 }
 
 fn clock(io: Io) Io.Timestamp {
-    return Io.Clock.awake.now(io);
+    return Io.Clock.now(.awake, io);
 }
 
 const DeadListenerHandler = struct {

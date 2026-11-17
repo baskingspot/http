@@ -67,6 +67,12 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
+- Requests name their method with `Method`, a union of the named methods with
+  an `.other` payload for any other token. `Request.method`,
+  `RequestOptions.method`, `h1.RequestHead.method`, and
+  `h2.head.RequestHead.method` replace the separate `method_token` fields, and
+  `Method.token()` returns the exact wire bytes. `Method.parse` is total and
+  picks a tag from the token length and one integer compare per name.
 - The cleartext connector buffers its writes, so a request head leaves as one
   write instead of one syscall per field. A loopback request through
   `client.Client` drops from about 39 µs to 14 µs in `bench/compare`.

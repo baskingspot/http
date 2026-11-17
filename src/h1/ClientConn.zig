@@ -73,7 +73,7 @@ cursor: usize,
 /// so a refill must not write below it.
 head_end: usize,
 search: h1.SearchState,
-method: ?Method,
+method: Method,
 version: h1.Version,
 head: h1.ResponseHead,
 framing: h1.framing.ResponseBody,
@@ -93,7 +93,7 @@ pub fn init(config: Config) ClientConn {
         .cursor = 0,
         .head_end = 0,
         .search = .init,
-        .method = null,
+        .method = .GET,
         .version = .@"HTTP/1.1",
         .head = undefined,
         .framing = .none,
@@ -107,7 +107,7 @@ pub fn init(config: Config) ClientConn {
 /// Begin the next response. Call before writing a request and after `done`.
 /// Leftover bytes from the previous response stay at the front of the receive
 /// buffer.
-pub fn start(self: *ClientConn, method: ?Method) void {
+pub fn start(self: *ClientConn, method: Method) void {
     assert(self.phase == .head or self.phase == .done);
     // The finished head is dead; the next one is parsed from offset 0.
     self.head_end = 0;

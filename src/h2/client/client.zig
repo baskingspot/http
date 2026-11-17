@@ -375,7 +375,7 @@ pub const Client = struct {
         const fields = try self.allocator.alloc(Header, field_count);
         defer self.allocator.free(fields);
 
-        fields[0] = .{ .name = ":method", .value = value.method_token };
+        fields[0] = .{ .name = ":method", .value = value.method.token() };
         fields[1] = .{ .name = ":scheme", .value = value.scheme.token() };
         fields[2] = .{ .name = ":authority", .value = value.authority };
         fields[3] = .{ .name = ":path", .value = value.target };
@@ -1112,7 +1112,7 @@ test "the client streams a response body" {
     defer client.deinit();
 
     const response = try client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -1163,7 +1163,7 @@ test "the client releases flow control while streaming" {
     defer client.deinit();
 
     const response = try client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -1202,7 +1202,7 @@ test "the client sends a request body" {
 
     const payload = "request body";
     const response = try client.request(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -1239,7 +1239,7 @@ test "the client sends a request body through flow control" {
     var payload: [100 * 1024]u8 = undefined;
     for (&payload, 0..) |*byte, index| byte.* = @intCast(index % 251);
     const response = try client.request(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -1281,7 +1281,7 @@ test "closing an incomplete response resets the stream and is idempotent" {
     defer client.deinit();
 
     const response = try client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -1312,7 +1312,7 @@ test "connection poison is separate from request commit" {
     defer client.deinit();
 
     try testing.expectError(error.ReadFailed, client.request(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -1320,7 +1320,7 @@ test "connection poison is separate from request commit" {
     try testing.expectEqual(RequestState.committed, client.commitState());
     try testing.expect(client.isConnectionPoisoned());
     try testing.expectError(error.ConnectionPoisoned, client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -1349,7 +1349,7 @@ test "a no-body response can be followed by another request" {
 
     for (0..2) |_| {
         const response = try client.request(.{
-            .method_token = "GET",
+            .method = .GET,
             .scheme = .http,
             .authority = "example.com",
             .target = "/",
@@ -1375,21 +1375,21 @@ test "request validation happens before serialization" {
     defer client.deinit();
 
     try testing.expectError(error.DuplicateAuthority, client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
         .headers = &.{.{ .name = "Host", .value = "example.com" }},
     }));
     try testing.expectError(error.InvalidHeader, client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
         .headers = &.{.{ .name = "X-Test", .value = "one" }},
     }));
     try testing.expectError(error.InvalidHeader, client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -1422,7 +1422,7 @@ test "closing after remote END_STREAM releases without resetting" {
     defer client.deinit();
 
     const response = try client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -1455,7 +1455,7 @@ test "the client sends a static request body" {
     defer client.deinit();
 
     const response = try client.request(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -1520,7 +1520,7 @@ test "a failed END_HEADERS write is treated as committed" {
     client.writer = &failing;
 
     try testing.expectError(error.WriteFailed, client.request(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -1581,7 +1581,7 @@ test "a split header run commits when END_HEADERS fails" {
     };
 
     try testing.expectError(error.WriteFailed, client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -1643,7 +1643,7 @@ test "informational response does not become the final head" {
     defer client.deinit();
 
     const response = try client.request(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",

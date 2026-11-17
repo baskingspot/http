@@ -233,7 +233,7 @@ test "two request and response messages cross before END_STREAM (RFC 9113 §5.1)
     defer client.deinit();
 
     const body_writer = try client.begin(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/chat",
@@ -292,7 +292,7 @@ test "a peer that outruns the handler past body_bytes is reset (RFC 9113 §5.4.2
     defer client.deinit();
 
     const body_writer = try client.begin(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/chat",
@@ -358,7 +358,7 @@ test "a reset mid-body reaches the writer as Reset (RFC 9113 6.8)" {
     defer client.deinit();
 
     const body_writer = try client.begin(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/chat",
@@ -610,7 +610,7 @@ test "an expiry finishes the response it started, not a second one" {
     defer client.deinit();
 
     const body_writer = try client.begin(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/deadline",
@@ -716,7 +716,7 @@ test "a parked handler wakes at its future deadline with no input" {
     // The request ends immediately. The peer then sends nothing, so the
     // server's second turn can only come from the armed wake.
     const body_writer = try client.begin(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/wake",

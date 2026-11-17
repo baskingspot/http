@@ -126,7 +126,7 @@ const App = struct {
         }
 
         const is_root = std.mem.eql(u8, target, "/");
-        const method_name = if (head.method) |method| method.token() else "UNKNOWN";
+        const method_name = head.method.token();
         const body = if (is_root)
             try exchange.arena.print(
                 "{s} {s} ({d}-byte body)\n",

@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
 
     const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:8444");
     var response = try client.fetch("https://ztls.server.test:8444/", .{
-        .method_token = "GET",
+        .method = .GET,
         .address = address,
     });
     defer response.body.close();

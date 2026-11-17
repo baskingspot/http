@@ -507,7 +507,7 @@ test "driver reads a non-gRPC response with trailers" {
     _ = try conn.poll();
 
     _ = try conn.open(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/result",
@@ -591,7 +591,7 @@ test "driver refuses all progress after a partial frame write fails" {
     const written = writer.used;
     try testing.expectEqual(frame.preface.len + 3, written);
     _ = try conn.open(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/after-failure",

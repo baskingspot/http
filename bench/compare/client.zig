@@ -84,7 +84,7 @@ pub fn main(init: std.process.Init) !void {
         .errors = errors,
     };
 
-    const start = Io.Clock.awake.now(io);
+    const start = Io.Clock.now(.awake, io);
     const threads = try allocator.alloc(std.Thread, workers);
     defer allocator.free(threads);
     for (threads, 0..) |*thread, index| {
@@ -94,7 +94,7 @@ pub fn main(init: std.process.Init) !void {
         };
     }
     for (threads) |thread| thread.join();
-    const elapsed = start.durationTo(Io.Clock.awake.now(io));
+    const elapsed = start.durationTo(Io.Clock.now(.awake, io));
 
     for (errors) |maybe| if (maybe) |err| {
         print("error: {s}\n", .{@errorName(err)});
@@ -136,7 +136,7 @@ fn run(context: *const Context, index: usize) void {
 fn loopMux(context: *const Context, mux: *http.h2.client.mux.Mux) !void {
     for (0..context.per_worker) |_| {
         var response = try mux.request(.{
-            .method_token = "GET",
+            .method = .GET,
             .scheme = context.scheme,
             .authority = context.authority,
             .target = context.target,

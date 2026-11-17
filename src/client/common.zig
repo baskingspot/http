@@ -37,6 +37,7 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const Header = @import("../header.zig").Header;
+const Method = @import("../method.zig").Method;
 const Headers = @import("../header.zig").Headers;
 const Status = @import("../status.zig").Status;
 
@@ -57,9 +58,8 @@ pub const Scheme = enum {
 
 // ast-grep-ignore: public-struct-field-default -- request with optional body and headers
 pub const Request = struct {
-    /// The exact wire method token. Methods are case-sensitive and the
-    /// registry is open.
-    method_token: []const u8,
+    /// The method, named or carried as its exact wire token.
+    method: Method,
     scheme: Scheme,
     /// h1 sends this as Host; h2 sends it as `:authority`.
     authority: []const u8,

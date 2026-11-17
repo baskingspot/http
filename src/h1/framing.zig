@@ -85,7 +85,7 @@ pub fn request(version: Version, headers: Headers) Error!RequestBody {
 pub fn response(
     version: Version,
     status: Status,
-    request_method: ?Method,
+    request_method: Method,
     headers: Headers,
 ) Error!ResponseBody {
     // Rule 1: these responses never have a body, whatever the fields say.
@@ -247,15 +247,15 @@ test "response: no body for HEAD, 1xx, 204, and 304" {
     try testing.expectEqualDeep(ResponseBody.none, try response(.@"HTTP/1.1", .ok, .HEAD, cl));
     try testing.expectEqualDeep(
         ResponseBody.none,
-        try response(.@"HTTP/1.1", .@"continue", null, te),
+        try response(.@"HTTP/1.1", .@"continue", .GET, te),
     );
     try testing.expectEqualDeep(
         ResponseBody.none,
-        try response(.@"HTTP/1.1", .no_content, null, te),
+        try response(.@"HTTP/1.1", .no_content, .GET, te),
     );
     try testing.expectEqualDeep(
         ResponseBody.none,
-        try response(.@"HTTP/1.1", .not_modified, null, te),
+        try response(.@"HTTP/1.1", .not_modified, .GET, te),
     );
 
     // The no-body rule comes before the HTTP/1.0 faulty-framing rule.

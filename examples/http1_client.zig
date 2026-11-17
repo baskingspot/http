@@ -37,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
 
     {
         var response = try http_client.fetch(base ++ "/echo", .{
-            .method_token = "POST",
+            .method = .POST,
             .body = "ping",
         });
         defer response.body.close();

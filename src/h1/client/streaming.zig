@@ -125,7 +125,7 @@ pub const Client = struct {
         self.body_outcome = null;
         self.pending = &.{};
 
-        const method = Method.parse(value.method_token);
+        const method = value.method;
         const framing: Framing = if (value.body.len != 0)
             .{ .length = value.body.len }
         else
@@ -154,7 +154,7 @@ pub const Client = struct {
         self.body_outcome = null;
         self.pending = &.{};
 
-        const method = Method.parse(value.method_token);
+        const method = value.method;
         var w = try self.writeHead(value, .chunked);
         var buffer: [16 * 1024]u8 = undefined;
         while (true) {
@@ -181,7 +181,7 @@ pub const Client = struct {
     /// caller can frame the body.
     fn writeHead(self: *Client, value: Request, framing: Framing) !h1.Writer {
         var w: h1.Writer = .init(self.writer);
-        try w.requestLineToken(value.method_token, value.target, .@"HTTP/1.1");
+        try w.requestLine(value.method, value.target, .@"HTTP/1.1");
         var has_length = false;
         var has_transfer = false;
         for (value.headers) |header| {
@@ -203,7 +203,7 @@ pub const Client = struct {
     }
 
     /// Read the response head for a request already on the wire.
-    fn readResponse(self: *Client, method: ?Method) !Response {
+    fn readResponse(self: *Client, method: Method) !Response {
         self.conn.start(method);
         var event = try self.conn.next();
         while (true) {
@@ -554,7 +554,7 @@ test "streaming client copies a body that arrives after the head" {
     defer client.deinit();
 
     const response = try client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -588,7 +588,7 @@ test "streaming client sends a static request body" {
     defer client.deinit();
 
     const response = try client.request(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -611,14 +611,14 @@ test "request with a body reaches the response read" {
     defer client.deinit();
 
     try testing.expectError(error.ReadFailed, client.request(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
         .body = "x",
     }));
     try testing.expectError(error.DuplicateAuthority, client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -646,7 +646,7 @@ fn withBody(
     defer client.deinit();
 
     const response = try client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -686,7 +686,7 @@ test "a body read returns what arrived instead of filling the destination" {
     defer client.deinit();
 
     const response = try client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -726,7 +726,7 @@ test "abort gives the response up without reading the rest" {
     defer client.deinit();
 
     const response = try client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -738,7 +738,7 @@ test "abort gives the response up without reading the rest" {
 
     // An h1 exchange cannot be reset, so the byte stream is finished.
     try testing.expectError(error.ConnectionDirty, client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -906,7 +906,7 @@ test "a latched read cause reaches the body instead of reading as a truncation" 
     defer client.deinit();
 
     const response = try client.request(.{
-        .method_token = "GET",
+        .method = .GET,
         .scheme = .http,
         .authority = "example.com",
         .target = "/",
@@ -955,7 +955,7 @@ test "a streamed request body is chunked and ends with the last chunk" {
 
     var body: Io.Reader = .fixed("hello");
     var res = try client.requestStream(.{
-        .method_token = "POST",
+        .method = .POST,
         .scheme = .http,
         .authority = "example.com",
         .target = "/upload",

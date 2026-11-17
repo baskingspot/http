@@ -824,7 +824,7 @@ fn parseHead(self: *ServerConn, _: Io.Timestamp) Event {
     };
 
     self.version = parsed.head.version;
-    self.head_only = if (parsed.head.method) |method| method == .HEAD else false;
+    self.head_only = parsed.head.method == .HEAD;
     self.head = parsed.head;
     self.body_start = parsed.consumed;
     self.leftover_start = parsed.consumed;
@@ -1227,7 +1227,7 @@ test "a request and a response" {
         "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
     ));
     try testing.expectEqualStrings("/", request.head.target);
-    try testing.expectEqualStrings("GET", request.head.method_token);
+    try testing.expectEqualStrings("GET", request.head.method.token());
     try testing.expectEqualStrings("", request.body);
 
     try t.conn.respond(.{ .status = .ok, .content_type = "text/plain" }, "hello");
@@ -1782,7 +1782,7 @@ test "a minimum read window copies the external body tail" {
     const next = try expectRequest(try t.feed(
         "GET /next HTTP/1.1\r\nHost: x\r\n\r\n",
     ));
-    try testing.expectEqualStrings("GET", next.head.method_token);
+    try testing.expectEqualStrings("GET", next.head.method.token());
     try testing.expectEqualStrings("/next", next.head.target);
 }
 
