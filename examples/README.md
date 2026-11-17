@@ -83,8 +83,9 @@ just interop
 
 Builds `tools/http1-interop`, starts its Go `net/http` server on
 127.0.0.1:8091, and runs `examples/http1_client.zig` against the
-Content-Length, chunked, and request-body echo routes. The client uses
-`h1.client.blocking.fetch` with caller-owned buffers.
+Content-Length, chunked, and request-body echo routes. The client is
+`client.Client` from `create` to `destroy`: three `get`/`fetch` calls over one
+kept-alive connection, each body collected with `readBody`.
 
 ## HTTP/1.1 over TLS
 
@@ -93,8 +94,11 @@ just example-h1-tls          # server on 127.0.0.1:8444
 just example-h1-tls-client   # in another terminal
 ```
 
-The server and client use the blocking `tls_std` integration from
-`baskingspot/tls` and ALPN `http/1.1`. The HTTP code sees only plaintext
+The server uses the blocking `tls_std` integration from `baskingspot/tls` and
+ALPN `http/1.1`. The client is `http_tls.Client` with ALPN pinned to
+`http/1.1`, one instance for the whole exchange. The URL names the certificate
+subject (`ztls.server.test`) while `.address` sends the dial to loopback, so
+hostname verification still runs. The HTTP code sees only plaintext
 `Io.Reader` and `Io.Writer` interfaces; `just interop-tls` runs the pair in CI.
 The example certificate and scalar are the public test fixture from
 `baskingspot/tls`.
@@ -152,19 +156,20 @@ or cipher transform.
 ```sh
 just curl http://127.0.0.1:8080/
 just curl --http2 http://127.0.0.1:8081/
-just curl -k --http1.1 https://127.0.0.1:8445/
+just curl -k --address 127.0.0.1:8445 https://ztls.server.test:8445/
 just curl -d hello -X POST http://127.0.0.1:8080/
 just curl -I http://127.0.0.1:8080/
 just curl -s -H 'X-Test: value' http://127.0.0.1:8080/
-just curl -v -k https://127.0.0.1:8445/
+just curl -v -k --address 127.0.0.1:8445 https://ztls.server.test:8445/
 just curl -s https://example.com/
 ```
 
 Headers go to stdout before the body; the body streams. `-s` suppresses the
-headers. Hosts can be DNS names or IP literals. HTTPS verifies the system trust
-store by default; `-k` skips verification for the local fixtures. `-v` prints
-the resolved address, request headers and body, response status and headers,
-ALPN, cipher suite, and retained certificate chain.
-`--http2` is h2c prior knowledge on cleartext and forces h2 in ALPN;
-`--http1.1` forces h1. `-d` sends a static request body, `-X` changes the
-method, `-H` adds a header, and `-I` sends HEAD.
+headers. HTTPS verifies the system trust store by default; `-k` skips the
+certificate chain, not the hostname. A local fixture certificate names
+`ztls.server.test`, so `--address` points the dial at 127.0.0.1 while the URL
+keeps the name that SNI and the certificate check use. `-v` prints the request
+line and headers, the response status and headers, and the negotiated protocol.
+`--http2` is h2c prior knowledge on cleartext and requires h2 in ALPN;
+`--http1.1` forces h1. `-L` follows redirects. `-d` sends a static request
+body, `-X` changes the method, `-H` adds a header, and `-I` sends HEAD.

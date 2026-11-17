@@ -1,39 +1,35 @@
-//! A deliberately small curl with a streaming body.
+//! A deliberately small curl on the high-level client.
 //!
 //!     just curl http://127.0.0.1:8080/
+//!     just curl -L http://127.0.0.1:8080/redirect
 //!     just curl --http2 http://127.0.0.1:8081/
-//!     just curl -k https://127.0.0.1:8444/
+//!     just curl -k --address 127.0.0.1:8444 https://ztls.server.test:8444/
 //!     just curl -v https://baskingspot.dev/
 //!
-//! Hosts can be IP literals or DNS names. HTTPS verifies the system trust
-//! store by default; `-k` skips verification for local test fixtures.
-//! `--http2` is h2c prior knowledge on cleartext. `-v` prints the resolved
-//! address, ALPN, cipher suite, and retained certificate chain.
+//! HTTPS uses the platform trust store unless `-k` is given. `--address`
+//! connects to a given address while the URL keeps the name used for SNI and
+//! the certificate check, which is how a local fixture certificate is reached.
+//! `--http2` is h2c prior knowledge on cleartext and an ALPN requirement on
+//! TLS. `-L` follows redirects; without it a 3xx prints as the response.
 
 const std = @import("std");
 const Io = std.Io;
 const mem = std.mem;
-const Allocator = mem.Allocator;
 const print = std.debug.print;
-const HostName = Io.net.HostName;
-const IpAddress = Io.net.IpAddress;
 
 const cli = @import("cli");
 const stdx = @import("stdx");
 const http = @import("http");
+const http_tls = @import("http_tls");
 const out = stdx.stdio.out;
 const err = stdx.stdio.err;
 const client = http.client;
-const tls = @import("tls");
-const tls_std = @import("tls_std");
-
-const TlsClient = tls_std.ClientWith(.{
-    .peer_chain_storage = tls.ClientHandshake.recommended_handshake_storage,
-});
 
 pub fn main(init: std.process.Init) !void {
     defer stdx.stdio.flush();
     const io = init.io;
+    const gpa = init.gpa;
+    // Header names outlive the argument loop, so they come from the arena.
     const arena = init.arena.allocator();
 
     var http2 = false;
@@ -41,7 +37,9 @@ pub fn main(init: std.process.Init) !void {
     var silent = false;
     var verbose = false;
     var insecure = false;
+    var follow = false;
     var head = false;
+    var address: ?Io.net.IpAddress = null;
     var method: ?[]const u8 = null;
     var body: ?[]const u8 = null;
     var url_text: ?[]const u8 = null;
@@ -66,10 +64,14 @@ pub fn main(init: std.process.Init) !void {
                 verbose = true;
             } else if (opt.isSwitch("insecure", 'k')) {
                 insecure = true;
+            } else if (opt.isSwitch("location", 'L')) {
+                follow = true;
             } else if (opt.isSwitch("head", 'I')) {
                 head = true;
             } else if (opt.is("request", 'X')) {
                 method = args.takeValue(opt) orelse return usage();
+            } else if (opt.is("address", null)) {
+                address = try .parseLiteral(args.takeValue(opt) orelse return usage());
             } else if (opt.is("data", 'd')) {
                 body = args.takeValue(opt) orelse return usage();
             } else if (opt.is("header", 'H')) {
@@ -91,208 +93,50 @@ pub fn main(init: std.process.Init) !void {
     if (http1 and http2) return usage();
     if (head and body != null) return usage();
 
-    const text = url_text orelse return usage();
-    const url = try parseUrl(arena, io, text);
-    const request: client.Request = .{
+    const url_text_value = url_text orelse return usage();
+    const url = client.Url.parse(gpa, url_text_value) catch return error.InvalidUrl;
+    defer url.deinit(gpa);
+
+    const request: client.RequestOptions = .{
         .method_token = if (head) "HEAD" else (method orelse if (body != null) "POST" else "GET"),
-        .scheme = if (url.https) .https else .http,
-        .authority = url.authority,
-        .target = url.target,
         .headers = headers[0..header_count],
         .body = body orelse "",
+        .follow_redirects = follow,
+        .address = address,
     };
+
+    var http_client: http_tls.Client = undefined;
+    try http_client.init(gpa, io, .{
+        .insecure_no_chain_anchor = insecure,
+        .alpn = if (http2) &.{"h2"} else if (http1) &.{"http/1.1"} else &.{ "h2", "http/1.1" },
+        .plain = .{ .protocol = if (http2) .h2 else .h1 },
+    });
+    defer http_client.deinit();
 
     if (verbose) {
-        err.print("* host {s} resolved to ", .{url.host});
-        var address_buffer: [128]u8 = undefined;
-        var address_writer: Io.Writer = .fixed(&address_buffer);
-        try url.address.format(&address_writer);
-        err.print("{s}\n", .{address_writer.buffered()});
+        err.print("> {s} {s}\n", .{ request.method_token, url.target });
+        for (request.headers) |header| {
+            err.print("> {s}: {s}\n", .{ header.name, header.value });
+        }
+        err.print(">\n", .{});
+        err.flush();
     }
 
-    if (url.https) {
-        const stream = try url.address.connect(io, .{ .mode = .stream });
-        noDelay(stream);
-        var conn: TlsClient = undefined;
-        try conn.connect(io, stream, .{
-            .host = if (insecure) null else url.host,
-            .verify = if (insecure) .insecure else .{ .system_bundle = arena },
-            .alpn = if (http2) &.{"h2"} else if (http1) &.{"http/1.1"} else &.{ "h2", "http/1.1" },
-        });
-        defer {
-            conn.deinit();
-            conn.close();
-        }
-        const info = conn.info();
-        if (verbose) {
-            err.print("* TLS ALPN {s} cipher {s} certs {d}\n", .{
-                info.alpn orelse "none",
-                @tagName(info.cipher_suite),
-                info.peer_chain.len,
-            });
-            for (info.peer_chain, 0..) |cert, cert_index| {
-                err.print("* TLS cert[{d}] {d} bytes\n", .{ cert_index, cert.len });
-            }
-        }
-        const alpn = conn.selectedAlpn() orelse "http/1.1";
-        const negotiated: client.Protocol = if (mem.eql(u8, alpn, "h2"))
-            .h2
-        else if (mem.eql(u8, alpn, "http/1.1"))
-            .h1
-        else
-            return error.UnsupportedAlpn;
-        if (verbose) printRequest(request, negotiated);
-        var http_client: client.Client = undefined;
-        try http_client.attached(conn.reader(), conn.writer(), .{
-            .protocol = negotiated,
-            .common = .{ .allocator = arena },
-        });
-        defer http_client.deinit();
-        const response = try http_client.request(request);
-        try printResponse(response, silent, verbose);
-    } else {
-        const stream = try url.address.connect(io, .{ .mode = .stream });
-        defer stream.close(io);
-        noDelay(stream);
-        var write_buffer: [4096]u8 = undefined;
-        var stream_writer = stream.writer(io, &write_buffer);
-        var stream_reader = stream.reader(io, &.{});
-        const protocol: client.Protocol = if (http2) .h2 else .h1;
-        if (verbose) {
-            err.print("* cleartext HTTP/{s}\n", .{@tagName(protocol)});
-            printRequest(request, protocol);
-        }
-        var http_client: client.Client = undefined;
-        try http_client.attached(&stream_reader.interface, &stream_writer.interface, .{
-            .protocol = protocol,
-            .common = .{ .allocator = arena },
-        });
-        defer http_client.deinit();
-        const response = try http_client.request(request);
-        try printResponse(response, silent, verbose);
-    }
-}
-
-fn usage() error{InvalidArguments} {
-    err.print(
-        "usage: curl [-s] [-v] [-k] [-I] [-X method] [-d body] " ++
-            "[-H 'Name: value'] [--http1.1|--http2] <url>\n",
-        .{},
-    );
-    return error.InvalidArguments;
-}
-
-const Url = struct {
-    https: bool,
-    host: []const u8,
-    authority: []const u8,
-    address: IpAddress,
-    target: []const u8,
-};
-
-/// Parses `http://ip[:port][/path][?query]`. The request target is allocated
-/// from `arena`.
-fn parseUrl(arena: Allocator, io: Io, text: []const u8) !Url {
-    const uri: std.Uri = try .parse(text);
-    if (uri.user != null or uri.password != null) return error.InvalidUrl;
-    const https = if (mem.eql(u8, uri.scheme, "https"))
-        true
-    else if (mem.eql(u8, uri.scheme, "http"))
-        false
-    else
-        return error.InvalidUrl;
-
-    // `Uri.parse` fills `host` only after consuming "//", so the authority
-    // starts three bytes past the scheme and ends at the path, query, or
-    // fragment. `Host` carries it as written.
-    const after_scheme = text[uri.scheme.len + 3 ..];
-    const authority_end = mem.findAny(u8, after_scheme, "/?#") orelse after_scheme.len;
-    const authority = after_scheme[0..authority_end];
-
-    var host_buffer: [HostName.max_len]u8 = undefined;
-    // std.Uri has no host resolution; `Io.net.HostName` reads the authority.
-    const host = (try HostName.fromUri(uri, &host_buffer)).bytes;
-    const literal = if (host.len > 1 and host[0] == '[') host[1 .. host.len - 1] else host;
-
-    const port: u16 = uri.port orelse if (https) 443 else 80;
-    return .{
-        .https = https,
-        .host = literal,
-        .authority = authority,
-        .address = try resolve(io, literal, port),
-        // Origin-form request target: the path, then the query when present.
-        .target = try arena.print("{f}", .{
-            std.Uri.fmt(&uri, .{ .path = true, .query = true }),
-        }),
-    };
-}
-
-fn noDelay(stream: Io.net.Stream) void {
-    const one: u32 = 1;
-    std.posix.setsockopt(
-        stream.socket.handle,
-        std.posix.IPPROTO.TCP,
-        std.posix.TCP.NODELAY,
-        mem.asBytes(&one),
-    ) catch return;
-}
-
-fn resolve(io: Io, host: []const u8, port: u16) !IpAddress {
-    return IpAddress.parse(host, port) catch {
-        const host_name: HostName = try .init(host);
-        var results: [16]HostName.LookupResult = undefined;
-        var queue: Io.Queue(HostName.LookupResult) = .init(&results);
-        try host_name.lookup(io, &queue, .{ .port = port });
-        while (true) {
-            const result = queue.getOne(io) catch |e| return switch (e) {
-                error.Closed => error.UnknownHostName,
-                error.Canceled => error.Canceled,
-            };
-            switch (result) {
-                .address => |address| return address,
-                .canonical_name => {},
-            }
-        }
-    };
-}
-
-fn printRequest(request: client.Request, protocol: client.Protocol) void {
-    switch (protocol) {
-        .h1 => {
-            err.print("> {s} {s} HTTP/1.1\n", .{ request.method_token, request.target });
-            err.print("> Host: {s}\n", .{request.authority});
-        },
-        .h2 => {
-            err.print("> :method {s}\n", .{request.method_token});
-            err.print("> :scheme {s}\n", .{request.scheme.token()});
-            err.print("> :authority {s}\n", .{request.authority});
-            err.print("> :path {s}\n", .{request.target});
-        },
-    }
-    for (request.headers) |header| {
-        err.print("> {s}: {s}\n", .{ header.name, header.value });
-    }
-    err.print(">\n", .{});
-    if (request.body.len != 0) err.print("{s}", .{request.body});
-    err.print("\n", .{});
-    err.flush();
-}
-
-fn printResponse(response: client.Response, silent: bool, verbose: bool) !void {
+    var response = try http_client.send(url, request);
     defer response.body.close();
+
+    const protocol = http_client.protocol() orelse return error.NoProtocol;
     if (verbose) {
-        const head = response.head;
-        err.print("< {s} {d}\n", .{ @tagName(head.protocol), head.status.code() });
-        for (head.headers.items) |header| {
+        err.print("< {s} {d}\n", .{ @tagName(protocol), response.head.status.code() });
+        for (response.head.headers.items) |header| {
             err.print("< {s}: {s}\n", .{ header.name, header.value });
         }
         err.print("<\n", .{});
         err.flush();
     } else if (!silent) {
         const writer = out.writer();
-        const head = response.head;
-        try writer.print("{s} {d}\n", .{ @tagName(head.protocol), head.status.code() });
-        for (head.headers.items) |header| {
+        try writer.print("{s} {d}\n", .{ @tagName(protocol), response.head.status.code() });
+        for (response.head.headers.items) |header| {
             try writer.print("{s}: {s}\n", .{ header.name, header.value });
         }
         try writer.writeByte('\n');
@@ -301,6 +145,15 @@ fn printResponse(response: client.Response, silent: bool, verbose: bool) !void {
 
     try drain(response.body, out.writer());
     out.flush();
+}
+
+fn usage() error{InvalidArguments} {
+    err.print(
+        "usage: curl [-s] [-v] [-k] [-L] [-I] [-X method] [-d body] " ++
+            "[-H 'Name: value'] [--address ip:port] [--http1.1|--http2] <url>\n",
+        .{},
+    );
+    return error.InvalidArguments;
 }
 
 fn drain(body: client.Body, w: *Io.Writer) !void {

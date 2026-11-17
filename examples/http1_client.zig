@@ -1,74 +1,61 @@
-//! An HTTP/1 client over std.Io against the Go net/http interop server.
+//! An HTTP/1 client against the Go net/http interop server.
+//!
+//!     just interop
+//!
+//! This is the high-level client with no TLS: one `create`, one `get` per
+//! request, and `readBody` for the one-shot case. The kept-alive connection is
+//! reused across the three requests.
 
 const std = @import("std");
 const Io = std.Io;
+const mem = std.mem;
 const print = std.debug.print;
 
 const http = @import("http");
-const client = http.h1.client.buffered;
+const client = http.client;
 
-const address_text = "127.0.0.1:8091";
-
-const Buffers = struct {
-    recv: [16 * 1024]u8 = undefined,
-    headers: [32]http.Header = undefined,
-    trailers: [8]http.Header = undefined,
-    body: [16 * 1024]u8 = undefined,
-    write: [1024]u8 = undefined,
-
-    fn config(self: *Buffers) client.Config {
-        return .{
-            .recv_buffer = &self.recv,
-            .headers = &self.headers,
-            .trailers = &self.trailers,
-            .body_buffer = &self.body,
-            .write_buffer = &self.write,
-        };
-    }
-};
+const base = "http://127.0.0.1:8091";
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const address: Io.net.IpAddress = try .parseLiteral(address_text);
-    var buffers: Buffers = .{};
+    const allocator = init.gpa;
 
-    const root = try fetch(io, address, .GET, "/", "", &buffers);
-    try expectBody(root, "hello from go\n");
+    const http_client = try client.Client.create(allocator, io, .{});
+    defer http_client.destroy();
 
-    const chunked = try fetch(io, address, .GET, "/chunked", "", &buffers);
-    try expectBody(chunked, "onetwo");
+    {
+        var response = try http_client.get(base ++ "/");
+        defer response.body.close();
+        try expectBody(&response, allocator, "hello from go\n");
+    }
 
-    const echoed = try fetch(io, address, .POST, "/echo", "ping", &buffers);
-    try expectBody(echoed, "ping");
+    {
+        var response = try http_client.get(base ++ "/chunked");
+        defer response.body.close();
+        try expectBody(&response, allocator, "onetwo");
+    }
+
+    {
+        var response = try http_client.fetch(base ++ "/echo", .{
+            .method_token = "POST",
+            .body = "ping",
+        });
+        defer response.body.close();
+        try expectBody(&response, allocator, "ping");
+    }
 
     print("http1-client: interop ok\n", .{});
 }
 
-fn fetch(
-    io: Io,
-    address: Io.net.IpAddress,
-    method: http.Method,
-    target: []const u8,
-    body: []const u8,
-    buffers: *Buffers,
-) !client.Response {
-    const stream = try address.connect(io, .{ .mode = .stream });
-    defer stream.close(io);
-    return client.fetch(io, stream, .{
-        .method = method,
-        .target = target,
-        .headers = &.{.{ .name = "Host", .value = address_text }},
-        .body = body,
-    }, buffers.config());
-}
-
-fn expectBody(response: client.Response, expected: []const u8) !void {
+fn expectBody(response: *client.Response, allocator: mem.Allocator, expected: []const u8) !void {
     if (response.head.status.code() != 200) {
         print("status {d}\n", .{response.head.status.code()});
         return error.UnexpectedStatus;
     }
-    if (!std.mem.eql(u8, response.body, expected)) {
-        print("body '{s}', expected '{s}'\n", .{ response.body, expected });
+    const body = try response.readBody(allocator, .limited(64 * 1024));
+    defer allocator.free(body);
+    if (!mem.eql(u8, body, expected)) {
+        print("body '{s}', expected '{s}'\n", .{ body, expected });
         return error.UnexpectedBody;
     }
 }

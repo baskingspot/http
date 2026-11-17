@@ -1,56 +1,38 @@
-//! An HTTP/1.1 client over TLS 1.3, on std.Io.
+//! An HTTP/1.1 client over TLS 1.3 against the local example server.
 //!
-//! Start `just example-h1-tls` first, then run this from another terminal.
+//! Start `just example-h1-tls` first, then run this from another terminal with
+//! `just example-h1-tls-client`.
+//!
+//! The URL names the certificate, and `.address` points the dial at loopback,
+//! so hostname verification still runs against `ztls.server.test` while the
+//! connection goes to 127.0.0.1.
 
 const std = @import("std");
 const Io = std.Io;
 const print = std.debug.print;
 
-const http = @import("http");
-const tls_std = @import("tls_std");
-
-const address_text = "127.0.0.1:8444";
+const http_tls = @import("http_tls");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const address: Io.net.IpAddress = try .parseLiteral(address_text);
-    const stream = try address.connect(io, .{ .mode = .stream });
+    const allocator = init.gpa;
 
-    var conn: tls_std.Client = undefined;
-    try conn.connect(io, stream, .{
-        .host = null,
-        .verify = .insecure,
+    var client: http_tls.Client = undefined;
+    try client.init(allocator, io, .{
+        .insecure_no_chain_anchor = true,
         .alpn = &.{"http/1.1"},
     });
-    defer conn.deinit();
-    defer conn.close();
+    defer client.deinit();
 
-    const alpn = conn.selectedAlpn() orelse return error.NoAlpn;
-    if (!std.mem.eql(u8, alpn, "http/1.1")) return error.WrongAlpn;
-
-    var recv: [16 * 1024]u8 = undefined;
-    var headers: [32]http.Header = undefined;
-    var trailers: [8]http.Header = undefined;
-    var body: [16 * 1024]u8 = undefined;
-    var write: [1024]u8 = undefined;
-
-    const response = try http.h1.client.buffered.fetchIo(
-        conn.reader(),
-        conn.writer(),
-        .{
-            .method = .GET,
-            .target = "/",
-            .headers = &.{.{ .name = "Host", .value = "ztls.server.test" }},
-        },
-        .{
-            .recv_buffer = &recv,
-            .headers = &headers,
-            .trailers = &trailers,
-            .body_buffer = &body,
-            .write_buffer = &write,
-        },
-    );
+    const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:8444");
+    var response = try client.fetch("https://ztls.server.test:8444/", .{
+        .method_token = "GET",
+        .address = address,
+    });
+    defer response.body.close();
 
     if (response.head.status.code() != 200) return error.UnexpectedStatus;
-    print("http1-tls-client: {s}", .{response.body});
+    const body = try response.readBody(allocator, .limited(64 * 1024));
+    defer allocator.free(body);
+    print("http1-tls-client: {s}", .{body});
 }

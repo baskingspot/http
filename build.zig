@@ -654,8 +654,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "http", .module = mod },
-                    .{ .name = "tls", .module = dep.module("tls") },
-                    .{ .name = "tls_std", .module = dep.module("tls_std") },
+                    .{ .name = "http_tls", .module = http_tls_mod.? },
                 },
             });
             h1_tls_client_mod.link_libc = true;
@@ -711,7 +710,7 @@ pub fn build(b: *std.Build) void {
     // examples; the HTTP layer still sees only reader and writer interfaces.
     const curl_example_bin = b.step("example-curl-bin", "Build the HTTP/1.1 curl example");
     const curl_example_run = b.step("example-curl", "Run the HTTP/1.1 curl example");
-    if (tls_dep) |dep| {
+    if (tls_dep != null) {
         if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
             const curl_mod = b.createModule(.{
                 .root_source_file = b.path("examples/curl.zig"),
@@ -719,10 +718,9 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "http", .module = mod },
+                    .{ .name = "http_tls", .module = http_tls_mod.? },
                     .{ .name = "stdx", .module = stdx.module("stdx") },
                     .{ .name = "cli", .module = cli_dep.module("cli") },
-                    .{ .name = "tls", .module = dep.module("tls") },
-                    .{ .name = "tls_std", .module = dep.module("tls_std") },
                 },
             });
             curl_mod.link_libc = true;
