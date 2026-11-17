@@ -7,6 +7,14 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `h2.client.mux.Mux` runs concurrent requests over one h2c connection.
+  `submit` returns a `Stream`; a pump thread owns the reads and dispatches
+  frames to each stream, and `Body.reader` blocks per stream instead of per
+  connection. The transport gains `shutdown`, which wakes a read blocked in
+  another thread so the pump can be joined. The transport must accept a read
+  and a write at the same time, which a cleartext socket does and
+  `tls_nonblocking.SocketClient` does not, so TLS multiplexing waits on a
+  poll-driven pump.
 - `client.Client.create` and `http_tls.Client.create` allocate the client and
   return a pointer, so the self-referential connector storage no longer needs
   an `undefined` local. `destroy` frees it; `init` and `deinit` stay for a

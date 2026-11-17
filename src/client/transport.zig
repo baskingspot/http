@@ -118,6 +118,7 @@ pub const Connection = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
 
+    // ast-grep-ignore: public-struct-field-default -- new member, old connectors
     pub const VTable = struct {
         /// Close the socket and release the connection. TLS state is released
         /// first.
@@ -139,7 +140,14 @@ pub const Connection = struct {
         /// that dialed it, so the hook must be re-bound before each use; the
         /// old context may be gone.
         setCancel: *const fn (ptr: *anyopaque, cancel: ?Progress) void,
+        /// Wake a read blocked on another thread. Closing a socket does not
+        /// interrupt a blocked `read` on every platform; a multiplexed client
+        /// stops its pump by shutting the socket down first. The default does
+        /// nothing, which is enough for one-request-at-a-time transports.
+        shutdown: *const fn (ptr: *anyopaque) void = noopShutdown,
     };
+
+    fn noopShutdown(_: *anyopaque) void {}
 
     pub fn deinit(self: *Connection) void {
         self.vtable.deinit(self.ptr);
@@ -163,6 +171,12 @@ pub const Connection = struct {
 
     pub fn setCancel(self: *Connection, cancel: ?Progress) void {
         self.vtable.setCancel(self.ptr, cancel);
+    }
+
+    /// Wake a read blocked on another thread so the owner can tear the
+    /// connection down. The transport stays open until `deinit`.
+    pub fn shutdown(self: *Connection) void {
+        self.vtable.shutdown(self.ptr);
     }
 
     /// Bind this transport to a response body, so a deadline expiry reads as

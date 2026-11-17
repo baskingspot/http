@@ -340,6 +340,7 @@ const Wrapped = struct {
 
 const wrapped_vtable: transport.Connection.VTable = .{
     .deinit = wrappedDeinit,
+    .shutdown = wrappedShutdown,
     .setDeadline = wrappedSetDeadline,
     .readCause = wrappedReadCause,
     .writeCause = wrappedWriteCause,
@@ -352,6 +353,13 @@ fn wrappedSetCancel(ptr: *anyopaque, cancel: ?transport.Progress) void {
     // the payload changes. A connection dialed without a hook has no bridge;
     // the client refuses reuse in that case.
     self.cancel.progress = cancel;
+}
+
+fn ignoreError(_: anyerror) void {}
+
+fn wrappedShutdown(ptr: *anyopaque) void {
+    const self: *Wrapped = @ptrCast(@alignCast(ptr));
+    self.stream.shutdown(self.io, .both) catch |err| ignoreError(err);
 }
 
 fn wrappedDeinit(ptr: *anyopaque) void {

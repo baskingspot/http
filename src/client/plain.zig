@@ -181,6 +181,7 @@ pub const Connection = struct {
 
 const connection_vtable: transport.Connection.VTable = .{
     .deinit = connectionDeinit,
+    .shutdown = connectionShutdown,
     .setDeadline = connectionSetDeadline,
     .readCause = connectionReadCause,
     .writeCause = connectionWriteCause,
@@ -190,6 +191,13 @@ const connection_vtable: transport.Connection.VTable = .{
 fn connectionSetCancel(ptr: *anyopaque, cancel: ?transport.Progress) void {
     const self: *Connection = @ptrCast(@alignCast(ptr));
     self.cancel = cancel;
+}
+
+fn ignoreError(_: anyerror) void {}
+
+fn connectionShutdown(ptr: *anyopaque) void {
+    const self: *Connection = @ptrCast(@alignCast(ptr));
+    self.stream.shutdown(self.io, .both) catch |err| ignoreError(err);
 }
 
 fn connectionDeinit(ptr: *anyopaque) void {

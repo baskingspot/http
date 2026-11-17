@@ -13,6 +13,7 @@ pub const Options = connection.Options;
 
 test {
     _ = Client;
+    _ = mux;
     _ = Driver;
     _ = Connection;
     _ = Stream;
@@ -22,3 +23,4 @@ test {
     _ = Request;
     _ = Options;
 }
+pub const mux = @import("mux.zig");
