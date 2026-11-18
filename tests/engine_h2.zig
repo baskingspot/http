@@ -435,6 +435,22 @@ test "the engine copies a stack-built trailer section" {
     }
 }
 
+/// Read with a deadline. The test drives raw frames, so a missing response
+/// must fail the test rather than run into the CI job timeout.
+fn readSome(r: *Io.Reader, stream: Io.net.Stream, buf: []u8) !usize {
+    if (r.bufferedLen() == 0) {
+        var fds = [_]std.posix.pollfd{.{
+            .fd = stream.socket.handle,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        const ready = try std.posix.poll(&fds, 5_000);
+        if (ready == 0) return error.ReadTimedOut;
+    }
+    var vecs: [1][]u8 = .{buf};
+    return r.readVec(&vecs);
+}
+
 /// Find one frame by type in an accumulated byte stream. The test reads raw
 /// bytes because it sends frames that no conforming client session will emit.
 fn findFrame(bytes: []const u8, kind: http.h2.frame.FrameType) ?[]const u8 {
@@ -517,15 +533,18 @@ test "the nginx2root window sequence ends in a flow-control GOAWAY" {
     var collected: std.ArrayList(u8) = .empty;
     defer collected.deinit(testing.allocator);
     var read_buffer: [4096]u8 = undefined;
-    var vecs: [1][]u8 = .{&read_buffer};
 
     // Wait for the body before resetting. The engine must have run the
     // handler and consumed the five bytes of connection credit; only then is
     // the reset the same state nginx was in.
     var data_seen = false;
     while (!data_seen) {
-        const n = r.readVec(&vecs) catch |err| switch (err) {
+        const n = readSome(r, stream, &read_buffer) catch |err| switch (err) {
             error.EndOfStream => break,
+            error.ReadTimedOut => {
+                std.debug.print("timed out with {d} response bytes\n", .{collected.items.len});
+                return err;
+            },
             else => return err,
         };
         if (n == 0) break;
@@ -564,8 +583,12 @@ test "the nginx2root window sequence ends in a flow-control GOAWAY" {
 
     var goaway: ?[]const u8 = null;
     while (goaway == null) {
-        const n = r.readVec(&vecs) catch |err| switch (err) {
+        const n = readSome(r, stream, &read_buffer) catch |err| switch (err) {
             error.EndOfStream => break,
+            error.ReadTimedOut => {
+                std.debug.print("timed out with {d} response bytes\n", .{collected.items.len});
+                return err;
+            },
             else => return err,
         };
         if (n == 0) break;
