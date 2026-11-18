@@ -176,7 +176,7 @@ fn serverServe(ctx: *ServerCtx) !void {
         }
 
         var body_buffer: [256]u8 = undefined;
-        const method_name = if (method) |known| known.token() else "UNKNOWN";
+        const method_name = method.token();
         const response_body = try mem.print(
             &body_buffer,
             "{s} {s} ({d}-byte body)\n",
