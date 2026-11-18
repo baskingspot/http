@@ -7,6 +7,12 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `plain.Keepalive` turns on TCP keepalive for a dialed socket: idle time,
+  probe interval, and probe count. `plain.Config.keepalive` and
+  `http_tls.client.Config.keepalive` (plus `http_tls.Client.Options.keepalive`)
+  forward it, so a long-lived response stream does not sit on a half-open
+  connection. A target without the socket options fails the dial with
+  `error.KeepaliveUnsupported` rather than silently ignoring the request.
 - `h2.client.mux.Mux` runs concurrent requests over one h2c connection.
   `submit` returns a `Stream`; a pump thread owns the reads and dispatches
   frames to each stream, and `Body.reader` blocks per stream instead of per

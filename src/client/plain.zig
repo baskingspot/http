@@ -16,6 +16,7 @@
 //! deadline starts once the host is a list of addresses.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const mem = std.mem;
 const posix = std.posix;
@@ -58,6 +59,9 @@ pub const Error = error{
     Stopped,
     /// The transfer hook asked for a stop during a read.
     Canceled,
+    /// Keepalive was requested on a target where the socket option is not
+    /// implemented.
+    KeepaliveUnsupported,
     /// The peer refused the connection.
     ConnectionRefused,
     /// No route to the peer.
@@ -88,6 +92,8 @@ pub const Config = struct {
     /// Set `TCP_NODELAY` after connect. A refused option is not fatal: the
     /// connection works, it just waits on Nagle.
     no_delay: bool = true,
+    /// TCP keepalive for the dialed socket; see `DialOptions.keepalive`.
+    keepalive: ?Keepalive = null,
 };
 
 pub const Connector = struct {
@@ -133,7 +139,10 @@ pub const Connection = struct {
     fn open(context: transport.Context, config: Config) Error!*Connection {
         if (context.url.scheme == .https) return error.TlsUnsupported;
 
-        const stream = try connectStream(context, .{ .no_delay = config.no_delay });
+        const stream = try connectStream(context, .{
+            .no_delay = config.no_delay,
+            .keepalive = config.keepalive,
+        });
         errdefer stream.close(context.io);
 
         const self = try context.gpa.create(Connection);
@@ -432,6 +441,22 @@ fn waitBeforeWrite(self: *Connection) Error!void {
 pub const DialOptions = struct {
     /// Set `TCP_NODELAY`. Shared by every transport that uses this dial.
     no_delay: bool = true,
+    /// Enable TCP keepalive on the dialed socket. Null leaves the OS default,
+    /// which is off. A long-lived response stream (a watch) otherwise sits on
+    /// a half-open connection until the peer times it out.
+    keepalive: ?Keepalive = null,
+};
+
+/// TCP keepalive timers, in seconds. The defaults probe after 30 seconds and
+/// give up after five failed probes.
+// ast-grep-ignore: public-struct-field-default -- options bag; timers have defaults
+pub const Keepalive = struct {
+    /// Idle time before the first probe.
+    idle_seconds: u16 = 30,
+    /// Time between probes after the first.
+    interval_seconds: u16 = 30,
+    /// Failed probes before the connection is closed.
+    count: u8 = 5,
 };
 
 /// Resolve and connect the URL's host without wrapping the stream in an HTTP
@@ -450,7 +475,30 @@ pub fn connectStream(context: transport.Context, options: DialOptions) Error!Io.
             1,
         ) catch return error.SystemResources;
     }
+    if (options.keepalive) |value| try applyKeepalive(stream, value);
     return stream;
+}
+
+/// Apply the TCP keepalive socket options. Linux names the idle timer
+/// `TCP_KEEPIDLE`; Darwin names it `TCP_KEEPALIVE`. Both have the interval and
+/// probe-count options.
+fn applyKeepalive(stream: Io.net.Stream, value: Keepalive) Error!void {
+    const fd = stream.socket.handle;
+    stdx.posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.KEEPALIVE, 1) catch
+        return error.SystemResources;
+    if (comptime builtin.os.tag == .linux) {
+        stdx.posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.KEEPIDLE, value.idle_seconds) catch
+            return error.SystemResources;
+    } else if (comptime builtin.os.tag == .macos) {
+        stdx.posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.KEEPALIVE, value.idle_seconds) catch
+            return error.SystemResources;
+    } else {
+        return error.KeepaliveUnsupported;
+    }
+    stdx.posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.KEEPINTVL, value.interval_seconds) catch
+        return error.SystemResources;
+    stdx.posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.KEEPCNT, value.count) catch
+        return error.SystemResources;
 }
 
 fn dial(context: transport.Context) Error!Io.net.Stream {
@@ -872,6 +920,42 @@ test "an expired deadline ends the dial before it resolves" {
         .url = url,
         .deadline = past,
     }));
+}
+
+test "keepalive options apply to the dialed socket" {
+    var fixture: Fixture = undefined;
+    try fixture.init("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n", 0);
+    defer fixture.deinit();
+
+    var text: [64]u8 = undefined;
+    const url = try parseFor(fixture.address.getPort(), &text, "http");
+    defer url.deinit(testing.allocator);
+
+    var connector: Connector = .init(.{ .keepalive = .{} });
+    var connection = try connector.handle().connect(.{
+        .io = testing.io,
+        .gpa = testing.allocator,
+        .url = url,
+    });
+    defer connection.deinit();
+
+    var client: dispatch.Client = undefined;
+    try client.attached(connection.reader, connection.writer, .{
+        .protocol = connection.protocol,
+        .common = .{
+            .allocator = testing.allocator,
+            .read_cause = connection.cause(),
+        },
+    });
+    defer client.deinit();
+
+    var response = try client.request(.{
+        .method = .GET,
+        .scheme = .http,
+        .authority = "127.0.0.1",
+        .target = "/",
+    });
+    response.body.close();
 }
 
 test "the connector carries a request and a streaming body" {

@@ -206,6 +206,8 @@ pub const Config = struct {
     /// Unix seconds for certificate validity. Null reads the real clock at each
     /// handshake, which is what a long-lived client wants.
     now_sec: ?i64 = null,
+    /// TCP keepalive for the dialed socket; see `plain.Keepalive`.
+    keepalive: ?plain.Keepalive = null,
 };
 
 pub const ConnectError = error{
@@ -240,7 +242,7 @@ fn connectorConnect(ptr: *anyopaque, context: transport.Context) anyerror!transp
     const self: *Connector = @ptrCast(@alignCast(ptr));
     if (context.url.scheme == .http) return error.PlainUnsupported;
 
-    const stream = try plain.connectStream(context, .{});
+    const stream = try plain.connectStream(context, .{ .keepalive = self.config.keepalive });
     errdefer stream.close(context.io);
 
     const wrapped = try context.gpa.create(Wrapped);
@@ -434,6 +436,9 @@ pub const Client = struct {
         alpn: []const []const u8 = &automatic_alpn,
         /// Cleartext settings, used for `http` URLs.
         plain: plain.Config = .{},
+        /// TCP keepalive for TLS sockets; see `plain.Keepalive`. Cleartext
+        /// uses `Options.plain.keepalive`.
+        keepalive: ?plain.Keepalive = null,
         /// Deadline for every exchange that does not set its own.
         deadline: time.OptionalTimestamp = .none,
         /// Dial budget for every exchange that does not set its own.
@@ -472,6 +477,7 @@ pub const Client = struct {
             .trust = trust,
             .insecure_no_chain_anchor = options.insecure_no_chain_anchor,
             .alpn = options.alpn,
+            .keepalive = options.keepalive,
         });
         try self.inner.init(allocator, io, .{
             .plain = options.plain,
