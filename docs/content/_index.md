@@ -21,7 +21,7 @@ storage you own, and never allocate.
 - [HPACK](#hpack): `hpack.Decoder` and `hpack.Encoder` share the static and dynamic tables, and `prefix_int` and `huffman` are the primitives QPACK reuses.
 - [The client contract](#the-client-contract): `client.Request` and `client.Body` are protocol-neutral, and `client.Client` dispatches to an h1 or an h2 adapter.
 - [Running a server](#running-a-server): `engine.Handler(Exchange)` is the one vtable every engine calls, and `http_tls` adds TLS without putting crypto in the core.
-- [Performance](#performance): 81 ns against 79 ns on a typical request head, 255 ns against 334 ns on a wide one, and 3.8x on a 1 KiB header value.
+- [Performance](#performance): head-parser time on four heads, measured over the corpus in `bench/h1_bench.zig`, with the table as the only place the numbers live.
 - [Limits](#limits): no streaming request bodies, no connection reuse, and the rest of what is not here.
 
 The library is pre-1.0 and the API is not frozen; a consumer pins a version.
@@ -518,7 +518,7 @@ each wait the engine services the ready slots and expires what `tick` closes.
 
 `Config.max_connections` is the slot table, allocated once in `init`. A request
 allocates only when the handler uses the exchange arena. `accept_backoff` is
-the pause after `EMFILE`, `ENFILE`, or `SystemResources`, 50 ms by default.
+the pause after `EMFILE`, `ENFILE`, or `SystemResources`.
 When every slot is busy the listener is not polled, so a new connection waits
 in the accept backlog instead of being accepted and closed. The listener sets
 `SO_REUSEADDR` and not `SO_REUSEPORT`. `tcp_defer_accept` sets Linux
@@ -755,7 +755,7 @@ pseudo-field.
 
 `client.ResponseHead` is a `protocol`, a `Status`, and a `Headers` snapshot the
 client owns until the body closes or the next request starts. `client.Config`
-holds the allocator, `max_header_bytes` (16 KiB), `max_headers` (128), and an
+holds the allocator, `max_header_bytes`, `max_headers`, and an
 optional `read_cause` for a reader that latches why a read failed.
 
 ## Read a body
@@ -1088,8 +1088,8 @@ message does not have to reparse the head.
 ## The shared limits
 
 `engine.Config` holds the two knobs with the same meaning in every engine.
-`body_bytes` (64 KiB) is the largest buffered request body, and
-`arena_retain_bytes` (16 KiB) is what the arena keeps after a completion. Each
+`body_bytes` is the largest buffered request body, and
+`arena_retain_bytes` is what the arena keeps after a completion. Each
 engine's `Config` adds its buffers and its own settings under `common`, and
 `engine.Protocol` is the `.h1` or `.h2` tag for an application that serves both.
 
@@ -1208,8 +1208,8 @@ with ALPN and on one cleartext listener that sniffs the preface.
 
 # Performance
 
-Head-parser numbers, `ReleaseFast` on Linux aarch64, `neoverse_v3`, over the
-corpus in `bench/h1_bench.zig`.
+Head-parser numbers, `ReleaseFast` on Linux aarch64, `neoverse_v3`, measured
+2026-11-18, over the corpus in `bench/h1_bench.zig`.
 
 | Input                     | http   |
 | ------------------------- | ------ |
@@ -1218,10 +1218,10 @@ corpus in `bench/h1_bench.zig`.
 | 1 KiB header value        | 83 ns  |
 | Wide request, 14 fields   | 244 ns |
 
-Field count sets the cost. Fourteen fields take 3.3 times what five do,
-because the scanner reads every field. Value length is nearly free: a 1 KiB
-header value takes 83 ns against 74 ns for a whole five-field request, because
-the value is one vector pass whose length does not add iterations.
+Field count sets the cost: the scanner reads every field, so the wide head
+costs several times the typical one. Value length is nearly free: the 1 KiB row
+costs about the same as a typical five-field request, because the value is one
+vector pass whose length does not add iterations.
 
 ## Where the time goes
 
@@ -1233,8 +1233,8 @@ vector search costs more than the table lookups it replaces.
 The scanner tests drive the real scanners over every byte value at every
 position, across the vector and scalar paths.
 
-A known-method fast path measures 1 to 2 ns of a 100 ns request, and it closes
-the open method registry, so it is not here.
+A known-method fast path saves 1 to 2 ns of the typical request in the table
+above, and it closes the open method registry, so it is not here.
 
 HPACK was measured the same way: `hpack.static_table.findName` is 4.4 ns
 against 11.1 ns for the 61-entry scan it replaced, and `find` is 5.7 ns against
