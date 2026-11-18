@@ -54,6 +54,22 @@ pub fn protocolFor(selected: []const u8) ?client.Protocol {
     return null;
 }
 
+/// Resolve the HTTP protocol for a finished handshake. ALPN is optional
+/// (RFC 7301 §3.1): a peer that selects nothing did not use the extension, so
+/// fall back to HTTP/1.1 when it was offered. h2 over TLS requires ALPN
+/// (RFC 7540 §3.3), and any other offer is not evidence the peer speaks it, so
+/// those stay unresolved.
+fn negotiatedProtocol(
+    selected: ?[]const u8,
+    offered: []const []const u8,
+) ?client.Protocol {
+    if (selected) |name| return protocolFor(name);
+    for (offered) |name| {
+        if (mem.eql(u8, name, "http/1.1")) return .h1;
+    }
+    return null;
+}
+
 // ast-grep-ignore: public-struct-field-default -- init sets every field
 pub const Connection = struct {
     inner: SocketClient,
@@ -77,9 +93,11 @@ pub const Connection = struct {
         /// Current time in seconds since the Unix epoch, for certificate
         /// validity.
         now_sec: i64,
-        /// The protocols to offer, in preference order. The selection must be
-        /// one of them, or `init` is `error.WrongAlpn`. The slice is borrowed
-        /// for the connection's lifetime.
+        /// The protocols to offer, in preference order. A selection must be
+        /// one of them, or `init` is `error.WrongAlpn`. A peer that selects
+        /// nothing did not use the extension (RFC 7301 §3.1), which `init`
+        /// accepts; the caller decides what protocol that means. The slice is
+        /// borrowed for the connection's lifetime.
         alpn: []const []const u8 = &automatic_alpn,
         /// Absolute monotonic deadline for the handshake and subsequent reads.
         deadline: time.OptionalTimestamp = .none,
@@ -118,11 +136,15 @@ pub const Connection = struct {
             } else null,
         });
 
-        const selected = self.inner.selectedAlpn() orelse return error.WrongAlpn;
-        for (self.alpn_protocols) |offered| {
-            if (mem.eql(u8, offered, selected)) return;
+        // ALPN is optional (RFC 7301 §3.1): a peer that does not use the
+        // extension selects nothing. A selection that was not offered is still
+        // a protocol failure.
+        if (self.inner.selectedAlpn()) |selected| {
+            for (self.alpn_protocols) |offered| {
+                if (mem.eql(u8, offered, selected)) return;
+            }
+            return error.WrongAlpn;
         }
-        return error.WrongAlpn;
     }
 
     /// Release TLS state and trust anchors. The socket is not closed.
@@ -199,9 +221,11 @@ pub const Config = struct {
     /// Test/demo opt-out from chain verification. Hostname verification still
     /// runs. Ignored when `trust` is not `.none`.
     insecure_no_chain_anchor: bool = false,
-    /// The protocols to offer, in preference order. The peer's choice decides
-    /// the HTTP adapter. An empty list offers none, and the connection then
-    /// needs a protocol the caller knows some other way.
+    /// The protocols to offer, in preference order. The peer's selection
+    /// picks the HTTP adapter. A peer that selects nothing did not use ALPN
+    /// (RFC 7301 §3.1); if `http/1.1` was offered, the connector speaks it,
+    /// because h2 over TLS requires ALPN (RFC 7540 §3.3). Any other offer with
+    /// no selection is `error.WrongAlpn`.
     alpn: []const []const u8 = &automatic_alpn,
     /// Unix seconds for certificate validity. Null reads the real clock at each
     /// handshake, which is what a long-lived client wants.
@@ -280,8 +304,8 @@ fn connectorConnect(ptr: *anyopaque, context: transport.Context) anyerror!transp
     // Past the handshake, the same hook covers reads on the live connection.
     wrapped.cancel.phase = .transfer;
 
-    const selected = wrapped.tls.selectedAlpn() orelse return error.WrongAlpn;
-    wrapped.protocol = protocolFor(selected) orelse return error.WrongAlpn;
+    wrapped.protocol = negotiatedProtocol(wrapped.tls.selectedAlpn(), self.config.alpn) orelse
+        return error.WrongAlpn;
     return wrapped.handle();
 }
 
@@ -395,6 +419,21 @@ test "ALPN selections map to the HTTP adapter" {
     try testing.expectEqual(client.Protocol.h1, protocolFor("http/1.1").?);
     try testing.expectEqual(@as(?client.Protocol, null), protocolFor("acme/1"));
     try testing.expectEqual(@as(?client.Protocol, null), protocolFor(""));
+}
+
+test "a peer without ALPN falls back to HTTP/1.1 when it was offered" {
+    try testing.expectEqual(client.Protocol.h1, negotiatedProtocol(null, &automatic_alpn).?);
+    try testing.expectEqual(client.Protocol.h1, negotiatedProtocol(null, &.{"http/1.1"}).?);
+    try testing.expectEqual(@as(?client.Protocol, null), negotiatedProtocol(null, &.{"h2"}));
+    try testing.expectEqual(
+        @as(?client.Protocol, null),
+        negotiatedProtocol(null, &[_][]const u8{}),
+    );
+    try testing.expectEqual(client.Protocol.h2, negotiatedProtocol("h2", &automatic_alpn).?);
+    try testing.expectEqual(
+        @as(?client.Protocol, null),
+        negotiatedProtocol("acme/1", &automatic_alpn),
+    );
 }
 
 /// The easiest client in the package: one type for `http` and `https`, with the

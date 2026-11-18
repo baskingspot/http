@@ -5,6 +5,13 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A TLS peer that selects no ALPN no longer fails the dial when `http/1.1` was
+  offered. ALPN is optional (RFC 7301 §3.1), so a server that ignores the
+  extension gets HTTP/1.1; h2 over TLS still requires a selection. An offer
+  without `/http/1.1` and no selection remains `error.WrongAlpn`.
+
 ## [0.7.0] - 2026-11-18
 
 ### Added
