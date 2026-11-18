@@ -399,6 +399,51 @@ test "the connector dials https and serves a request" {
     try testing.expect(response.body.outcome() == null);
 }
 
+test "a peer that skips ALPN still speaks HTTP/1.1" {
+    const allocator = testing.allocator;
+
+    const leaf_der = try derAlloc(allocator, leaf_b64);
+    defer allocator.free(leaf_der);
+    const ca_pem = try pemAlloc(allocator, ca_b64);
+    defer allocator.free(ca_pem);
+
+    var harness: Harness = undefined;
+    try harness.init(allocator, leaf_der, .{
+        // The server ignores the extension, as an older terminator does.
+        .alpn = &.{},
+        .response = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+    });
+    defer harness.deinit();
+
+    var text: [96]u8 = undefined;
+    const url_text = try std.mem.print(
+        &text,
+        "https://ztls.server.test:{d}/",
+        .{harness.address.getPort()},
+    );
+    const url = try http.client.Url.parse(allocator, url_text);
+    defer url.deinit(allocator);
+
+    var connector: http_tls.client.Connector = .init(.{ .trust = .{ .pem = ca_pem } });
+    var client: http.client.Client = undefined;
+    try client.init(allocator, harness.io, .{ .tls = connector.handle() });
+    defer client.deinit();
+
+    var response = try client.send(url, .{
+        .method = .GET,
+        .address = harness.address,
+    });
+    defer response.body.close();
+
+    // No selection, but http/1.1 was offered, so the fallback speaks it.
+    try testing.expectEqual(http.client.Protocol.h1, client.protocol().?);
+
+    var got: [8]u8 = undefined;
+    var writer: Io.Writer = .fixed(&got);
+    const used = try response.body.reader.streamRemaining(&writer);
+    try testing.expectEqualStrings("hello", got[0..used]);
+}
+
 test "the connector refuses a cleartext URL" {
     var connector: http_tls.client.Connector = .init(.{});
     const url = try http.client.Url.parse(testing.allocator, "http://127.0.0.1:1/");
