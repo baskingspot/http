@@ -528,8 +528,10 @@ in the accept backlog instead of being accepted and closed. The listener sets
 `write_chunk_bytes` coalesces a head with the body prefix that fits it and caps
 each send at that size. Zero keeps separate head and body slices.
 `Limits.write_timeout` bounds every unsent part of a buffered response or
-stream. Each successful write restarts it. `Limits.total_timeout` still bounds
-the whole exchange.
+stream. Each successful write restarts it. `Limits.total_timeout` now bounds
+streamed responses, matching the buffered path. Streams previously ignored
+this deadline. The default 30-second total also closes an active long download
+or SSE response.
 
 For a response source, `Limits.stream_idle_timeout` starts at the first
 `Pending` result after every queued byte is sent. Later `Pending` results do not
@@ -539,9 +541,10 @@ reports `error.StreamIdleTimeout`, closes the source once, closes the socket,
 and frees the slot. It does not write a terminal chunk after an aborted
 response.
 
-Zero disables the source-idle deadline. If `total_timeout` is also zero, a
-pending source holds its slot until the source produces data or the peer
-closes. Set both limits deliberately for a long-lived response such as SSE.
+Zero disables the source-idle deadline. A long-lived response must set both
+`total_timeout` and `stream_idle_timeout` to `.zero` deliberately. With both
+limits at zero, a pending source holds its slot until the source produces data
+or the peer closes.
 
 `Limits.drain_timeout` bounds the close-after-drain phase, and `drain_bytes` is
 the scratch for it. Zero for either skips the phase.

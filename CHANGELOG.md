@@ -10,6 +10,13 @@ All notable changes to http are recorded here. The format follows
 - `h1.ServerConn.Limits.stream_idle_timeout` bounds consecutive `Pending`
   results from a response source. Zero disables this limit.
 
+### Changed
+
+- **Breaking:** `Limits.total_timeout` now bounds h1 streamed responses as
+  well as buffered responses. Streams previously ignored this deadline. A
+  long-lived response must set both `total_timeout` and `stream_idle_timeout`
+  to `.zero` deliberately.
+
 ### Fixed
 
 - The h1 readiness engines enforce `Limits.write_timeout` for streams. Source
