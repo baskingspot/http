@@ -5,6 +5,12 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The h1 and h2 direct engines retry a zero `Io.Reader.readVec` result and treat
+  only `error.EndOfStream` as EOF. Buffered readers no longer drop a request
+  head split across reads.
+
 ## [0.7.1] - 2026-11-18
 
 ### Fixed

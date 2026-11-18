@@ -11,6 +11,7 @@ const http = @import("http");
 const engine = http.h2.engine.direct;
 const Handler = http.h2.engine.Handler;
 const Exchange = http.h2.engine.Exchange;
+const SplitReader = @import("split_reader.zig").SplitReader;
 
 const TestApp = struct {
     body: []const u8 = "hello",
@@ -284,6 +285,64 @@ test "the direct engine sends a trailer section after the body" {
 
     try testing.expect(response_seen);
     try testing.expect(data_seen);
+}
+
+test "a zero read in a split request head is not EOF" {
+    var client: http.h2.Session = try .init(testing.allocator, .{
+        .role = .client,
+        .max_streams = 4,
+    });
+    defer client.deinit(testing.allocator);
+
+    var request_storage: [4096]u8 = undefined;
+    var request_writer: Io.Writer = .fixed(&request_storage);
+    try flush(&client, &request_writer);
+    _ = try client.submitRequest(testing.allocator, &request_fields, true);
+    try flush(&client, &request_writer);
+    const request = request_writer.buffered();
+    try testing.expect(request.len > 1);
+
+    const records = [_][]const u8{
+        request[0 .. request.len - 1],
+        request[request.len - 1 ..],
+    };
+    var source: SplitReader = undefined;
+    source.init(&records);
+    var response_storage: [4096]u8 = undefined;
+    var response_writer: Io.Writer = .fixed(&response_storage);
+    var read_buffer: [16 * 1024]u8 = undefined;
+    var app: TestApp = .{};
+    try engine.serveIo(testing.io, &source.reader, &response_writer, app.handler(), .{
+        .allocator = testing.allocator,
+        .read_buffer = &read_buffer,
+        .write_buffer = &.{},
+        .max_streams = 4,
+        .common = .{ .body_bytes = 1024 },
+    });
+
+    try testing.expectEqual(1, source.zero_reads);
+    try testing.expectEqual(1, app.seen);
+
+    const response = response_writer.buffered();
+    try testing.expectEqual(response.len, client.receive(response));
+    var response_seen = false;
+    var data_seen = false;
+    while (!data_seen) {
+        const event = try client.nextEvent(testing.allocator) orelse return error.EndOfStream;
+        switch (event) {
+            .response => |head| {
+                try testing.expectEqual(@as(u16, 200), head.head.status.code());
+                response_seen = true;
+            },
+            .data => |data| {
+                try testing.expectEqualStrings("hello", data.bytes);
+                data_seen = true;
+            },
+            .connection_error => return error.ConnectionError,
+            else => {},
+        }
+    }
+    try testing.expect(response_seen);
 }
 
 test "the engine copies a stack-built trailer section" {
