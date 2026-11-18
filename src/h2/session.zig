@@ -2090,6 +2090,119 @@ fn takeFrame(session: *Session, buf: []u8) !frame.Parsed {
     return frame.parse(buf[0..n], frame.default_max_frame_size);
 }
 
+fn cveFeed(session: *Session, bytes: []const u8) !void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const written = session.receive(bytes[off..]);
+        if (written == 0) return error.InputStuck;
+        off += written;
+    }
+}
+
+/// Feed one complete frame and take the event it produces, so later
+/// assertions see the state change rather than just buffered input.
+fn cveApply(session: *Session, bytes: []const u8) !void {
+    try cveFeed(session, bytes);
+    _ = (try session.nextEvent(testing.allocator)) orelse return error.MissingEvent;
+}
+
+fn cveSettingsInitialWindow(session: *Session, value: u32) !void {
+    var buf: [15]u8 = undefined;
+    var writer = frame.Writer.init(&buf);
+    try writer.begin(.settings, 0, 0);
+    try writer.int(u16, @backingInt(frame.SettingId.initial_window_size));
+    try writer.int(u32, value);
+    writer.end();
+    try cveApply(session, writer.written());
+}
+
+fn cveWindowUpdate(session: *Session, stream_id: u31, increment: u31) !void {
+    var buf: [13]u8 = undefined;
+    var writer = frame.Writer.init(&buf);
+    try writer.begin(.window_update, 0, stream_id);
+    try writer.int(u32, increment);
+    writer.end();
+    try cveApply(session, writer.written());
+}
+
+fn cveReset(session: *Session, stream_id: u31, code: frame.ErrorCode) !void {
+    var buf: [13]u8 = undefined;
+    var writer = frame.Writer.init(&buf);
+    try writer.begin(.rst_stream, 0, stream_id);
+    try writer.int(u32, @backingInt(code));
+    writer.end();
+    try cveApply(session, writer.written());
+}
+
+test "the nginx2root window sequence cannot overrun the send window" {
+    var client: Session = try .init(testing.allocator, .{ .role = .client });
+    defer client.deinit(testing.allocator);
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
+    defer server.deinit(testing.allocator);
+    try handshake(&client, &server, testing.allocator);
+
+    // CVE-2026-123007 in nginx: the peer sets the stream window to zero, raises
+    // the connection window to its maximum, grants a stream its whole body,
+    // then resets that stream. nginx returned the queued DATA's credit a second
+    // time on the reset, so the connection window passed 2^31-1 and the next
+    // unsigned bound check underflowed. This session consumes credit only when
+    // it emits DATA and never returns it on a reset, so the window stays put.
+    try cveSettingsInitialWindow(&server, 0);
+
+    const id = try client.submitRequest(testing.allocator, &request_fields, true);
+    try transfer(&client, &server);
+    _ = (try server.nextEvent(testing.allocator)).?;
+
+    const raise: u31 = @intCast(flow.max_window - 65_535);
+    try cveWindowUpdate(&server, 0, raise);
+    try testing.expectEqual(flow.max_window, server.conn_send.available);
+
+    try server.submitResponse(testing.allocator, id, .{ .status = .ok }, false);
+    const body = "01234567";
+    // No stream credit, so the session holds no queued DATA and consumes none.
+    try testing.expectEqual(
+        @as(usize, 0),
+        try server.submitData(testing.allocator, id, body, false),
+    );
+
+    try cveWindowUpdate(&server, id, @intCast(body.len));
+    try testing.expectEqual(
+        @as(usize, body.len),
+        try server.submitData(testing.allocator, id, body, false),
+    );
+    try testing.expectEqual(
+        flow.max_window - @as(i64, @intCast(body.len)),
+        server.conn_send.available,
+    );
+
+    // Give the connection back what the DATA consumed, reaching the maximum.
+    try cveWindowUpdate(&server, 0, @intCast(body.len));
+    try testing.expectEqual(flow.max_window, server.conn_send.available);
+
+    // The reset frees the stream but not the credit: nginx's second add.
+    try cveReset(&server, id, .cancel);
+    try testing.expectEqual(flow.max_window, server.conn_send.available);
+
+    // One past the maximum. nginx's check wrapped and accepted this; it must be
+    // a connection flow-control error here. Feed the frame without applying
+    // its event, because the error is the event under test.
+    var over_buf: [13]u8 = undefined;
+    var over = frame.Writer.init(&over_buf);
+    try over.begin(.window_update, 0, 0);
+    try over.int(u32, 1);
+    over.end();
+    try cveFeed(&server, over.written());
+    const event = (try server.nextEvent(testing.allocator)).?;
+    switch (event) {
+        .connection_error => |err| try testing.expectEqual(
+            frame.ErrorCode.flow_control_error,
+            err.code,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(server.isClosed());
+}
+
 test "a closed stream rejects DATA with STREAM_CLOSED" {
     var client: Session = try .init(testing.allocator, .{ .role = .client });
     defer client.deinit(testing.allocator);
