@@ -15,7 +15,10 @@ pub const ReadResult = struct {
 pub const ReadError = error{
     /// The body reached a clean end.
     EndOfStream,
-    /// No bytes are ready yet. The stream is still open.
+    /// No bytes are ready yet. The stream is still open. On a readiness h1
+    /// engine, the first result starts `Limits.stream_idle_timeout`. Later
+    /// `Pending` results preserve that deadline until a chunk or clean end
+    /// arrives.
     Pending,
     /// The read was canceled by the caller or the transport.
     Canceled,

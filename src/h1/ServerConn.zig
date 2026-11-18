@@ -72,7 +72,13 @@ pub const Limits = struct {
     head_timeout: Io.Duration = .fromSeconds(5),
     /// Zero disables the deadline.
     body_timeout: Io.Duration = .fromSeconds(10),
+    /// Zero disables the deadline. Applies to buffered response bytes and to
+    /// every unsent portion of a stream head, chunk, or terminal marker.
     write_timeout: Io.Duration = .fromSeconds(10),
+    /// Zero disables the deadline. The first `Pending` starts the deadline.
+    /// Later `Pending` results do not restart it. A returned chunk or clean end
+    /// clears it, and `write_timeout` governs the next write.
+    stream_idle_timeout: Io.Duration = .fromSeconds(10),
     /// Zero disables the deadline. Starts with the first request byte.
     total_timeout: Io.Duration = .fromSeconds(30),
     /// Bounds a lingering close after an unread request body. The engine
@@ -183,6 +189,9 @@ pub const Tick = union(enum) {
     /// Close now. Part of a response is on the wire, or a drain deadline
     /// expired.
     close,
+    /// Close now and report `error.StreamIdleTimeout`. The response source
+    /// returned `Pending` until `Limits.stream_idle_timeout` expired.
+    source_idle_timeout,
 };
 
 pub const RespondError = h1.Writer.Error || error{
@@ -194,6 +203,7 @@ pub const RespondError = h1.Writer.Error || error{
 
 const Phase = enum { head, body, app, response, drain, switched, closed };
 const ResponseKind = enum { none, interim, final };
+const ResponseDeadline = enum { write, source_idle };
 
 /// Values in storage, not the public options shape.
 const StoredLimits = struct {
@@ -203,6 +213,7 @@ const StoredLimits = struct {
     head_timeout: i64,
     body_timeout: i64,
     write_timeout: i64,
+    stream_idle_timeout: i64,
     total_timeout: i64,
     drain_timeout: i64,
 };
@@ -219,6 +230,7 @@ fn storedLimits(limits: Limits) StoredLimits {
         .head_timeout = storedDuration(limits.head_timeout),
         .body_timeout = storedDuration(limits.body_timeout),
         .write_timeout = storedDuration(limits.write_timeout),
+        .stream_idle_timeout = storedDuration(limits.stream_idle_timeout),
         .total_timeout = storedDuration(limits.total_timeout),
         .drain_timeout = storedDuration(limits.drain_timeout),
     };
@@ -262,6 +274,7 @@ response_head_sent: usize,
 response_body_sent: usize,
 response_kind: ResponseKind,
 stream_mode: ?StreamMode,
+response_deadline: ResponseDeadline,
 
 // Keep the storage at i64 nanoseconds. The public calls still take
 // Io.Timestamp; an embedding pool must not inherit 16-byte alignment.
@@ -306,6 +319,7 @@ pub fn init(config: Config) ServerConn {
         .response_body_sent = 0,
         .response_kind = .none,
         .stream_mode = null,
+        .response_deadline = .write,
 
         .last_now = 0,
         .phase_deadline = null,
@@ -432,11 +446,13 @@ pub fn eof(self: *ServerConn, now: Io.Timestamp) Event {
 }
 
 /// The poll deadline fired. Covers every phase. An idle connection with no
-/// request bytes closes silently; a started head, body, or application timeout
-/// queues a 408. A response or drain timeout closes.
+/// request bytes closes silently. A started head, body, or application timeout
+/// queues a 408. A response or drain timeout closes. A source-idle timeout
+/// returns `source_idle_timeout` so the engine can report the cause.
 pub fn tick(self: *ServerConn, now: Io.Timestamp) Tick {
     self.last_now = @intCast(now.nanoseconds);
     if (!self.timedOut(now)) return .none;
+    const source_idle = self.sourceIdleExpired(now);
 
     if (self.phase == .head and self.idle) {
         self.phase = .closed;
@@ -446,7 +462,12 @@ pub fn tick(self: *ServerConn, now: Io.Timestamp) Tick {
 
     return switch (self.phase) {
         .head, .body, .app => self.rejectTick(),
-        .response, .drain => {
+        .response => {
+            self.phase = .closed;
+            self.clearDeadlines();
+            return if (source_idle) .source_idle_timeout else .close;
+        },
+        .drain => {
             self.phase = .closed;
             self.clearDeadlines();
             return .close;
@@ -479,8 +500,9 @@ pub fn respond(
 /// Queue the head of a pull-based response body. The engine sends the head
 /// with `sendSlices` and `sent`, writes body bytes according to the returned
 /// framing, then calls `finishStream`. A `null` length is chunked on HTTP/1.1
-/// and close-delimited on HTTP/1.0. HEAD, 204, and 304 return `.none`; they
-/// must not pull the source.
+/// and close-delimited on HTTP/1.0. HEAD, 204, and 304 return `.none`. They
+/// must not pull the source. Call `streamSent` after each raw stream write and
+/// `streamPending` after `error.Pending`.
 pub fn beginStream(
     self: *ServerConn,
     options: ResponseOptions,
@@ -540,9 +562,7 @@ pub fn beginStream(
     self.response_kind = .final;
     self.stream_mode = mode;
     self.phase = .response;
-    // Streaming write deadlines are a separate policy; a non-null deadline
-    // here would wake the readiness loop without a stream-timeout path.
-    self.phase_deadline = null;
+    self.startWriteDeadline(.fromNanoseconds(self.last_now));
     return mode;
 }
 
@@ -626,6 +646,7 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
     const body_remaining = if (self.sendBody()) self.response.len - self.response_body_sent else 0;
     assert(n <= head_remaining + body_remaining);
 
+    self.startWriteDeadline(now);
     if (self.stream_mode != null) {
         assert(n <= head_remaining);
         if (n < head_remaining) {
@@ -636,7 +657,6 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
         return .more;
     }
 
-    self.phase_deadline = addDeadline(now, self.limits.write_timeout);
     if (n < head_remaining) {
         self.response_head_sent += n;
         return .more;
@@ -662,6 +682,28 @@ pub fn sent(self: *ServerConn, n: usize, now: Io.Timestamp) Done {
     }
 
     return self.finishFinal(now);
+}
+
+/// Restart the write deadline after a successful raw stream write. The engine
+/// uses this for bytes outside `sendSlices`, such as chunk framing. It uses
+/// `sent` for the response head.
+pub fn streamSent(self: *ServerConn, now: Io.Timestamp) void {
+    assert(self.phase == .response);
+    assert(self.stream_mode != null);
+    self.last_now = @intCast(now.nanoseconds);
+    self.startWriteDeadline(now);
+}
+
+/// Account for `error.Pending` after every queued stream byte was sent. The
+/// first pending result starts `stream_idle_timeout`. Polls that stay pending
+/// preserve that original deadline.
+pub fn streamPending(self: *ServerConn, now: Io.Timestamp) void {
+    assert(self.phase == .response);
+    assert(self.stream_mode != null);
+    self.last_now = @intCast(now.nanoseconds);
+    if (self.response_deadline == .source_idle) return;
+    self.response_deadline = .source_idle;
+    self.phase_deadline = addDeadline(now, self.limits.stream_idle_timeout);
 }
 
 /// Complete a final response whose head and body are fully sent. Streaming
@@ -1038,7 +1080,7 @@ fn queueResponse(
     self.response_body_sent = 0;
     self.response_kind = kind;
     self.stream_mode = null;
-    self.phase_deadline = addDeadline(.fromNanoseconds(self.last_now), self.limits.write_timeout);
+    self.startWriteDeadline(.fromNanoseconds(self.last_now));
 }
 
 fn queueContinue(self: *ServerConn) h1.Writer.Error!void {
@@ -1055,7 +1097,7 @@ fn queueContinue(self: *ServerConn) h1.Writer.Error!void {
     self.response_kind = .interim;
     self.stream_mode = null;
     self.phase = .response;
-    self.phase_deadline = addDeadline(.fromNanoseconds(self.last_now), self.limits.write_timeout);
+    self.startWriteDeadline(.fromNanoseconds(self.last_now));
 }
 
 fn sendBody(self: *const ServerConn) bool {
@@ -1106,9 +1148,24 @@ fn startPhase(self: *ServerConn, now: Io.Timestamp, timeout: i64) void {
     self.phase_deadline = addDeadline(now, timeout);
 }
 
+fn startWriteDeadline(self: *ServerConn, now: Io.Timestamp) void {
+    self.response_deadline = .write;
+    self.startPhase(now, self.limits.write_timeout);
+}
+
 fn timedOut(self: *const ServerConn, now: Io.Timestamp) bool {
     const at = self.deadline() orelse return false;
     return now.durationTo(at).nanoseconds < 0;
+}
+
+fn sourceIdleExpired(self: *const ServerConn, now: Io.Timestamp) bool {
+    if (self.phase != .response) return false;
+    if (self.response_deadline != .source_idle) return false;
+    const at = self.phase_deadline orelse return false;
+    if (self.total_deadline) |total| {
+        if (total < at) return false;
+    }
+    return now.durationTo(.fromNanoseconds(at)).nanoseconds < 0;
 }
 
 fn addDeadline(now: Io.Timestamp, duration: i64) ?i64 {
