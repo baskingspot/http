@@ -434,3 +434,171 @@ test "the engine copies a stack-built trailer section" {
         }
     }
 }
+
+/// Read with a deadline. The test drives raw frames, so a missing response
+/// must fail the test rather than run into the CI job timeout.
+fn readSome(r: *Io.Reader, stream: Io.net.Stream, buf: []u8) !usize {
+    if (r.bufferedLen() == 0) {
+        var fds = [_]std.posix.pollfd{.{
+            .fd = stream.socket.handle,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        const ready = try std.posix.poll(&fds, 5_000);
+        if (ready == 0) return error.ReadTimedOut;
+    }
+    var vecs: [1][]u8 = .{buf};
+    return r.readVec(&vecs);
+}
+
+/// Find one frame by type in an accumulated byte stream. The test reads raw
+/// bytes because it sends frames that no conforming client session will emit.
+fn findFrame(bytes: []const u8, kind: http.h2.frame.FrameType) ?[]const u8 {
+    var off: usize = 0;
+    while (off + 9 <= bytes.len) {
+        const length = (@as(usize, bytes[off]) << 16) |
+            (@as(usize, bytes[off + 1]) << 8) |
+            bytes[off + 2];
+        if (off + 9 + length > bytes.len) return null;
+        if (bytes[off + 3] == @backingInt(kind)) return bytes[off + 9 ..][0..length];
+        off += 9 + length;
+    }
+    return null;
+}
+
+test "the nginx2root window sequence ends in a flow-control GOAWAY" {
+    var harness: Harness = undefined;
+    // Ten bytes of body, but only five bytes of stream credit. The engine
+    // sends a prefix and keeps the stream open, which is nginx's state when
+    // the reset returns the queued DATA's credit a second time.
+    try harness.initWith(.{ .body = "0123456789" });
+    defer harness.deinit();
+
+    const stream = try harness.connect();
+    defer stream.close(harness.io);
+
+    var reader = stream.reader(harness.io, &.{});
+    var write_buffer: [4096]u8 = undefined;
+    var writer = stream.writer(harness.io, &write_buffer);
+    const r = &reader.interface;
+    const w = &writer.interface;
+
+    // A client session only to produce a valid HPACK HEADERS frame. Its own
+    // preface and SETTINGS are discarded; the raw client below writes those.
+    var encoder = try http.h2.Session.init(testing.allocator, .{ .role = .client });
+    defer encoder.deinit(testing.allocator);
+    var enc_out: [512]u8 = undefined;
+    while (encoder.send(&enc_out) != 0) {}
+    _ = try encoder.submitRequest(testing.allocator, &request_fields, true);
+    const headers_len = encoder.send(&enc_out);
+    try testing.expect(headers_len > 0);
+    try testing.expectEqual(
+        @as(u8, @backingInt(http.h2.frame.FrameType.headers)),
+        enc_out[3],
+    );
+
+    var frame_buf: [32]u8 = undefined;
+
+    try w.writeAll(http.h2.frame.preface);
+
+    // SETTINGS_INITIAL_WINDOW_SIZE = 0: the server can send response headers
+    // but no response DATA until the client grants stream credit.
+    var settings = http.h2.frame.Writer.init(&frame_buf);
+    try settings.begin(.settings, 0, 0);
+    try settings.int(u16, @backingInt(http.h2.frame.SettingId.initial_window_size));
+    try settings.int(u32, 0);
+    settings.end();
+    try w.writeAll(settings.written());
+
+    // Raise the connection send window to its maximum, as the exploit does.
+    const raise: u31 = @intCast(http.h2.flow.max_window - 65_535);
+    var update = http.h2.frame.Writer.init(&frame_buf);
+    try update.begin(.window_update, 0, 0);
+    try update.int(u32, raise);
+    update.end();
+    try w.writeAll(update.written());
+
+    try w.writeAll(enc_out[0..headers_len]);
+
+    // The server has queued the response head and wants to send five bytes of
+    // body but has no stream window. Grant exactly those five bytes: the DATA
+    // consumes five from the connection window.
+    var stream_update = http.h2.frame.Writer.init(&frame_buf);
+    try stream_update.begin(.window_update, 0, 1);
+    try stream_update.int(u32, 5);
+    stream_update.end();
+    try w.writeAll(stream_update.written());
+    try w.flush();
+
+    var collected: std.ArrayList(u8) = .empty;
+    defer collected.deinit(testing.allocator);
+    var read_buffer: [4096]u8 = undefined;
+
+    // Wait for the body before resetting. The engine must have run the
+    // handler and consumed the five bytes of connection credit; only then is
+    // the reset the same state nginx was in.
+    var data_seen = false;
+    while (!data_seen) {
+        const n = readSome(r, stream, &read_buffer) catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.ReadTimedOut => {
+                std.debug.print("timed out with {d} response bytes\n", .{collected.items.len});
+                return err;
+            },
+            else => return err,
+        };
+        if (n == 0) break;
+        try collected.appendSlice(testing.allocator, read_buffer[0..n]);
+        if (findFrame(collected.items, .data)) |payload| {
+            try testing.expectEqualStrings("01234", payload);
+            data_seen = true;
+        }
+    }
+    try testing.expect(data_seen);
+    try testing.expectEqual(@as(usize, 1), harness.app.seen);
+
+    // Put the connection window back at its maximum. In nginx the reset below
+    // then adds the queued DATA's credit a second time.
+    var conn_update = http.h2.frame.Writer.init(&frame_buf);
+    try conn_update.begin(.window_update, 0, 0);
+    try conn_update.int(u32, 5);
+    conn_update.end();
+    try w.writeAll(conn_update.written());
+
+    var reset = http.h2.frame.Writer.init(&frame_buf);
+    try reset.begin(.rst_stream, 0, 1);
+    try reset.int(u32, @backingInt(http.h2.frame.ErrorCode.cancel));
+    reset.end();
+    try w.writeAll(reset.written());
+    try w.flush();
+
+    // One past the maximum. nginx accepted this after its unsigned check
+    // underflowed; this server must answer with GOAWAY(FLOW_CONTROL_ERROR).
+    var over = http.h2.frame.Writer.init(&frame_buf);
+    try over.begin(.window_update, 0, 0);
+    try over.int(u32, 1);
+    over.end();
+    try w.writeAll(over.written());
+    try w.flush();
+
+    var goaway: ?[]const u8 = null;
+    while (goaway == null) {
+        const n = readSome(r, stream, &read_buffer) catch |err| switch (err) {
+            error.EndOfStream => break,
+            error.ReadTimedOut => {
+                std.debug.print("timed out with {d} response bytes\n", .{collected.items.len});
+                return err;
+            },
+            else => return err,
+        };
+        if (n == 0) break;
+        try collected.appendSlice(testing.allocator, read_buffer[0..n]);
+        goaway = findFrame(collected.items, .goaway);
+    }
+
+    const payload = goaway orelse return error.MissingGoAway;
+    try testing.expectEqual(
+        @as(u32, @backingInt(http.h2.frame.ErrorCode.flow_control_error)),
+        std.mem.readInt(u32, payload[4..][0..4], .big),
+    );
+}
