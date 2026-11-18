@@ -518,7 +518,7 @@ each wait the engine services the ready slots and expires what `tick` closes.
 
 `Config.max_connections` is the slot table, allocated once in `init`. A request
 allocates only when the handler uses the exchange arena. `accept_backoff` is
-the pause after `EMFILE`, `ENFILE`, or `SystemResources`, 50 ms by default.
+the pause after `EMFILE`, `ENFILE`, or `SystemResources`.
 When every slot is busy the listener is not polled, so a new connection waits
 in the accept backlog instead of being accepted and closed. The listener sets
 `SO_REUSEADDR` and not `SO_REUSEPORT`. `tcp_defer_accept` sets Linux
@@ -1233,8 +1233,8 @@ vector search costs more than the table lookups it replaces.
 The scanner tests drive the real scanners over every byte value at every
 position, across the vector and scalar paths.
 
-A known-method fast path measures 1 to 2 ns of a 100 ns request, and it closes
-the open method registry, so it is not here.
+A known-method fast path saves 1 to 2 ns of the typical request in the table
+above, and it closes the open method registry, so it is not here.
 
 HPACK was measured the same way: `hpack.static_table.findName` is 4.4 ns
 against 11.1 ns for the 61-entry scan it replaced, and `find` is 5.7 ns against
