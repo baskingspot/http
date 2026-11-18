@@ -12,6 +12,7 @@ const panic = std.debug.panic;
 
 const http = @import("http");
 const engine = http.h1.engine.direct;
+const SplitReader = @import("split_reader.zig").SplitReader;
 
 const TestConfig = struct {
     request_buffer: [1024]u8 = undefined,
@@ -574,6 +575,64 @@ test "204 and 304 omit Content-Length and the body" {
     try testing.expect(mem.find(u8, got, "HTTP/1.1 204 No Content\r\n") != null);
     try testing.expect(mem.find(u8, got, "HTTP/1.1 304 Not Modified\r\n") != null);
     try testing.expect(mem.find(u8, got, "Content-Length") == null);
+}
+
+test "a zero read in a split request head is not EOF" {
+    var request_buffer: [16 * 1024]u8 = undefined;
+    var headers: [16]http.Header = undefined;
+    var response_head: [512]u8 = undefined;
+    var app: TestApp = .{};
+    const records = [_][]const u8{
+        "GET",
+        " /buffered HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    };
+    var source: SplitReader = undefined;
+    source.init(&records);
+    var response_storage: [2048]u8 = undefined;
+    var response_writer: Io.Writer = .fixed(&response_storage);
+
+    try engine.serveIo(testing.io, &source.reader, &response_writer, app.handler(), .{
+        .allocator = testing.allocator,
+        .request_buffer = &request_buffer,
+        .headers = &headers,
+        .response_head_buffer = &response_head,
+    });
+
+    const response = response_writer.buffered();
+    try testing.expectEqual(1, source.zero_reads);
+    try testing.expect(mem.startsWith(u8, response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(mem.endsWith(u8, response, "/buffered 0\n"));
+}
+
+test "an empty zero read still ends a split head" {
+    var request_buffer: [16 * 1024]u8 = undefined;
+    var headers: [16]http.Header = undefined;
+    var response_head: [512]u8 = undefined;
+    var app: TestApp = .{};
+    const records = [_][]const u8{
+        "GET",
+        "",
+        " /unused HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    };
+    var source: SplitReader = undefined;
+    source.init(&records);
+    var response_storage: [2048]u8 = undefined;
+    var response_writer: Io.Writer = .fixed(&response_storage);
+
+    try engine.serveIo(testing.io, &source.reader, &response_writer, app.handler(), .{
+        .allocator = testing.allocator,
+        .request_buffer = &request_buffer,
+        .headers = &headers,
+        .response_head_buffer = &response_head,
+    });
+
+    try testing.expectEqual(2, source.record_index);
+    try testing.expectEqual(1, source.zero_reads);
+    try testing.expect(mem.startsWith(
+        u8,
+        response_writer.buffered(),
+        "HTTP/1.1 400 Bad Request\r\n",
+    ));
 }
 
 test "a body split across writes" {

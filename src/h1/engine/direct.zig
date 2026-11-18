@@ -142,7 +142,7 @@ pub fn serveIo(
                     const dst = conn.recvBuffer();
                     if (dst.len == 0) return error.NoBuffer;
                     var iovecs: [1][]u8 = .{dst};
-                    const n = reader.readVec(&iovecs) catch |err| switch (err) {
+                    var n = reader.readVec(&iovecs) catch |err| switch (err) {
                         error.EndOfStream => {
                             switch (conn.eof(now(io))) {
                                 .closed => return,
@@ -155,7 +155,20 @@ pub fn serveIo(
                         },
                         else => return err,
                     };
-                    event = if (n == 0) conn.eof(now(io)) else conn.received(n, now(io));
+                    if (n == 0) {
+                        // A buffered reader can fill its own buffer and return zero. With no
+                        // buffered bytes, preserve the existing end-of-input behavior.
+                        const buffered = reader.buffered();
+                        if (buffered.len == 0) {
+                            event = conn.eof(now(io));
+                            continue;
+                        }
+                        const take = @min(buffered.len, dst.len);
+                        @memcpy(dst[0..take], buffered[0..take]);
+                        reader.toss(take);
+                        n = take;
+                    }
+                    event = conn.received(n, now(io));
                 }
             },
             .reject => |rejection| {

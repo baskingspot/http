@@ -149,11 +149,20 @@ pub fn serveIo(
         if (try waitOrWake(io, &conn, config.wait_fd)) continue;
 
         var vecs: [1][]u8 = .{config.read_buffer};
-        const n = reader.readVec(&vecs) catch |err| switch (err) {
+        var n = reader.readVec(&vecs) catch |err| switch (err) {
             error.EndOfStream => return,
             error.ReadFailed => return err,
         };
-        if (n == 0) return;
+        if (n == 0) {
+            // A buffered reader can fill its own buffer and return zero. With no
+            // buffered bytes, preserve the existing end-of-input behavior.
+            const buffered = reader.buffered();
+            if (buffered.len == 0) return;
+            const take = @min(buffered.len, config.read_buffer.len);
+            @memcpy(config.read_buffer[0..take], buffered[0..take]);
+            reader.toss(take);
+            n = take;
+        }
 
         var offset: usize = 0;
         while (offset < n) {
