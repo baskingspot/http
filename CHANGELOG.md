@@ -5,7 +5,24 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `h1.ServerConn.Limits.stream_idle_timeout` bounds consecutive `Pending`
+  results from a response source. Zero disables this limit.
+
+### Changed
+
+- **Breaking:** `Limits.total_timeout` now bounds h1 streamed responses as
+  well as buffered responses. Streams previously ignored this deadline. A
+  long-lived response must set both `total_timeout` and `stream_idle_timeout`
+  to `.zero` deliberately.
+
 ### Fixed
+
+- The h1 readiness engines enforce `Limits.write_timeout` for streams. Source
+  expiry reports `error.StreamIdleTimeout`, closes the source once, and releases
+  its slot. Activity on another connection no longer forces an early source
+  poll.
 
 - The h1 and h2 direct engines transfer buffered bytes after a zero
   `Io.Reader.readVec` result. A request head split across reads no longer

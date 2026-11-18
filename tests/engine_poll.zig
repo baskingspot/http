@@ -21,25 +21,36 @@ const ChunkStream = struct {
     chunks: []const []const u8,
     index: usize = 0,
     pulls: *usize,
+    ready: ?*const std.atomic.Value(bool) = null,
+    closes: ?*std.atomic.Value(u32) = null,
 
     const vtable: http.stream.ReadStream.VTable = .{ .next = next, .close = close };
 
     fn next(ptr: *anyopaque) http.stream.ReadError!http.stream.ReadResult {
         const self: *ChunkStream = @ptrCast(@alignCast(ptr));
         self.pulls.* += 1;
+        if (self.ready) |ready| {
+            if (!ready.load(.acquire)) return error.Pending;
+        }
         if (self.index >= self.chunks.len) return error.EndOfStream;
         const chunk = self.chunks[self.index];
         self.index += 1;
         return .{ .data = chunk };
     }
 
-    fn close(_: *anyopaque) void {}
+    fn close(ptr: *anyopaque) void {
+        const self: *ChunkStream = @ptrCast(@alignCast(ptr));
+        if (self.closes) |closes| _ = closes.fetchAdd(1, .monotonic);
+    }
 };
 
 const TestApp = struct {
     complete_count: usize = 0,
     last_reason: ?h1.ServerConn.RejectReason = null,
+    last_error: ?anyerror = null,
     pulls: usize = 0,
+    stream_ready: std.atomic.Value(bool) = .init(false),
+    stream_closes: std.atomic.Value(u32) = .init(0),
     io: Io = testing.io,
 
     fn handler(self: *TestApp) engine.Handler {
@@ -119,6 +130,44 @@ const TestApp = struct {
             });
             return;
         }
+        if (mem.eql(u8, target, "/stream-idle") or
+            mem.eql(u8, target, "/stream-resume") or
+            mem.eql(u8, target, "/stream-close"))
+        {
+            const source = try exchange.arena.create(ChunkStream);
+            source.* = .{
+                .chunks = if (mem.eql(u8, target, "/stream-resume"))
+                    &.{"resumed\n"}
+                else
+                    &.{},
+                .pulls = &self.pulls,
+                .ready = &self.stream_ready,
+                .closes = &self.stream_closes,
+            };
+            try exchange.respondStream(.{ .status = .ok }, .{
+                .stream = .{ .ptr = source, .vtable = &ChunkStream.vtable },
+                .content_length = null,
+            });
+            return;
+        }
+        if (mem.eql(u8, target, "/stream-big")) {
+            const body = try exchange.arena.alloc(u8, 1024 * 1024);
+            @memset(body, 's');
+            const chunks = try exchange.arena.alloc([]const u8, 1);
+            chunks[0] = body;
+            const source = try exchange.arena.create(ChunkStream);
+            source.* = .{
+                .chunks = chunks,
+                .pulls = &self.pulls,
+                .ready = &self.stream_ready,
+                .closes = &self.stream_closes,
+            };
+            try exchange.respondStream(.{ .status = .ok }, .{
+                .stream = .{ .ptr = source, .vtable = &ChunkStream.vtable },
+                .content_length = null,
+            });
+            return;
+        }
         if (mem.eql(u8, target, "/no-response")) return;
         if (mem.eql(u8, target, "/big")) {
             const body = try exchange.arena.alloc(u8, 1024 * 1024);
@@ -173,8 +222,9 @@ const TestApp = struct {
         self.complete_count += 1;
     }
 
-    fn reportError(_: *anyopaque, err: anyerror) void {
-        _ = @errorName(err);
+    fn reportError(ptr: *anyopaque, err: anyerror) void {
+        const self: *TestApp = @ptrCast(@alignCast(ptr));
+        self.last_error = err;
     }
 
     fn policyResponse(
@@ -275,6 +325,14 @@ const Harness = struct {
 
     fn connect(self: *Harness) !Io.net.Stream {
         return self.address.connect(self.io, .{ .mode = .stream });
+    }
+
+    fn waitForStreamClose(self: *Harness) !void {
+        for (0..200) |_| {
+            if (self.app.stream_closes.load(.acquire) != 0) return;
+            try self.io.sleep(.fromMilliseconds(5), .awake);
+        }
+        return error.StreamCloseTimeout;
     }
 };
 
@@ -638,6 +696,150 @@ test "poll a slow reader hits the write deadline" {
     try testing.expect(mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
     try testing.expect(got.len < 4 * 1024 * 1024);
     try testing.expect(h.server.slots[0].arena.queryCapacity() <= 16 * 1024);
+}
+
+test "poll a stalled stream hits the write deadline and closes its source once" {
+    var h: Harness = undefined;
+    try h.initConfig(.{
+        .write_timeout = .fromMilliseconds(50),
+        .stream_idle_timeout = .fromSeconds(5),
+        .total_timeout = .fromSeconds(5),
+    }, 8, 16 * 1024);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+
+    var receive_buffer: c_int = 1024;
+    try std.posix.setsockopt(
+        stream.socket.handle,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.RCVBUF,
+        mem.asBytes(&receive_buffer),
+    );
+
+    try send(
+        stream,
+        h.io,
+        "GET /stream-big HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+
+    var response: [2 * 1024 * 1024]u8 = undefined;
+    var head_buffer: [512]u8 = undefined;
+    const head = try readHead(stream, h.io, &head_buffer);
+    try testing.expect(mem.startsWith(u8, head, "HTTP/1.1 200 OK\r\n"));
+
+    var send_buffer: c_int = 1024;
+    try std.posix.setsockopt(
+        h.server.slots[0].fd,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.SNDBUF,
+        mem.asBytes(&send_buffer),
+    );
+    h.app.stream_ready.store(true, .release);
+    try h.io.sleep(.fromMilliseconds(200), .awake);
+
+    const got = try readAll(stream, h.io, &response);
+    try testing.expect(got.len > 0);
+    try testing.expect(got.len < 1024 * 1024);
+    try testing.expectEqual(@as(u32, 1), h.app.stream_closes.load(.acquire));
+    try testing.expect(h.app.last_error == null);
+}
+
+test "poll a pending source times out once and releases the only slot" {
+    var h: Harness = undefined;
+    try h.initConfig(.{
+        .write_timeout = .fromSeconds(5),
+        .stream_idle_timeout = .fromMilliseconds(80),
+        .total_timeout = .fromSeconds(5),
+    }, 1, 16 * 1024);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+    try send(
+        stream,
+        h.io,
+        "GET /stream-idle HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+
+    var head_buffer: [512]u8 = undefined;
+    const head = try readHead(stream, h.io, &head_buffer);
+    try testing.expect(mem.startsWith(u8, head, "HTTP/1.1 200 OK\r\n"));
+
+    var response: [512]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expectEqualStrings("", got);
+    const expected_error: anyerror = error.StreamIdleTimeout;
+    const last_error = h.app.last_error orelse return error.MissingStreamError;
+    try testing.expect(last_error == expected_error);
+    try testing.expectEqual(@as(u32, 1), h.app.stream_closes.load(.acquire));
+
+    const next = try h.connect();
+    defer next.close(h.io);
+    try send(
+        next,
+        h.io,
+        "GET /plain HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    var next_response: [1024]u8 = undefined;
+    const next_got = try readAll(next, h.io, &next_response);
+    try testing.expect(mem.startsWith(u8, next_got, "HTTP/1.1 200 OK\r\n"));
+    try testing.expect(mem.endsWith(u8, next_got, "plain\n"));
+    try testing.expectEqual(@as(u32, 1), h.app.stream_closes.load(.acquire));
+}
+
+test "poll a pending source survives a stall shorter than its idle deadline" {
+    var h: Harness = undefined;
+    try h.initConfig(.{
+        .stream_idle_timeout = .fromMilliseconds(500),
+        .total_timeout = .fromSeconds(5),
+    }, 8, 16 * 1024);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    defer stream.close(h.io);
+    try send(
+        stream,
+        h.io,
+        "GET /stream-resume HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+
+    var head_buffer: [512]u8 = undefined;
+    _ = try readHead(stream, h.io, &head_buffer);
+    try h.io.sleep(.fromMilliseconds(100), .awake);
+    h.app.stream_ready.store(true, .release);
+
+    var response: [512]u8 = undefined;
+    const got = try readAll(stream, h.io, &response);
+    try testing.expect(mem.find(u8, got, "resumed\n") != null);
+    try testing.expect(mem.endsWith(u8, got, "0\r\n\r\n"));
+    try testing.expect(h.app.pulls >= 2);
+    try testing.expectEqual(@as(u32, 1), h.app.stream_closes.load(.acquire));
+    try testing.expect(h.app.last_error == null);
+}
+
+test "poll client close during stream wait closes its source once" {
+    var h: Harness = undefined;
+    try h.initConfig(.{
+        .stream_idle_timeout = .fromSeconds(5),
+        .total_timeout = .fromSeconds(5),
+    }, 8, 16 * 1024);
+    defer h.deinit();
+
+    const stream = try h.connect();
+    try send(
+        stream,
+        h.io,
+        "GET /stream-close HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    var head_buffer: [512]u8 = undefined;
+    _ = try readHead(stream, h.io, &head_buffer);
+
+    stream.close(h.io);
+    try h.waitForStreamClose();
+    try testing.expectEqual(@as(u32, 1), h.app.stream_closes.load(.acquire));
+    try testing.expect(h.app.last_error == null);
 }
 
 test "poll reports exchange completion" {

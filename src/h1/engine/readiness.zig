@@ -51,6 +51,7 @@ pub const Config = struct {
 };
 
 const State = enum { free, read, write, stream_wait, app_wait, drain };
+const stream_poll_interval: Io.Duration = .fromMilliseconds(50);
 
 const Slot = struct {
     conn: h1.ServerConn,
@@ -65,6 +66,7 @@ const Slot = struct {
     exchange_active: bool = false,
     response_stream: ?stream_mod.ResponseStream = null,
     response_options: ?h1.ServerConn.ResponseOptions = null,
+    stream_poll_deadline: ?Io.Timestamp = null,
     stream_mode: ?h1.ServerConn.StreamMode = null,
     stream_chunk_header: [24]u8 = undefined,
     stream_chunk_header_len: usize = 0,
@@ -267,8 +269,8 @@ pub fn Server(comptime Waiter: type) type {
                 if (slot.conn.deadline()) |at| {
                     deadline = earliest(deadline, at);
                 }
-                if (slot.state == .stream_wait) {
-                    deadline = earliest(deadline, now.addDuration(.fromMilliseconds(50)));
+                if (slot.stream_poll_deadline) |at| {
+                    deadline = earliest(deadline, at);
                 }
                 if (slot.exchange.deferred_deadline) |at| {
                     deadline = earliest(deadline, at);
@@ -288,8 +290,7 @@ pub fn Server(comptime Waiter: type) type {
             for (self.slots) |*slot| {
                 if (slot.state == .free) continue;
                 if (slot.state == .stream_wait) {
-                    slot.state = .write;
-                    self.writeStreamSlot(slot, now);
+                    self.expireStreamWait(slot, now);
                     continue;
                 }
                 if (slot.state == .app_wait) {
@@ -309,10 +310,10 @@ pub fn Server(comptime Waiter: type) type {
                             slot.state = .write;
                         },
                         .close => self.closeSlot(slot),
+                        .source_idle_timeout => unreachable,
                     }
                     continue;
                 }
-                if (slot.response_stream != null) continue;
                 const at = slot.conn.deadline() orelse continue;
                 if (now.durationTo(at).nanoseconds > 0) continue;
                 switch (slot.conn.tick(now)) {
@@ -322,8 +323,33 @@ pub fn Server(comptime Waiter: type) type {
                         slot.state = .write;
                     },
                     .close => self.closeSlot(slot),
+                    .source_idle_timeout => self.timeoutStreamSource(slot),
                 }
             }
+        }
+
+        fn expireStreamWait(self: *Self, slot: *Slot, now: Io.Timestamp) void {
+            if (slot.conn.deadline()) |at| {
+                if (now.durationTo(at).nanoseconds <= 0) {
+                    switch (slot.conn.tick(now)) {
+                        .none => return,
+                        .reject => unreachable,
+                        .close => self.closeSlot(slot),
+                        .source_idle_timeout => self.timeoutStreamSource(slot),
+                    }
+                    return;
+                }
+            }
+            const poll_at = slot.stream_poll_deadline orelse now;
+            if (now.durationTo(poll_at).nanoseconds > 0) return;
+            slot.stream_poll_deadline = null;
+            slot.state = .write;
+            self.writeStreamSlot(slot, now);
+        }
+
+        fn timeoutStreamSource(self: *Self, slot: *Slot) void {
+            self.report(error.StreamIdleTimeout);
+            self.closeSlot(slot);
         }
 
         fn acceptAll(self: *Self, now: Io.Timestamp) !void {
@@ -362,6 +388,7 @@ pub fn Server(comptime Waiter: type) type {
                 slot.response_options = null;
             }
             slot.stream_mode = null;
+            slot.stream_poll_deadline = null;
             slot.exchange.response_stream = null;
             slot.exchange.response_options = null;
             self.cancelDeferred(slot);
@@ -615,6 +642,7 @@ pub fn Server(comptime Waiter: type) type {
 
             slot.response_stream = source;
             slot.response_options = options;
+            slot.stream_poll_deadline = null;
             slot.stream_mode = mode;
             slot.stream_chunk_header_len = 0;
             slot.stream_chunk_header_sent = 0;
@@ -639,6 +667,7 @@ pub fn Server(comptime Waiter: type) type {
             slot.response_options = null;
             slot.exchange.response_stream = null;
             slot.exchange.response_options = null;
+            slot.stream_poll_deadline = null;
             slot.stream_mode = null;
             const done = slot.conn.finishStream(now);
             self.finishExchange(slot);
@@ -704,6 +733,7 @@ pub fn Server(comptime Waiter: type) type {
                             return;
                         }
                         slot.stream_chunk_header_sent += n;
+                        slot.conn.streamSent(now);
                         continue;
                     }
                     self.finishStreamSlot(slot, now);
@@ -733,6 +763,7 @@ pub fn Server(comptime Waiter: type) type {
                         slot.stream_chunk_header_sent = slot.stream_chunk_header_len;
                         slot.stream_body_sent += n - header.len;
                     }
+                    slot.conn.streamSent(now);
                     continue;
                 }
 
@@ -753,6 +784,7 @@ pub fn Server(comptime Waiter: type) type {
                         return;
                     }
                     slot.stream_body_sent += n;
+                    slot.conn.streamSent(now);
                     continue;
                 }
 
@@ -794,6 +826,7 @@ pub fn Server(comptime Waiter: type) type {
                             return;
                         }
                         if (mode == .chunked) {
+                            slot.conn.streamSent(now);
                             @memcpy(slot.stream_chunk_header[0..5], "0\r\n\r\n");
                             slot.stream_chunk_header_len = 5;
                             slot.stream_chunk_header_sent = 0;
@@ -804,6 +837,8 @@ pub fn Server(comptime Waiter: type) type {
                         return;
                     },
                     error.Pending => {
+                        slot.conn.streamPending(now);
+                        slot.stream_poll_deadline = now.addDuration(stream_poll_interval);
                         slot.state = .stream_wait;
                         return;
                     },
@@ -816,6 +851,7 @@ pub fn Server(comptime Waiter: type) type {
                     self.closeSlot(slot);
                     return;
                 }
+                slot.conn.streamSent(now);
                 slot.stream_total = std.math.add(
                     u64,
                     slot.stream_total,

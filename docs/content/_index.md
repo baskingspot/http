@@ -497,9 +497,10 @@ connection at a time, and `serve` drives one stream. `serveIo` is the same loop
 over a plaintext `*std.Io.Reader` and `*std.Io.Writer`, which is the seam a TLS
 wrapper uses.
 
-Every timeout is zero here, because the engine's reads and writes have no
-deadline. Use
-it for tools, tests, and trusted peers. The accept loop retries
+Every timeout is zero here, including both stream timeouts, because the
+engine's reads and writes have no deadline. A response source that returns
+`Pending` fails with `error.StreamPending`. Use it for tools, tests, and
+trusted peers. The accept loop retries
 `ConnectionAborted` and `WouldBlock`, sleeps a second on `SystemResources` and
 the fd quotas, and returns on anything else.
 
@@ -526,8 +527,27 @@ in the accept backlog instead of being accepted and closed. The listener sets
 
 `write_chunk_bytes` coalesces a head with the body prefix that fits it and caps
 each send at that size. Zero keeps separate head and body slices.
+`Limits.write_timeout` bounds every unsent part of a buffered response or
+stream. Each successful write restarts it. `Limits.total_timeout` now bounds
+streamed responses, matching the buffered path. Streams previously ignored
+this deadline. The default 30-second total also closes an active long download
+or SSE response.
+
+For a response source, `Limits.stream_idle_timeout` starts at the first
+`Pending` result after every queued byte is sent. Later `Pending` results do not
+restart the deadline. A returned chunk or clean end restores the write
+deadline. The engine polls a pending source every 50 ms at most. On expiry, it
+reports `error.StreamIdleTimeout`, closes the source once, closes the socket,
+and frees the slot. It does not write a terminal chunk after an aborted
+response.
+
+Zero disables the source-idle deadline. A long-lived response must set both
+`total_timeout` and `stream_idle_timeout` to `.zero` deliberately. With both
+limits at zero, a pending source holds its slot until the source produces data
+or the peer closes.
+
 `Limits.drain_timeout` bounds the close-after-drain phase, and `drain_bytes` is
-the scratch for it; zero for either skips the phase.
+the scratch for it. Zero for either skips the phase.
 
 io_uring is not an engine here. `examples/http1_uring.zig` drives
 `h1.ServerConn` from a completion loop directly, which is the shape a caller

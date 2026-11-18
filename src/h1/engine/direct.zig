@@ -2,8 +2,9 @@
 //!
 //! One connection is served at a time. The engine uses the Io runtime's
 //! plain read and write calls, so it cannot enforce connection deadlines;
-//! all timeouts are zero. Use it for tools, tests, and trusted peers. The
-//! evented engines are separate.
+//! all timeouts are zero, including both stream timeouts. A response source
+//! that returns `Pending` fails with `error.StreamPending`. The evented engines
+//! are separate.
 
 const std = @import("std");
 const Io = std.Io;
@@ -105,6 +106,7 @@ pub fn serveIo(
             .head_timeout = .zero,
             .body_timeout = .zero,
             .write_timeout = .zero,
+            .stream_idle_timeout = .zero,
             .total_timeout = .zero,
             .drain_timeout = .zero,
         },
