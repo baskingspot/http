@@ -78,7 +78,9 @@ All notable changes to http are recorded here. The format follows
   `RequestOptions.method`, `h1.RequestHead.method`, and
   `h2.head.RequestHead.method` replace the separate `method_token` fields, and
   `Method.token()` returns the exact wire bytes. `Method.parse` is total and
-  picks a tag from the token length and one integer compare per name.
+  picks a tag from the token length and one integer compare per name; a token
+  outside the named set is `.other` carrying its bytes, so a router sees an
+  unknown method instead of a null one.
 - The cleartext connector buffers its writes, so a request head leaves as one
   write instead of one syscall per field. A loopback request through
   `client.Client` drops from about 39 µs to 14 µs in `bench/compare`.
