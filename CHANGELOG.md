@@ -5,6 +5,8 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-18
+
 ### Added
 
 - `plain.Keepalive` turns on TCP keepalive for a dialed socket: idle time,
@@ -57,6 +59,27 @@ All notable changes to http are recorded here. The format follows
   so one client reaches both protocols and an `https` URL without a TLS
   connector is `error.TlsUnsupported`.
 
+### Changed
+
+- Requests name their method with `Method`, a union of the named methods with
+  an `.other` payload for any other token. `Request.method`,
+  `RequestOptions.method`, `h1.RequestHead.method`, and
+  `h2.head.RequestHead.method` replace the separate `method_token` fields, and
+  `Method.token()` returns the exact wire bytes. `Method.parse` is total and
+  picks a tag from the token length and one integer compare per name; a token
+  outside the named set is `.other` carrying its bytes, so a router sees an
+  unknown method instead of a null one.
+- The cleartext connector buffers its writes, so a request head leaves as one
+  write instead of one syscall per field. A loopback request through
+  `client.Client` drops from about 39 µs to 14 µs in `bench/compare`.
+- `client.Options.transport` is gone. `Options.plain` configures cleartext and
+  `Options.tls` supplies the `https` connector, picked by the URL scheme. A
+  caller that passed a transport builds a `Connector` and passes its
+  `.handle()` as `.tls`, or a `plain.Connector` as `.plain`. The TLS
+  connector's `ca_pem` and `ca_bundle` are one `trust` union: `.pem` (owned
+  bytes), `.bundle` (borrowed), or `.none` (fail closed, or the platform store
+  on `http_tls.Client`).
+
 ## [0.6.1] - 2026-11-16
 
 ### Added
@@ -73,17 +96,6 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
-- Requests name their method with `Method`, a union of the named methods with
-  an `.other` payload for any other token. `Request.method`,
-  `RequestOptions.method`, `h1.RequestHead.method`, and
-  `h2.head.RequestHead.method` replace the separate `method_token` fields, and
-  `Method.token()` returns the exact wire bytes. `Method.parse` is total and
-  picks a tag from the token length and one integer compare per name; a token
-  outside the named set is `.other` carrying its bytes, so a router sees an
-  unknown method instead of a null one.
-- The cleartext connector buffers its writes, so a request head leaves as one
-  write instead of one syscall per field. A loopback request through
-  `client.Client` drops from about 39 µs to 14 µs in `bench/compare`.
 - `client.Client.readCause` and `writeCause` keep the cause after a failing
   `send` closed the connection, so a canceled or expired head read is still
   nameable by the caller.
