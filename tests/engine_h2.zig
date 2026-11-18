@@ -345,6 +345,55 @@ test "a zero read in a split request head is not EOF" {
     try testing.expect(response_seen);
 }
 
+test "an empty zero read still ends a split head" {
+    var client: http.h2.Session = try .init(testing.allocator, .{
+        .role = .client,
+        .max_streams = 4,
+    });
+    defer client.deinit(testing.allocator);
+
+    var request_storage: [4096]u8 = undefined;
+    var request_writer: Io.Writer = .fixed(&request_storage);
+    try flush(&client, &request_writer);
+    _ = try client.submitRequest(testing.allocator, &request_fields, true);
+    try flush(&client, &request_writer);
+    const request = request_writer.buffered();
+    try testing.expect(request.len > 1);
+
+    const records = [_][]const u8{
+        request[0 .. request.len - 1],
+        "",
+        request[request.len - 1 ..],
+    };
+    var source: SplitReader = undefined;
+    source.init(&records);
+    var response_storage: [4096]u8 = undefined;
+    var response_writer: Io.Writer = .fixed(&response_storage);
+    var read_buffer: [16 * 1024]u8 = undefined;
+    var app: TestApp = .{};
+    try engine.serveIo(testing.io, &source.reader, &response_writer, app.handler(), .{
+        .allocator = testing.allocator,
+        .read_buffer = &read_buffer,
+        .write_buffer = &.{},
+        .max_streams = 4,
+        .common = .{ .body_bytes = 1024 },
+    });
+
+    try testing.expectEqual(2, source.record_index);
+    try testing.expectEqual(1, source.zero_reads);
+    try testing.expectEqual(0, app.seen);
+
+    const response = response_writer.buffered();
+    try testing.expectEqual(response.len, client.receive(response));
+    while (try client.nextEvent(testing.allocator)) |event| {
+        switch (event) {
+            .response, .data => return error.UnexpectedResponse,
+            .connection_error => return error.ConnectionError,
+            else => {},
+        }
+    }
+}
+
 test "the engine copies a stack-built trailer section" {
     var harness: Harness = undefined;
     try harness.initWith(.{ .stack_trailers = true });

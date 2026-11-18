@@ -156,10 +156,13 @@ pub fn serveIo(
                         else => return err,
                     };
                     if (n == 0) {
-                        // A buffered reader can leave new bytes in its own buffer. An empty
-                        // buffer is not EOF either; only error.EndOfStream denotes EOF.
+                        // A buffered reader can fill its own buffer and return zero. With no
+                        // buffered bytes, preserve the existing end-of-input behavior.
                         const buffered = reader.buffered();
-                        if (buffered.len == 0) continue;
+                        if (buffered.len == 0) {
+                            event = conn.eof(now(io));
+                            continue;
+                        }
                         const take = @min(buffered.len, dst.len);
                         @memcpy(dst[0..take], buffered[0..take]);
                         reader.toss(take);
