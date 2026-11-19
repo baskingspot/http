@@ -631,11 +631,14 @@ test "buffered input is drained before the engine waits on the socket" {
     const wait_stream = try listener.accept(testing.io);
     defer wait_stream.close(testing.io);
 
+    var read_buffer: [32]u8 = undefined;
     var source: PendingRecordReader = undefined;
-    source.init(request);
+    source.init(testing.io, request, read_buffer.len, wait_stream.socket.handle);
     var response_storage: [8192]u8 = undefined;
     var response_writer: Io.Writer = .fixed(&response_storage);
-    var read_buffer: [32]u8 = undefined;
+    // A tail smaller than the read buffer is what the old loop handed to the
+    // transport while the rest of the record was already in hand.
+    try testing.expect(request.len % read_buffer.len != 0);
     var app: BodyPumpApp = .{ .storage = &payload };
     try engine.serveIo(testing.io, &source.reader, &response_writer, app.handler(), .{
         .allocator = testing.allocator,
@@ -646,6 +649,10 @@ test "buffered input is drained before the engine waits on the socket" {
         .common = .{ .body_bytes = 4096 },
         .wait_fd = .init(wait_stream.socket.handle),
     });
+
+    // A transport read with the record still buffered blocks on a real socket.
+    // The handler's wakes cannot fire during it, so the request stalls there.
+    try testing.expectEqual(0, source.buffered_reads);
 
     // The body is the engine's own account of what it read: the handler only
     // answers with the prefix when the engine stops feeding it.
