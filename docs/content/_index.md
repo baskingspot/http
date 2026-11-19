@@ -497,12 +497,15 @@ connection at a time, and `serve` drives one stream. `serveIo` is the same loop
 over a plaintext `*std.Io.Reader` and `*std.Io.Writer`, which is the seam a TLS
 wrapper uses.
 
-Every timeout is zero here, including both stream timeouts, because the
-engine's reads and writes have no deadline. A response source that returns
-`Pending` fails with `error.StreamPending`. Use it for tools, tests, and
-trusted peers. The accept loop retries
-`ConnectionAborted` and `WouldBlock`, sleeps a second on `SystemResources` and
-the fd quotas, and returns on anything else.
+Every `ServerConn` timeout is zero here, including both stream timeouts,
+because the engine's reads and writes have no deadline. Both direct engines
+have a separate `stall_timeout`, which defaults to 10 seconds. It bounds only
+a run of zero-byte reads with nothing buffered. A received byte ends the run,
+and zero disables the bound. Expiry returns `error.ReaderStalled` from
+`serveIo`. A response source that returns `Pending` fails with
+`error.StreamPending`. Use the direct engine for tools, tests, and trusted
+peers. The accept loop retries `ConnectionAborted` and `WouldBlock`, sleeps a
+second on `SystemResources` and the fd quotas, and returns on anything else.
 
 ## The readiness engines
 

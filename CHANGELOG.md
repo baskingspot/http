@@ -9,9 +9,16 @@ All notable changes to http are recorded here. The format follows
 
 - `h1.ServerConn.Limits.stream_idle_timeout` bounds consecutive `Pending`
   results from a response source. Zero disables this limit.
+- `h1.engine.direct.Config.stall_timeout` and
+  `h2.engine.direct.Config.stall_timeout` bound zero-byte reads with nothing
+  buffered. Both default to 10 seconds. A received byte ends the run, and zero
+  disables the bound.
 
 ### Changed
 
+- **Breaking:** Direct-engine readers must signal end of input with
+  `error.EndOfStream`. An empty zero `readVec` result retries instead. Expiry
+  returns `error.ReaderStalled` from `serveIo`.
 - **Breaking:** `Limits.total_timeout` now bounds h1 streamed responses as
   well as buffered responses. Streams previously ignored this deadline. A
   long-lived response must set both `total_timeout` and `stream_idle_timeout`
@@ -26,7 +33,8 @@ All notable changes to http are recorded here. The format follows
 
 - The h1 and h2 direct engines transfer buffered bytes after a zero
   `Io.Reader.readVec` result. A request head split across reads no longer
-  becomes EOF while the reader holds its next bytes.
+  becomes EOF while the reader holds its next bytes. An empty buffer retries,
+  so TLS control records and close notifications no longer end a live request.
 
 ## [0.7.1] - 2026-11-18
 

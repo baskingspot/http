@@ -12,6 +12,9 @@ const engine = http.h2.engine.direct;
 const Handler = http.h2.engine.Handler;
 const Exchange = http.h2.engine.Exchange;
 const SplitReader = @import("split_reader.zig").SplitReader;
+const StalledReader = @import("split_reader.zig").StalledReader;
+const TrickleReader = @import("split_reader.zig").TrickleReader;
+const IdleReader = @import("split_reader.zig").IdleReader;
 
 const TestApp = struct {
     body: []const u8 = "hello",
@@ -63,6 +66,86 @@ const TestApp = struct {
     }
 
     fn reportError(_: *anyopaque, _: anyerror) void {}
+};
+
+/// Parks first, then spends longer than the stall bound on a streaming
+/// response. Neither the handler nor its output belongs in an empty-read run.
+const WakeWorkApp = struct {
+    io: Io,
+    expiries: usize = 0,
+    finished: bool = false,
+
+    fn handler(self: *WakeWorkApp) Handler {
+        return .{ .ptr = self, .vtable = &.{
+            .handle = handle,
+            .complete = Handler.noopComplete,
+            .report_error = Handler.noopReportError,
+            .policy_response = Handler.defaultPolicyResponse,
+        } };
+    }
+
+    fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
+        const self: *WakeWorkApp = @ptrCast(@alignCast(ptr));
+        if (self.finished) return;
+        if (exchange.wake != .expired) {
+            const wake = Io.Clock.now(.awake, self.io).addDuration(.fromMilliseconds(10));
+            exchange.setDeadline(try .init(try .fromStd(wake)));
+            return exchange.waitForProgress();
+        }
+        self.expiries += 1;
+        try self.io.sleep(.fromMilliseconds(150), .awake);
+        try exchange.beginResponse(.{ .status = .ok, .content_type = "text/plain" });
+        if (try exchange.write("hello") != 5) return error.ShortResponseWrite;
+        try exchange.endResponse(&.{});
+        self.finished = true;
+    }
+};
+
+/// Produces no bytes until the wake handler finishes, then returns empty reads
+/// for 40 ms before EOF. The 50 ms engine bound must survive both intervals.
+const WakeWorkReader = struct {
+    reader: Io.Reader,
+    io: Io,
+    app: *const WakeWorkApp,
+    request: []const u8,
+    request_sent: bool = false,
+    finished_zero_started: ?Io.Timestamp = null,
+
+    fn init(self: *WakeWorkReader, io: Io, app: *const WakeWorkApp, request: []const u8) void {
+        self.reader = .{
+            .vtable = &.{ .stream = stream, .readVec = readVec },
+            .buffer = &.{},
+            .seek = 0,
+            .end = 0,
+        };
+        self.io = io;
+        self.app = app;
+        self.request = request;
+        self.request_sent = false;
+        self.finished_zero_started = null;
+    }
+
+    fn stream(_: *Io.Reader, _: *Io.Writer, _: Io.Limit) Io.Reader.StreamError!usize {
+        return 0;
+    }
+
+    fn readVec(reader: *Io.Reader, data: [][]u8) Io.Reader.Error!usize {
+        const self: *WakeWorkReader = @alignCast(@fieldParentPtr("reader", reader));
+        if (!self.request_sent) {
+            self.request_sent = true;
+            std.debug.assert(self.request.len <= data[0].len);
+            @memcpy(data[0][0..self.request.len], self.request);
+            return self.request.len;
+        }
+        if (!self.app.finished) return 0;
+        const current: Io.Timestamp = .now(self.io, .awake);
+        const began = self.finished_zero_started orelse {
+            self.finished_zero_started = current;
+            return 0;
+        };
+        if (began.durationTo(current).nanoseconds < 40 * std.time.ns_per_ms) return 0;
+        return error.EndOfStream;
+    }
 };
 
 const Server = struct {
@@ -176,6 +259,28 @@ fn handshake(session: *http.h2.Session, r: *Io.Reader, w: *Io.Writer) !void {
             else => {},
         }
     }
+}
+
+fn expectBufferedHellos(client: *http.h2.Session, response: []const u8, expected: usize) !void {
+    try testing.expectEqual(response.len, client.receive(response));
+    var response_count: usize = 0;
+    var data_count: usize = 0;
+    while (data_count < expected) {
+        const event = try client.nextEvent(testing.allocator) orelse return error.EndOfStream;
+        switch (event) {
+            .response => |head| {
+                try testing.expectEqual(@as(u16, 200), head.head.status.code());
+                response_count += 1;
+            },
+            .data => |data| {
+                try testing.expectEqualStrings("hello", data.bytes);
+                data_count += 1;
+            },
+            .connection_error => return error.ConnectionError,
+            else => {},
+        }
+    }
+    try testing.expectEqual(expected, response_count);
 }
 
 test "the direct engine serves a request over a socket" {
@@ -323,29 +428,10 @@ test "a zero read in a split request head is not EOF" {
     try testing.expectEqual(1, source.zero_reads);
     try testing.expectEqual(1, app.seen);
 
-    const response = response_writer.buffered();
-    try testing.expectEqual(response.len, client.receive(response));
-    var response_seen = false;
-    var data_seen = false;
-    while (!data_seen) {
-        const event = try client.nextEvent(testing.allocator) orelse return error.EndOfStream;
-        switch (event) {
-            .response => |head| {
-                try testing.expectEqual(@as(u16, 200), head.head.status.code());
-                response_seen = true;
-            },
-            .data => |data| {
-                try testing.expectEqualStrings("hello", data.bytes);
-                data_seen = true;
-            },
-            .connection_error => return error.ConnectionError,
-            else => {},
-        }
-    }
-    try testing.expect(response_seen);
+    try expectBufferedHellos(&client, response_writer.buffered(), 1);
 }
 
-test "an empty zero read still ends a split head" {
+test "empty zero reads do not end a split head" {
     var client: http.h2.Session = try .init(testing.allocator, .{
         .role = .client,
         .max_streams = 4,
@@ -363,6 +449,8 @@ test "an empty zero read still ends a split head" {
     const records = [_][]const u8{
         request[0 .. request.len - 1],
         "",
+        "",
+        "",
         request[request.len - 1 ..],
     };
     var source: SplitReader = undefined;
@@ -379,19 +467,181 @@ test "an empty zero read still ends a split head" {
         .common = .{ .body_bytes = 1024 },
     });
 
-    try testing.expectEqual(2, source.record_index);
-    try testing.expectEqual(1, source.zero_reads);
-    try testing.expectEqual(0, app.seen);
+    try testing.expectEqual(records.len, source.record_index);
+    try testing.expectEqual(4, source.zero_reads);
+    try testing.expectEqual(1, app.seen);
+    try expectBufferedHellos(&client, response_writer.buffered(), 1);
+}
 
-    const response = response_writer.buffered();
-    try testing.expectEqual(response.len, client.receive(response));
-    while (try client.nextEvent(testing.allocator)) |event| {
-        switch (event) {
-            .response, .data => return error.UnexpectedResponse,
-            .connection_error => return error.ConnectionError,
-            else => {},
-        }
-    }
+test "a reader that returns zero forever stalls" {
+    var source: StalledReader = undefined;
+    source.init();
+    var response_storage: [4096]u8 = undefined;
+    var response_writer: Io.Writer = .fixed(&response_storage);
+    var read_buffer: [16 * 1024]u8 = undefined;
+    var app: TestApp = .{};
+
+    try testing.expectError(error.ReaderStalled, engine.serveIo(
+        testing.io,
+        &source.reader,
+        &response_writer,
+        app.handler(),
+        .{
+            .allocator = testing.allocator,
+            .read_buffer = &read_buffer,
+            .write_buffer = &.{},
+            .max_streams = 4,
+            .common = .{ .body_bytes = 1024 },
+            .stall_timeout = .fromMilliseconds(1),
+        },
+    ));
+    try testing.expect(source.reads > 0);
+    try testing.expectEqual(0, app.seen);
+}
+
+test "wait_fd polls for the remaining stall budget" {
+    const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
+    var listener = try address.listen(testing.io, .{ .mode = .stream, .reuse_address = true });
+    defer listener.deinit(testing.io);
+    var client_address = address;
+    client_address.setPort(listener.socket.address.getPort());
+    const client_stream = try client_address.connect(testing.io, .{ .mode = .stream });
+    defer client_stream.close(testing.io);
+    const server_stream = try listener.accept(testing.io);
+    defer server_stream.close(testing.io);
+
+    var source: StalledReader = undefined;
+    source.init();
+    var response_storage: [4096]u8 = undefined;
+    var response_writer: Io.Writer = .fixed(&response_storage);
+    var read_buffer: [16 * 1024]u8 = undefined;
+    var app: TestApp = .{};
+    try testing.expectError(error.ReaderStalled, engine.serveIo(
+        testing.io,
+        &source.reader,
+        &response_writer,
+        app.handler(),
+        .{
+            .allocator = testing.allocator,
+            .read_buffer = &read_buffer,
+            .write_buffer = &.{},
+            .max_streams = 4,
+            .common = .{ .body_bytes = 1024 },
+            .wait_fd = .init(server_stream.socket.handle),
+            .stall_timeout = .fromMilliseconds(5),
+        },
+    ));
+    try testing.expectEqual(1, source.reads);
+}
+
+test "bytes between empty reads reset the stall timeout" {
+    var client: http.h2.Session = try .init(testing.allocator, .{
+        .role = .client,
+        .max_streams = 4,
+    });
+    defer client.deinit(testing.allocator);
+
+    var request_storage: [4096]u8 = undefined;
+    var request_writer: Io.Writer = .fixed(&request_storage);
+    try flush(&client, &request_writer);
+    _ = try client.submitRequest(testing.allocator, &request_fields, true);
+    try flush(&client, &request_writer);
+    const request = request_writer.buffered();
+
+    const delay_ms = 5;
+    var source: TrickleReader = undefined;
+    source.init(testing.io, request, .fromMilliseconds(delay_ms));
+    var response_storage: [4096]u8 = undefined;
+    var response_writer: Io.Writer = .fixed(&response_storage);
+    var read_buffer: [16 * 1024]u8 = undefined;
+    var app: TestApp = .{};
+    try engine.serveIo(testing.io, &source.reader, &response_writer, app.handler(), .{
+        .allocator = testing.allocator,
+        .read_buffer = &read_buffer,
+        .write_buffer = &.{},
+        .max_streams = 4,
+        .common = .{ .body_bytes = 1024 },
+        .stall_timeout = .fromMilliseconds(100),
+    });
+
+    try testing.expect(source.zero_reads * delay_ms > 100);
+    try testing.expectEqual(1, app.seen);
+    try expectBufferedHellos(&client, response_writer.buffered(), 1);
+}
+
+test "idle time before an empty read does not start the stall clock" {
+    var client: http.h2.Session = try .init(testing.allocator, .{
+        .role = .client,
+        .max_streams = 4,
+    });
+    defer client.deinit(testing.allocator);
+
+    var request_storage: [4096]u8 = undefined;
+    var request_writer: Io.Writer = .fixed(&request_storage);
+    try flush(&client, &request_writer);
+    _ = try client.submitRequest(testing.allocator, &request_fields, true);
+    try flush(&client, &request_writer);
+    const first_len = request_writer.buffered().len;
+    _ = try client.submitRequest(testing.allocator, &request_fields, true);
+    try flush(&client, &request_writer);
+    const request = request_writer.buffered();
+
+    var source: IdleReader = undefined;
+    source.init(
+        testing.io,
+        request[0..first_len],
+        request[first_len..],
+        .fromMilliseconds(60),
+    );
+    var response_storage: [4096]u8 = undefined;
+    var response_writer: Io.Writer = .fixed(&response_storage);
+    var read_buffer: [16 * 1024]u8 = undefined;
+    var app: TestApp = .{};
+    try engine.serveIo(testing.io, &source.reader, &response_writer, app.handler(), .{
+        .allocator = testing.allocator,
+        .read_buffer = &read_buffer,
+        .write_buffer = &.{},
+        .max_streams = 4,
+        .common = .{ .body_bytes = 1024 },
+        .stall_timeout = .fromMilliseconds(50),
+    });
+
+    try testing.expectEqual(2, app.seen);
+    try expectBufferedHellos(&client, response_writer.buffered(), 2);
+}
+
+test "wake work and output do not extend an empty-read stall" {
+    var client: http.h2.Session = try .init(testing.allocator, .{
+        .role = .client,
+        .max_streams = 4,
+    });
+    defer client.deinit(testing.allocator);
+
+    var request_storage: [4096]u8 = undefined;
+    var request_writer: Io.Writer = .fixed(&request_storage);
+    try flush(&client, &request_writer);
+    _ = try client.submitRequest(testing.allocator, &request_fields, true);
+    try flush(&client, &request_writer);
+
+    var app: WakeWorkApp = .{ .io = testing.io };
+    var source: WakeWorkReader = undefined;
+    source.init(testing.io, &app, request_writer.buffered());
+    var response_storage: [4096]u8 = undefined;
+    var response_writer: Io.Writer = .fixed(&response_storage);
+    var read_buffer: [16 * 1024]u8 = undefined;
+    try engine.serveIo(testing.io, &source.reader, &response_writer, app.handler(), .{
+        .allocator = testing.allocator,
+        .read_buffer = &read_buffer,
+        .write_buffer = &.{},
+        .max_streams = 4,
+        .body_mode = .stream,
+        .common = .{ .body_bytes = 1024 },
+        .stall_timeout = .fromMilliseconds(50),
+    });
+
+    try testing.expectEqual(1, app.expiries);
+    try testing.expect(app.finished);
+    try expectBufferedHellos(&client, response_writer.buffered(), 1);
 }
 
 test "the engine copies a stack-built trailer section" {

@@ -5,7 +5,8 @@
 //! connection is served at a time; the h2c example adds a thread per
 //! connection. Handler wakes (`Exchange.setDeadline`) are delivered on the
 //! awake clock; the engine's own close deadlines are not enforced, like
-//! `h1.engine.direct`.
+//! `h1.engine.direct`. The separate `stall_timeout` bounds reads that make no
+//! progress.
 
 const std = @import("std");
 const Io = std.Io;
@@ -47,6 +48,10 @@ pub const Config = struct {
     /// together with the next input. `serve` sets it from the stream; a TLS
     /// caller passes the transport's socket handle.
     wait_fd: OptionalFd = .none,
+    /// The longest continuous run of zero-byte reads with nothing buffered
+    /// before `serveIo` fails with `error.ReaderStalled`. Any other progress
+    /// ends the run. Zero disables the bound.
+    stall_timeout: Io.Duration = .fromSeconds(10),
 };
 
 /// Accept connections until an unrecoverable accept error.
@@ -105,7 +110,12 @@ pub fn serve(
 /// A handler that parks with `Exchange.setDeadline` is woken at that time:
 /// with `wait_fd` set the read waits on the socket only until the earliest
 /// wake, and the clock drives the rest. Without `wait_fd`, a wake arrives
-/// with the next input, because the plain read has no timeout.
+/// with the next input, because the plain read has no timeout. This call
+/// blocks until the connection ends. A zero-byte read with an empty reader
+/// buffer reads again. If that run lasts for `stall_timeout`, the call fails
+/// with `error.ReaderStalled`. Without `wait_fd`, a continuous run of empty
+/// reads busy-spins until the bound expires. Signal end of input with
+/// `error.EndOfStream`.
 pub fn serveIo(
     io: Io,
     reader: *Io.Reader,
@@ -127,17 +137,22 @@ pub fn serveIo(
     defer conn.deinit();
 
     var out_buffer: [4096]u8 = undefined;
+    var stall_started: ?Io.Timestamp = null;
 
     while (true) {
         const now: Io.Timestamp = .now(io, .awake);
-        _ = conn.drive(now) catch |err| {
+        const made_progress = conn.drive(now) catch |err| {
             flush(&conn, writer, &out_buffer) catch |flush_err| {
                 _ = @errorName(flush_err);
             };
             return err;
         };
-        try flush(&conn, writer, &out_buffer);
-        if (try conn.drive(now)) continue;
+        if (made_progress) stall_started = null;
+        if (try flushAndReport(&conn, writer, &out_buffer)) stall_started = null;
+        if (try conn.drive(now)) {
+            stall_started = null;
+            continue;
+        }
         if (conn.isClosed()) {
             try flush(&conn, writer, &out_buffer);
             return;
@@ -146,7 +161,10 @@ pub fn serveIo(
         // A parked handler armed a wake time. Wait for input or that time,
         // whichever comes first, so the wake is delivered without cross
         // traffic on the connection.
-        if (try waitOrWake(io, &conn, config.wait_fd)) continue;
+        if (try waitOrWake(io, &conn, config.wait_fd)) {
+            stall_started = null;
+            continue;
+        }
 
         var vecs: [1][]u8 = .{config.read_buffer};
         var n = reader.readVec(&vecs) catch |err| switch (err) {
@@ -154,15 +172,31 @@ pub fn serveIo(
             error.ReadFailed => return err,
         };
         if (n == 0) {
-            // A buffered reader can fill its own buffer and return zero. With no
-            // buffered bytes, preserve the existing end-of-input behavior.
+            // A buffered reader can fill its own buffer and return zero.
             const buffered = reader.buffered();
-            if (buffered.len == 0) return;
+            if (buffered.len == 0) {
+                const current: Io.Timestamp = .now(io, .awake);
+                if (stall_started) |began| {
+                    if (config.stall_timeout.nanoseconds > 0) {
+                        const elapsed = began.durationTo(current);
+                        if (elapsed.nanoseconds >= config.stall_timeout.nanoseconds) {
+                            return error.ReaderStalled;
+                        }
+                    }
+                } else {
+                    stall_started = current;
+                }
+                if (config.wait_fd.get()) |fd| {
+                    try waitForStalledInput(io, &conn, fd, stall_started.?, config.stall_timeout);
+                }
+                continue;
+            }
             const take = @min(buffered.len, config.read_buffer.len);
             @memcpy(config.read_buffer[0..take], buffered[0..take]);
             reader.toss(take);
             n = take;
         }
+        stall_started = null;
 
         var offset: usize = 0;
         while (offset < n) {
@@ -194,32 +228,78 @@ pub fn serveIo(
 fn waitOrWake(io: Io, conn: *Connection, fd: OptionalFd) !bool {
     const wake_at = conn.wakeDeadline() orelse return false;
     const fd_value = fd.get() orelse return false;
-    const now: Io.Timestamp = .now(io, .awake);
-    if (now.nanoseconds >= wake_at.nanoseconds) return true;
+    const current: Io.Timestamp = .now(io, .awake);
+    if (current.nanoseconds >= wake_at.nanoseconds) return true;
+    return !(try pollInput(fd_value, wake_at, current));
+}
 
-    const remaining = wake_at.nanoseconds - now.nanoseconds;
-    const bounded: u64 = @intCast(@min(remaining, std.math.maxInt(i64)));
-    const ms: i32 = @intCast(@min(
-        (bounded + std.time.ns_per_ms - 1) / std.time.ns_per_ms,
-        std.math.maxInt(i32),
-    ));
+/// Wait for input after an empty read. A handler wake still runs first. An
+/// infinite poll is correct only when the caller disabled the stall bound.
+fn waitForStalledInput(
+    io: Io,
+    conn: *Connection,
+    fd: posix.fd_t,
+    stall_started: Io.Timestamp,
+    timeout: Io.Duration,
+) !void {
+    const current: Io.Timestamp = .now(io, .awake);
+    const wake_at = conn.wakeDeadline();
+    if (wake_at) |at| {
+        if (current.nanoseconds >= at.nanoseconds) return;
+    }
+
+    var wait_at: ?Io.Timestamp = null;
+    var wait_for_stall = false;
+    if (timeout.nanoseconds > 0) {
+        const stall_at = stall_started.addDuration(timeout);
+        if (current.nanoseconds >= stall_at.nanoseconds) return error.ReaderStalled;
+        wait_at = stall_at;
+        wait_for_stall = true;
+    }
+    if (wake_at) |at| {
+        if (wait_at == null or at.nanoseconds < wait_at.?.nanoseconds) {
+            wait_at = at;
+            wait_for_stall = false;
+        }
+    }
+    if (try pollInput(fd, wait_at, current)) return;
+    if (wait_for_stall) return error.ReaderStalled;
+}
+
+/// True means input or a hangup is ready. False means the deadline expired.
+fn pollInput(fd: posix.fd_t, deadline: ?Io.Timestamp, current: Io.Timestamp) !bool {
+    var ms: i32 = -1;
+    if (deadline) |at| {
+        const remaining = at.nanoseconds - current.nanoseconds;
+        const bounded: u64 = @intCast(@min(remaining, std.math.maxInt(i64)));
+        ms = @intCast(@min(
+            (bounded + std.time.ns_per_ms - 1) / std.time.ns_per_ms,
+            std.math.maxInt(i32),
+        ));
+    }
     var fds = [_]posix.pollfd{.{
-        .fd = fd_value,
+        .fd = fd,
         .events = posix.POLL.IN,
         .revents = 0,
     }};
     _ = try posix.poll(&fds, ms);
-    const input = fds[0].revents & (posix.POLL.IN |
+    return fds[0].revents & (posix.POLL.IN |
         posix.POLL.HUP |
         posix.POLL.ERR) != 0;
-    return !input;
 }
 
 fn flush(conn: *Connection, w: *Io.Writer, out: []u8) !void {
+    _ = try flushAndReport(conn, w, out);
+}
+
+fn flushAndReport(conn: *Connection, w: *Io.Writer, out: []u8) !bool {
+    var wrote = false;
     while (true) {
         const n = conn.send(out);
         if (n == 0) break;
+        wrote = true;
         try w.writeAll(out[0..n]);
     }
     try w.flush();
+    return wrote;
 }

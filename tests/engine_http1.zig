@@ -13,6 +13,9 @@ const panic = std.debug.panic;
 const http = @import("http");
 const engine = http.h1.engine.direct;
 const SplitReader = @import("split_reader.zig").SplitReader;
+const StalledReader = @import("split_reader.zig").StalledReader;
+const TrickleReader = @import("split_reader.zig").TrickleReader;
+const IdleReader = @import("split_reader.zig").IdleReader;
 
 const TestConfig = struct {
     request_buffer: [1024]u8 = undefined,
@@ -175,6 +178,7 @@ const ChunkStream = struct {
 
 const TestApp = struct {
     pulls: usize = 0,
+    seen: usize = 0,
 
     fn handler(self: *TestApp) engine.Handler {
         return .{ .ptr = self, .vtable = &.{
@@ -187,6 +191,7 @@ const TestApp = struct {
 
     fn handle(ptr: *anyopaque, exchange: *engine.Exchange) anyerror!void {
         const self: *TestApp = @ptrCast(@alignCast(ptr));
+        self.seen += 1;
         const target = exchange.request.head.target;
         if (mem.eql(u8, target, "/stream") or
             mem.eql(u8, target, "/stream-head"))
@@ -604,7 +609,7 @@ test "a zero read in a split request head is not EOF" {
     try testing.expect(mem.endsWith(u8, response, "/buffered 0\n"));
 }
 
-test "an empty zero read still ends a split head" {
+test "empty zero reads do not end a split head" {
     var request_buffer: [16 * 1024]u8 = undefined;
     var headers: [16]http.Header = undefined;
     var response_head: [512]u8 = undefined;
@@ -612,7 +617,9 @@ test "an empty zero read still ends a split head" {
     const records = [_][]const u8{
         "GET",
         "",
-        " /unused HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        "",
+        "",
+        " /retry HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
     };
     var source: SplitReader = undefined;
     source.init(&records);
@@ -626,13 +633,105 @@ test "an empty zero read still ends a split head" {
         .response_head_buffer = &response_head,
     });
 
-    try testing.expectEqual(2, source.record_index);
-    try testing.expectEqual(1, source.zero_reads);
+    try testing.expectEqual(records.len, source.record_index);
+    try testing.expectEqual(4, source.zero_reads);
+    try testing.expectEqual(1, app.seen);
     try testing.expect(mem.startsWith(
         u8,
         response_writer.buffered(),
-        "HTTP/1.1 400 Bad Request\r\n",
+        "HTTP/1.1 200 OK\r\n",
     ));
+    try testing.expect(mem.endsWith(u8, response_writer.buffered(), "/retry 0\n"));
+}
+
+test "a reader that returns zero forever stalls" {
+    var request_buffer: [16 * 1024]u8 = undefined;
+    var headers: [16]http.Header = undefined;
+    var response_head: [512]u8 = undefined;
+    var app: TestApp = .{};
+    var source: StalledReader = undefined;
+    source.init();
+    var response_storage: [2048]u8 = undefined;
+    var response_writer: Io.Writer = .fixed(&response_storage);
+
+    try testing.expectError(error.ReaderStalled, engine.serveIo(
+        testing.io,
+        &source.reader,
+        &response_writer,
+        app.handler(),
+        .{
+            .allocator = testing.allocator,
+            .request_buffer = &request_buffer,
+            .headers = &headers,
+            .response_head_buffer = &response_head,
+            .stall_timeout = .fromMilliseconds(1),
+        },
+    ));
+    try testing.expect(source.reads > 0);
+    try testing.expectEqual(0, app.seen);
+}
+
+test "bytes between empty reads reset the stall timeout" {
+    var request_buffer: [16 * 1024]u8 = undefined;
+    var headers: [16]http.Header = undefined;
+    var response_head: [512]u8 = undefined;
+    var app: TestApp = .{};
+    const delay_ms = 5;
+    var source: TrickleReader = undefined;
+    source.init(
+        testing.io,
+        "GET /trickle HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        .fromMilliseconds(delay_ms),
+    );
+    var response_storage: [2048]u8 = undefined;
+    var response_writer: Io.Writer = .fixed(&response_storage);
+
+    try engine.serveIo(testing.io, &source.reader, &response_writer, app.handler(), .{
+        .allocator = testing.allocator,
+        .request_buffer = &request_buffer,
+        .headers = &headers,
+        .response_head_buffer = &response_head,
+        .stall_timeout = .fromMilliseconds(100),
+    });
+
+    try testing.expect(source.zero_reads * delay_ms > 100);
+    try testing.expectEqual(1, app.seen);
+    try testing.expect(mem.startsWith(
+        u8,
+        response_writer.buffered(),
+        "HTTP/1.1 200 OK\r\n",
+    ));
+    try testing.expect(mem.endsWith(u8, response_writer.buffered(), "/trickle 0\n"));
+}
+
+test "idle time before an empty read does not start the stall clock" {
+    var request_buffer: [16 * 1024]u8 = undefined;
+    var headers: [16]http.Header = undefined;
+    var response_head: [512]u8 = undefined;
+    var app: TestApp = .{};
+    var source: IdleReader = undefined;
+    source.init(
+        testing.io,
+        "GET /first HTTP/1.1\r\nHost: x\r\n\r\n",
+        "GET /second HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        .fromMilliseconds(60),
+    );
+    var response_storage: [4096]u8 = undefined;
+    var response_writer: Io.Writer = .fixed(&response_storage);
+
+    try engine.serveIo(testing.io, &source.reader, &response_writer, app.handler(), .{
+        .allocator = testing.allocator,
+        .request_buffer = &request_buffer,
+        .headers = &headers,
+        .response_head_buffer = &response_head,
+        .stall_timeout = .fromMilliseconds(50),
+    });
+
+    const response = response_writer.buffered();
+    try testing.expectEqual(2, mem.count(u8, response, "HTTP/1.1 200 OK\r\n"));
+    try testing.expectEqual(2, app.seen);
+    try testing.expect(mem.find(u8, response, "/first 0\n") != null);
+    try testing.expect(mem.endsWith(u8, response, "/second 0\n"));
 }
 
 test "a body split across writes" {
