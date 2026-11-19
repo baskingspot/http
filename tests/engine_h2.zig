@@ -12,6 +12,7 @@ const engine = http.h2.engine.direct;
 const Handler = http.h2.engine.Handler;
 const Exchange = http.h2.engine.Exchange;
 const SplitReader = @import("split_reader.zig").SplitReader;
+const PendingRecordReader = @import("split_reader.zig").PendingRecordReader;
 const StalledReader = @import("split_reader.zig").StalledReader;
 const TrickleReader = @import("split_reader.zig").TrickleReader;
 const IdleReader = @import("split_reader.zig").IdleReader;
@@ -98,6 +99,65 @@ const WakeWorkApp = struct {
         if (try exchange.write("hello") != 5) return error.ShortResponseWrite;
         try exchange.endResponse(&.{});
         self.finished = true;
+    }
+};
+
+/// Pumps the request body through `request_body` and answers with the bytes it
+/// collected. While the body is incomplete it parks on a short deadline, the
+/// way a deferred handler does. After `max_expiries` it gives up and answers
+/// with what arrived, so an engine that stops reading fails on the body instead
+/// of hanging the suite.
+const BodyPumpApp = struct {
+    storage: []u8,
+    received: usize = 0,
+    expiries: usize = 0,
+    max_expiries: usize = 4,
+    finished: bool = false,
+
+    fn handler(self: *BodyPumpApp) Handler {
+        return .{ .ptr = self, .vtable = &.{
+            .handle = handle,
+            .complete = Handler.noopComplete,
+            .report_error = Handler.noopReportError,
+            .policy_response = Handler.defaultPolicyResponse,
+        } };
+    }
+
+    fn handle(ptr: *anyopaque, exchange: *Exchange) anyerror!void {
+        const self: *BodyPumpApp = @ptrCast(@alignCast(ptr));
+        if (self.finished) return;
+        while (true) {
+            const chunk = exchange.request_body.?.next() catch |err| switch (err) {
+                error.Pending => {
+                    if (exchange.wake == .expired) self.expiries += 1;
+                    if (self.expiries > self.max_expiries) {
+                        // The engine went back to the socket with request bytes
+                        // still in the reader: answer with the prefix, so the
+                        // test reports the short body instead of hanging.
+                        std.debug.print(
+                            "handler gave up after {d} wakes with {d} of {d} body bytes\n",
+                            .{ self.expiries, self.received, self.storage.len },
+                        );
+                        self.finished = true;
+                        return exchange.respond(.{ .status = .ok }, self.storage[0..self.received]);
+                    }
+                    const wake = Io.Clock.now(.awake, testing.io).addDuration(
+                        .fromMilliseconds(25),
+                    );
+                    exchange.setDeadline(try .init(try .fromStd(wake)));
+                    return exchange.waitForProgress();
+                },
+                error.EndOfStream => {
+                    self.finished = true;
+                    return exchange.respond(.{ .status = .ok }, self.storage[0..self.received]);
+                },
+                error.Canceled => return,
+                else => |other| return other,
+            };
+            std.debug.assert(self.received + chunk.data.len <= self.storage.len);
+            @memcpy(self.storage[self.received..][0..chunk.data.len], chunk.data);
+            self.received += chunk.data.len;
+        }
     }
 };
 
@@ -532,6 +592,95 @@ test "wait_fd polls for the remaining stall budget" {
         },
     ));
     try testing.expectEqual(1, source.reads);
+}
+
+test "buffered input is drained before the engine waits on the socket" {
+    // The whole request arrives as one TLS-style record: the reader fills its
+    // own buffer and returns zero on that turn. The engine's read buffer is
+    // smaller than the record, so only a prefix reaches the connection there
+    // and the rest waits in `reader.buffer`. A `wait_fd` that never becomes
+    // readable again and a handler that re-arms its deadline means a wait
+    // entered at that point strands the rest of the request.
+    var client: http.h2.Session = try .init(testing.allocator, .{
+        .role = .client,
+        .max_streams = 4,
+    });
+    defer client.deinit(testing.allocator);
+
+    var payload: [512]u8 = undefined;
+    for (&payload, 0..) |*byte, index| byte.* = 'a' + @as(u8, @intCast(index % 26));
+
+    var request_storage: [8192]u8 = undefined;
+    var request_writer: Io.Writer = .fixed(&request_storage);
+    try flush(&client, &request_writer);
+    const stream_id = try client.submitRequest(testing.allocator, &request_fields, false);
+    try flush(&client, &request_writer);
+    _ = try client.submitData(testing.allocator, stream_id, &payload, true);
+    try flush(&client, &request_writer);
+    const request = request_writer.buffered();
+
+    const address: Io.net.IpAddress = try .parseLiteral("127.0.0.1:0");
+    var listener = try address.listen(testing.io, .{ .mode = .stream, .reuse_address = true });
+    defer listener.deinit(testing.io);
+    var client_address = address;
+    client_address.setPort(listener.socket.address.getPort());
+    // Never write: this socket is only a wait handle, and it stays idle so the
+    // poll can add nothing the reader buffer does not already hold.
+    const idle_stream = try client_address.connect(testing.io, .{ .mode = .stream });
+    defer idle_stream.close(testing.io);
+    const wait_stream = try listener.accept(testing.io);
+    defer wait_stream.close(testing.io);
+
+    var read_buffer: [32]u8 = undefined;
+    var source: PendingRecordReader = undefined;
+    source.init(testing.io, request, read_buffer.len, wait_stream.socket.handle);
+    var response_storage: [8192]u8 = undefined;
+    var response_writer: Io.Writer = .fixed(&response_storage);
+    // A tail smaller than the read buffer is what the old loop handed to the
+    // transport while the rest of the record was already in hand.
+    try testing.expect(request.len % read_buffer.len != 0);
+    var app: BodyPumpApp = .{ .storage = &payload };
+    try engine.serveIo(testing.io, &source.reader, &response_writer, app.handler(), .{
+        .allocator = testing.allocator,
+        .read_buffer = &read_buffer,
+        .write_buffer = &.{},
+        .max_streams = 4,
+        .body_mode = .stream,
+        .common = .{ .body_bytes = 4096 },
+        .wait_fd = .init(wait_stream.socket.handle),
+    });
+
+    // A transport read with the record still buffered blocks on a real socket.
+    // The handler's wakes cannot fire during it, so the request stalls there.
+    try testing.expectEqual(0, source.buffered_reads);
+
+    // The body is the engine's own account of what it read: the handler only
+    // answers with the prefix when the engine stops feeding it.
+    const response = response_writer.buffered();
+    try testing.expectEqual(response.len, client.receive(response));
+    var body: [512]u8 = undefined;
+    var body_len: usize = 0;
+    var response_seen = false;
+    var end_seen = false;
+    while (!end_seen) {
+        const event = try client.nextEvent(testing.allocator) orelse return error.EndOfStream;
+        switch (event) {
+            .response => |head| {
+                try testing.expectEqual(@as(u16, 200), head.head.status.code());
+                response_seen = true;
+                end_seen = head.end_stream;
+            },
+            .data => |data| {
+                @memcpy(body[body_len..][0..data.bytes.len], data.bytes);
+                body_len += data.bytes.len;
+                end_seen = data.end_stream;
+            },
+            .connection_error => return error.ConnectionError,
+            else => {},
+        }
+    }
+    try testing.expect(response_seen);
+    try testing.expectEqualSlices(u8, &payload, body[0..body_len]);
 }
 
 test "bytes between empty reads reset the stall timeout" {

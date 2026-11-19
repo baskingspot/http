@@ -109,12 +109,14 @@ pub fn serve(
 ///
 /// A handler that parks with `Exchange.setDeadline` is woken at that time:
 /// with `wait_fd` set the read waits on the socket only until the earliest
-/// wake, and the clock drives the rest. Without `wait_fd`, a wake arrives
-/// with the next input, because the plain read has no timeout. This call
-/// blocks until the connection ends. A zero-byte read with an empty reader
-/// buffer reads again. If that run lasts for `stall_timeout`, the call fails
-/// with `error.ReaderStalled`. Without `wait_fd`, a continuous run of empty
-/// reads busy-spins until the bound expires. Signal end of input with
+/// wake, and the clock drives the rest. Bytes the reader already holds are fed
+/// to the connection before either wait or read touches the transport, because
+/// the socket cannot report them. Without `wait_fd`, a wake arrives with the
+/// next input, because the plain read has no timeout. This call blocks until
+/// the connection ends. A zero-byte read with an empty reader buffer reads
+/// again. If that run lasts for `stall_timeout`, the call fails with
+/// `error.ReaderStalled`. Without `wait_fd`, a continuous run of empty reads
+/// busy-spins until the bound expires. Signal end of input with
 /// `error.EndOfStream`.
 pub fn serveIo(
     io: Io,
@@ -158,43 +160,54 @@ pub fn serveIo(
             return;
         }
 
-        // A parked handler armed a wake time. Wait for input or that time,
-        // whichever comes first, so the wake is delivered without cross
-        // traffic on the connection.
-        if (try waitOrWake(io, &conn, config.wait_fd)) {
-            stall_started = null;
-            continue;
-        }
-
-        var vecs: [1][]u8 = .{config.read_buffer};
-        var n = reader.readVec(&vecs) catch |err| switch (err) {
-            error.EndOfStream => return,
-            error.ReadFailed => return err,
-        };
+        // Serve the bytes the reader already holds before touching the
+        // socket. A buffered reader hands those out of its own buffer, so
+        // neither a wait nor a transport read may come first: the socket
+        // cannot report them, and `readVec` blocks in the transport for the
+        // rest of the caller's buffer after copying what it had.
+        var n = takeBuffered(reader, config.read_buffer);
         if (n == 0) {
-            // A buffered reader can fill its own buffer and return zero.
-            const buffered = reader.buffered();
-            if (buffered.len == 0) {
-                const current: Io.Timestamp = .now(io, .awake);
-                if (stall_started) |began| {
-                    if (config.stall_timeout.nanoseconds > 0) {
-                        const elapsed = began.durationTo(current);
-                        if (elapsed.nanoseconds >= config.stall_timeout.nanoseconds) {
-                            return error.ReaderStalled;
-                        }
-                    }
-                } else {
-                    stall_started = current;
-                }
-                if (config.wait_fd.get()) |fd| {
-                    try waitForStalledInput(io, &conn, fd, stall_started.?, config.stall_timeout);
-                }
+            // A parked handler armed a wake time. Wait for input or that time,
+            // whichever comes first, so the wake is delivered without cross
+            // traffic on the connection.
+            if (try waitOrWake(io, &conn, config.wait_fd)) {
+                stall_started = null;
                 continue;
             }
-            const take = @min(buffered.len, config.read_buffer.len);
-            @memcpy(config.read_buffer[0..take], buffered[0..take]);
-            reader.toss(take);
-            n = take;
+
+            var vecs: [1][]u8 = .{config.read_buffer};
+            n = reader.readVec(&vecs) catch |err| switch (err) {
+                error.EndOfStream => return,
+                error.ReadFailed => return err,
+            };
+            if (n == 0) {
+                // A buffered reader can fill its own buffer and return zero.
+                const take = takeBuffered(reader, config.read_buffer);
+                if (take == 0) {
+                    const current: Io.Timestamp = .now(io, .awake);
+                    if (stall_started) |began| {
+                        if (config.stall_timeout.nanoseconds > 0) {
+                            const elapsed = began.durationTo(current);
+                            if (elapsed.nanoseconds >= config.stall_timeout.nanoseconds) {
+                                return error.ReaderStalled;
+                            }
+                        }
+                    } else {
+                        stall_started = current;
+                    }
+                    if (config.wait_fd.get()) |fd| {
+                        try waitForStalledInput(
+                            io,
+                            &conn,
+                            fd,
+                            stall_started.?,
+                            config.stall_timeout,
+                        );
+                    }
+                    continue;
+                }
+                n = take;
+            }
         }
         stall_started = null;
 
@@ -219,6 +232,18 @@ pub fn serveIo(
             }
         }
     }
+}
+
+/// Copy up to `read_buffer.len` bytes out of the reader's own buffer. Never
+/// touches the transport, so it cannot block.
+fn takeBuffered(reader: *Io.Reader, read_buffer: []u8) usize {
+    const buffered = reader.buffered();
+    const take = @min(buffered.len, read_buffer.len);
+    if (take != 0) {
+        @memcpy(read_buffer[0..take], buffered[0..take]);
+        reader.toss(take);
+    }
+    return take;
 }
 
 /// Wait for the earliest handler wake without missing input. True means the
