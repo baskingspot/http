@@ -1,10 +1,10 @@
 //! An HTTP/1 server engine over std.Io, one connection per call.
 //!
 //! One connection is served at a time. The engine uses the Io runtime's
-//! plain read and write calls, so it cannot enforce connection deadlines;
-//! all timeouts are zero, including both stream timeouts. A response source
-//! that returns `Pending` fails with `error.StreamPending`. The evented engines
-//! are separate.
+//! plain read and write calls, so every `ServerConn` timeout is zero. The
+//! separate `stall_timeout` bounds reads that make no progress. A response
+//! source that returns `Pending` fails with `error.StreamPending`. The evented
+//! engines are separate.
 
 const std = @import("std");
 const Io = std.Io;
@@ -34,6 +34,9 @@ pub const Config = struct {
     common: common.Config = .{},
     /// Coalesce and cap response chunks. Zero preserves separate head/body.
     write_chunk_bytes: usize = 0,
+    /// The longest run with no received byte before `serveIo` fails with
+    /// `error.ReaderStalled`. Any received byte resets it. Zero disables the bound.
+    stall_timeout: Io.Duration = .fromSeconds(10),
 };
 
 /// Accept connections until an unrecoverable accept error.
@@ -84,7 +87,10 @@ pub fn serve(
 
 /// Serve one connection over a caller-owned plaintext reader and writer.
 /// TLS adapters call this after the handshake; the stream adapters call it
-/// from `serve`.
+/// from `serve`. This call blocks until the connection ends. A zero-byte read
+/// with an empty reader buffer reads again. A reader that produces nothing for
+/// `stall_timeout` fails with `error.ReaderStalled`. Signal end of input with
+/// `error.EndOfStream`.
 pub fn serveIo(
     io: Io,
     reader: *Io.Reader,
@@ -111,9 +117,11 @@ pub fn serveIo(
             .drain_timeout = .zero,
         },
     });
-    conn.start(now(io));
+    const started = now(io);
+    conn.start(started);
+    var last_received = started;
 
-    var event = conn.advance(now(io));
+    var event = conn.advance(started);
     while (true) {
         switch (event) {
             .request_head => event = conn.bufferBody(),
@@ -158,11 +166,16 @@ pub fn serveIo(
                         else => return err,
                     };
                     if (n == 0) {
-                        // A buffered reader can fill its own buffer and return zero. With no
-                        // buffered bytes, preserve the existing end-of-input behavior.
+                        // A buffered reader can fill its own buffer and return zero.
                         const buffered = reader.buffered();
                         if (buffered.len == 0) {
-                            event = conn.eof(now(io));
+                            const current = now(io);
+                            if (config.stall_timeout.nanoseconds > 0) {
+                                const elapsed = last_received.durationTo(current);
+                                if (elapsed.nanoseconds >= config.stall_timeout.nanoseconds) {
+                                    return error.ReaderStalled;
+                                }
+                            }
                             continue;
                         }
                         const take = @min(buffered.len, dst.len);
@@ -170,7 +183,9 @@ pub fn serveIo(
                         reader.toss(take);
                         n = take;
                     }
-                    event = conn.received(n, now(io));
+                    const received_at = now(io);
+                    last_received = received_at;
+                    event = conn.received(n, received_at);
                 }
             },
             .reject => |rejection| {
