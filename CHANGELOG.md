@@ -10,9 +10,9 @@ All notable changes to http are recorded here. The format follows
 - `h1.ServerConn.Limits.stream_idle_timeout` bounds consecutive `Pending`
   results from a response source. Zero disables this limit.
 - `h1.engine.direct.Config.stall_timeout` and
-  `h2.engine.direct.Config.stall_timeout` bound a run with no received byte.
-  Both default to 10 seconds. A received byte resets the bound, and zero
-  disables it.
+  `h2.engine.direct.Config.stall_timeout` bound zero-byte reads with nothing
+  buffered. Both default to 10 seconds. A received byte ends the run, and zero
+  disables the bound.
 
 ### Changed
 

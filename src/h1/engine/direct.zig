@@ -34,8 +34,9 @@ pub const Config = struct {
     common: common.Config = .{},
     /// Coalesce and cap response chunks. Zero preserves separate head/body.
     write_chunk_bytes: usize = 0,
-    /// The longest run with no received byte before `serveIo` fails with
-    /// `error.ReaderStalled`. Any received byte resets it. Zero disables the bound.
+    /// The longest run of zero-byte reads with nothing buffered before
+    /// `serveIo` fails with `error.ReaderStalled`. Any received byte ends the
+    /// run. Zero disables the bound.
     stall_timeout: Io.Duration = .fromSeconds(10),
 };
 
@@ -88,9 +89,9 @@ pub fn serve(
 /// Serve one connection over a caller-owned plaintext reader and writer.
 /// TLS adapters call this after the handshake; the stream adapters call it
 /// from `serve`. This call blocks until the connection ends. A zero-byte read
-/// with an empty reader buffer reads again. A reader that produces nothing for
-/// `stall_timeout` fails with `error.ReaderStalled`. Signal end of input with
-/// `error.EndOfStream`.
+/// with an empty reader buffer reads again. If that run lasts for
+/// `stall_timeout`, the call fails with `error.ReaderStalled`. Signal end of
+/// input with `error.EndOfStream`.
 pub fn serveIo(
     io: Io,
     reader: *Io.Reader,
@@ -119,7 +120,7 @@ pub fn serveIo(
     });
     const started = now(io);
     conn.start(started);
-    var last_received = started;
+    var stall_started: ?Io.Timestamp = null;
 
     var event = conn.advance(started);
     while (true) {
@@ -170,11 +171,15 @@ pub fn serveIo(
                         const buffered = reader.buffered();
                         if (buffered.len == 0) {
                             const current = now(io);
-                            if (config.stall_timeout.nanoseconds > 0) {
-                                const elapsed = last_received.durationTo(current);
-                                if (elapsed.nanoseconds >= config.stall_timeout.nanoseconds) {
-                                    return error.ReaderStalled;
+                            if (stall_started) |began| {
+                                if (config.stall_timeout.nanoseconds > 0) {
+                                    const elapsed = began.durationTo(current);
+                                    if (elapsed.nanoseconds >= config.stall_timeout.nanoseconds) {
+                                        return error.ReaderStalled;
+                                    }
                                 }
+                            } else {
+                                stall_started = current;
                             }
                             continue;
                         }
@@ -183,9 +188,8 @@ pub fn serveIo(
                         reader.toss(take);
                         n = take;
                     }
-                    const received_at = now(io);
-                    last_received = received_at;
-                    event = conn.received(n, received_at);
+                    stall_started = null;
+                    event = conn.received(n, now(io));
                 }
             },
             .reject => |rejection| {
