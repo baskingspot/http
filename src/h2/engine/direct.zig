@@ -48,9 +48,9 @@ pub const Config = struct {
     /// together with the next input. `serve` sets it from the stream; a TLS
     /// caller passes the transport's socket handle.
     wait_fd: OptionalFd = .none,
-    /// The longest run of zero-byte reads with nothing buffered before
-    /// `serveIo` fails with `error.ReaderStalled`. Any received byte ends the
-    /// run. Zero disables the bound.
+    /// The longest continuous run of zero-byte reads with nothing buffered
+    /// before `serveIo` fails with `error.ReaderStalled`. Any other progress
+    /// ends the run. Zero disables the bound.
     stall_timeout: Io.Duration = .fromSeconds(10),
 };
 
@@ -113,7 +113,9 @@ pub fn serve(
 /// with the next input, because the plain read has no timeout. This call
 /// blocks until the connection ends. A zero-byte read with an empty reader
 /// buffer reads again. If that run lasts for `stall_timeout`, the call fails
-/// with `error.ReaderStalled`. Signal end of input with `error.EndOfStream`.
+/// with `error.ReaderStalled`. Without `wait_fd`, a continuous run of empty
+/// reads busy-spins until the bound expires. Signal end of input with
+/// `error.EndOfStream`.
 pub fn serveIo(
     io: Io,
     reader: *Io.Reader,
@@ -139,14 +141,18 @@ pub fn serveIo(
 
     while (true) {
         const now: Io.Timestamp = .now(io, .awake);
-        _ = conn.drive(now) catch |err| {
+        const made_progress = conn.drive(now) catch |err| {
             flush(&conn, writer, &out_buffer) catch |flush_err| {
                 _ = @errorName(flush_err);
             };
             return err;
         };
-        try flush(&conn, writer, &out_buffer);
-        if (try conn.drive(now)) continue;
+        if (made_progress) stall_started = null;
+        if (try flushAndReport(&conn, writer, &out_buffer)) stall_started = null;
+        if (try conn.drive(now)) {
+            stall_started = null;
+            continue;
+        }
         if (conn.isClosed()) {
             try flush(&conn, writer, &out_buffer);
             return;
@@ -155,7 +161,10 @@ pub fn serveIo(
         // A parked handler armed a wake time. Wait for input or that time,
         // whichever comes first, so the wake is delivered without cross
         // traffic on the connection.
-        if (try waitOrWake(io, &conn, config.wait_fd)) continue;
+        if (try waitOrWake(io, &conn, config.wait_fd)) {
+            stall_started = null;
+            continue;
+        }
 
         var vecs: [1][]u8 = .{config.read_buffer};
         var n = reader.readVec(&vecs) catch |err| switch (err) {
@@ -280,10 +289,17 @@ fn pollInput(fd: posix.fd_t, deadline: ?Io.Timestamp, current: Io.Timestamp) !bo
 }
 
 fn flush(conn: *Connection, w: *Io.Writer, out: []u8) !void {
+    _ = try flushAndReport(conn, w, out);
+}
+
+fn flushAndReport(conn: *Connection, w: *Io.Writer, out: []u8) !bool {
+    var wrote = false;
     while (true) {
         const n = conn.send(out);
         if (n == 0) break;
+        wrote = true;
         try w.writeAll(out[0..n]);
     }
     try w.flush();
+    return wrote;
 }
