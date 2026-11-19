@@ -36,6 +36,10 @@ All notable changes to http are recorded here. The format follows
   becomes EOF while the reader holds its next bytes. An empty buffer retries,
   so TLS control records and close notifications no longer end a live request.
 
+- `h2.engine.direct` serves the bytes its reader already holds before it waits
+  on `Config.wait_fd`. A record larger than `Config.read_buffer` no longer
+  parks a connection with the rest of the request still in the reader.
+
 ## [0.7.1] - 2026-11-18
 
 ### Fixed

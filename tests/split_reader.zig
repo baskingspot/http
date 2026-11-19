@@ -27,6 +27,42 @@ pub const StalledReader = struct {
     }
 };
 
+/// Fills its own buffer with the whole record and returns zero, the way a TLS
+/// reader reports a pending record. The buffer is larger than any engine read
+/// buffer the tests use, so the engine copies the record out in pieces and the
+/// rest waits in `reader.buffer`.
+pub const PendingRecordReader = struct {
+    reader: Io.Reader,
+    bytes: []const u8,
+    buffer: [32 * 1024]u8 = undefined,
+    sent: bool = false,
+
+    pub fn init(self: *PendingRecordReader, bytes: []const u8) void {
+        self.reader = .{
+            .vtable = &.{ .stream = stream, .readVec = readVec },
+            .buffer = &self.buffer,
+            .seek = 0,
+            .end = 0,
+        };
+        self.bytes = bytes;
+        self.sent = false;
+    }
+
+    fn stream(_: *Io.Reader, _: *Io.Writer, _: Io.Limit) Io.Reader.StreamError!usize {
+        return 0;
+    }
+
+    fn readVec(reader: *Io.Reader, _: [][]u8) Io.Reader.Error!usize {
+        const self: *PendingRecordReader = @alignCast(@fieldParentPtr("reader", reader));
+        if (self.sent) return error.EndOfStream;
+        self.sent = true;
+        std.debug.assert(self.bytes.len <= self.buffer.len);
+        @memcpy(self.buffer[0..self.bytes.len], self.bytes);
+        reader.end = self.bytes.len;
+        return 0;
+    }
+};
+
 /// Alternates an empty zero read with one byte. The delay makes the whole
 /// request longer than a stall budget while every gap stays below it.
 pub const TrickleReader = struct {

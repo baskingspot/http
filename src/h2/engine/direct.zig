@@ -109,13 +109,14 @@ pub fn serve(
 ///
 /// A handler that parks with `Exchange.setDeadline` is woken at that time:
 /// with `wait_fd` set the read waits on the socket only until the earliest
-/// wake, and the clock drives the rest. Without `wait_fd`, a wake arrives
-/// with the next input, because the plain read has no timeout. This call
-/// blocks until the connection ends. A zero-byte read with an empty reader
-/// buffer reads again. If that run lasts for `stall_timeout`, the call fails
-/// with `error.ReaderStalled`. Without `wait_fd`, a continuous run of empty
-/// reads busy-spins until the bound expires. Signal end of input with
-/// `error.EndOfStream`.
+/// wake, and the clock drives the rest. Bytes the reader already holds are
+/// served before any wait, because the socket cannot report them. Without
+/// `wait_fd`, a wake arrives with the next input, because the plain read has
+/// no timeout. This call blocks until the connection ends. A zero-byte read
+/// with an empty reader buffer reads again. If that run lasts for
+/// `stall_timeout`, the call fails with `error.ReaderStalled`. Without
+/// `wait_fd`, a continuous run of empty reads busy-spins until the bound
+/// expires. Signal end of input with `error.EndOfStream`.
 pub fn serveIo(
     io: Io,
     reader: *Io.Reader,
@@ -160,10 +161,15 @@ pub fn serveIo(
 
         // A parked handler armed a wake time. Wait for input or that time,
         // whichever comes first, so the wake is delivered without cross
-        // traffic on the connection.
-        if (try waitOrWake(io, &conn, config.wait_fd)) {
-            stall_started = null;
-            continue;
+        // traffic on the connection. Never wait while the reader still holds
+        // bytes: the socket cannot report those, so the wait would park a
+        // connection that has input in hand. The next read returns them
+        // without blocking.
+        if (reader.bufferedLen() == 0) {
+            if (try waitOrWake(io, &conn, config.wait_fd)) {
+                stall_started = null;
+                continue;
+            }
         }
 
         var vecs: [1][]u8 = .{config.read_buffer};
