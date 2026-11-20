@@ -58,7 +58,7 @@ Not implemented:
 - Routing: `h1.targetForm` classifies the target and stops. There is no router and no method dispatch.
 - Middleware: `engine.Handler` is one vtable with four entries, and nothing chains around it.
 - Server push: a received `PUSH_PROMISE` is a connection error `PROTOCOL_ERROR`.
-- HTTP/3: `h3.frame` parses the framing, `qpack` decodes field sections and keeps the tables, and `varint` decodes the QUIC integer. There is no h3 session yet.
+- HTTP/3: `h3.frame` parses the framing, `h3.head` validates heads, `qpack` decodes field sections and writes static-only ones, and `varint` decodes the QUIC integer. There is no h3 session yet.
 
 ## Install
 

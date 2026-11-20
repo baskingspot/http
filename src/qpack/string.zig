@@ -19,6 +19,11 @@ const Cursor = @import("../Cursor.zig");
 const huffman = @import("../huffman.zig");
 const prefix_int = @import("../prefix_int.zig");
 
+pub const WriteError = error{
+    /// The destination buffer cannot hold the string.
+    NoSpace,
+};
+
 pub const Error = error{
     /// The input ended inside the length or the bytes.
     Truncated,
@@ -70,7 +75,7 @@ pub fn encodedLen(value: []const u8, comptime n: u4) usize {
 
 /// Write one string literal. The high `8 - n` bits of the first octet are zero;
 /// the caller ORs its representation tag into them.
-pub fn write(buf: []u8, value: []const u8, comptime n: u4) Error![]u8 {
+pub fn write(buf: []u8, value: []const u8, comptime n: u4) WriteError![]u8 {
     assert(n >= 2);
     assert(n <= 8);
 

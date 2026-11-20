@@ -10,8 +10,8 @@
 //!
 //! `varint` is the QUIC integer (RFC 9000 §16) that HTTP/3 frames use. `h3` is
 //! the HTTP/3 framing, and `qpack` is the QPACK tables, instruction streams, and
-//! field-section decoder. The h3 session and the QPACK encoder are not here
-//! yet.
+//! field-section decoder and a static-only encoder. The h3 session and the
+//! dynamic QPACK encoder are not here yet.
 
 pub const content_length = @import("content_length.zig");
 pub const encoding = @import("encoding.zig");

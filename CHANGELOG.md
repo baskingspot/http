@@ -7,6 +7,13 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `h3.head` validates HTTP/3 request, response, and trailer field sections.
+  A request with an http or https scheme must carry `:authority`, `Host`, or
+  both, and both must match; CONNECT and extended CONNECT follow RFC 9114 §4.4.
+  The shared field syntax lives in `field_section`, used by h2 and h3 alike.
+- `qpack.Encoder` writes static-only field sections: indexed static lines,
+  literal name references, and literal names. It never uses the dynamic table
+  and never blocks. `encodeFlags` sets the `N` bit per field.
 - `qpack.Decoder` decodes a field section: the Required Insert Count and Base
   prefix, all five field-line representations, blocked sections, and the `N`
   bit through `decodeFlags`. Fields and strings are copied into caller buffers.
