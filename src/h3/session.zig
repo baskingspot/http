@@ -1327,3 +1327,140 @@ test "GOAWAY crosses the control stream" {
     const goaway = (try server.nextEvent(testing.allocator)).?.goaway;
     try testing.expectEqual(@as(u62, 0), goaway.id);
 }
+
+test "a response body and trailers reach the client" {
+    var client = try Session.init(testing.allocator, .{
+        .role = .client,
+        .control_stream = 2,
+        .decoder_stream = 6,
+    });
+    defer client.deinit(testing.allocator);
+    var server = try Session.init(testing.allocator, .{
+        .role = .server,
+        .control_stream = 3,
+        .decoder_stream = 7,
+    });
+    defer server.deinit(testing.allocator);
+    try initSettings(testing.allocator, &client, &server);
+    try initSettings(testing.allocator, &server, &client);
+
+    try client.submitRequest(testing.allocator, 0, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = ":path", .value = "/" },
+    }, true);
+    try pumpOne(testing.allocator, &client, &server);
+    _ = try server.nextEvent(testing.allocator);
+
+    try server.submitResponse(testing.allocator, 0, &.{
+        .{ .name = ":status", .value = "200" },
+    }, false);
+    try pumpOne(testing.allocator, &server, &client);
+    const response = (try client.nextEvent(testing.allocator)).?.response;
+    try testing.expect(!response.end_stream);
+
+    try server.submitData(testing.allocator, 0, "response body", false);
+    try pumpOne(testing.allocator, &server, &client);
+    const data = (try client.nextEvent(testing.allocator)).?.data;
+    try testing.expectEqualStrings("response body", data.bytes);
+    try testing.expect(!data.end_stream);
+
+    try server.submitTrailers(testing.allocator, 0, &.{
+        .{ .name = "x-done", .value = "yes" },
+    });
+    try pumpOne(testing.allocator, &server, &client);
+    const trailers = (try client.nextEvent(testing.allocator)).?.trailers;
+    try testing.expectEqualStrings("x-done", trailers.headers.items[0].name);
+    try testing.expect(trailers.end_stream);
+}
+
+test "an unknown unidirectional stream is discarded" {
+    var server = try Session.init(testing.allocator, .{
+        .role = .server,
+        .control_stream = 3,
+        .decoder_stream = 7,
+    });
+    defer server.deinit(testing.allocator);
+
+    const bytes = [_]u8{ 0x40, 0x40 }; // varint 64, an unknown stream type
+    try testing.expectEqual(
+        bytes.len,
+        server.receive(testing.allocator, 10, &bytes, false),
+    );
+    try testing.expectEqual(
+        @as(u62, 10),
+        (try server.nextEvent(testing.allocator)).?.discard_stream,
+    );
+}
+
+test "a second control stream is a connection error" {
+    var server = try Session.init(testing.allocator, .{
+        .role = .server,
+        .control_stream = 3,
+        .decoder_stream = 7,
+    });
+    defer server.deinit(testing.allocator);
+
+    try testing.expectEqual(
+        @as(usize, 1),
+        server.receive(testing.allocator, 10, &.{0x00}, false),
+    );
+    try testing.expect((try server.nextEvent(testing.allocator)) == null);
+    // The first control stream has no SETTINGS yet, but a second stream type
+    // is a creation error before any frame is parsed.
+    _ = server.receive(testing.allocator, 14, &.{0x00}, false);
+    const event = (try server.nextEvent(testing.allocator)).?;
+    try testing.expectEqual(
+        error_code.Code.stream_creation_error,
+        event.connection_error.code,
+    );
+}
+
+test "closing the control stream is a connection error" {
+    var server = try Session.init(testing.allocator, .{
+        .role = .server,
+        .control_stream = 3,
+        .decoder_stream = 7,
+    });
+    defer server.deinit(testing.allocator);
+
+    _ = server.receive(testing.allocator, 10, &.{0x00}, true);
+    const event = (try server.nextEvent(testing.allocator)).?;
+    try testing.expectEqual(
+        error_code.Code.closed_critical_stream,
+        event.connection_error.code,
+    );
+}
+
+test "a server GOAWAY must name a client bidirectional stream" {
+    var client = try Session.init(testing.allocator, .{
+        .role = .client,
+        .control_stream = 2,
+        .decoder_stream = 6,
+    });
+    defer client.deinit(testing.allocator);
+    var server = try Session.init(testing.allocator, .{
+        .role = .server,
+        .control_stream = 3,
+        .decoder_stream = 7,
+    });
+    defer server.deinit(testing.allocator);
+    try initSettings(testing.allocator, &client, &server);
+    try initSettings(testing.allocator, &server, &client);
+
+    try server.submitGoaway(testing.allocator, 4);
+    try pumpOne(testing.allocator, &server, &client);
+    try testing.expectEqual(@as(u62, 4), (try client.nextEvent(testing.allocator)).?.goaway.id);
+
+    // A server-initiated bidirectional id is not a GOAWAY value. The client
+    // closes the connection, so it does not consume the frame.
+    try server.submitGoaway(testing.allocator, 5);
+    const action = server.nextAction().?;
+    const write = action.write;
+    _ = client.receive(testing.allocator, write.stream_id, write.bytes, write.fin);
+    server.release(testing.allocator);
+
+    const event = (try client.nextEvent(testing.allocator)).?;
+    try testing.expectEqual(error_code.Code.id_error, event.connection_error.code);
+}
