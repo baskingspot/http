@@ -161,6 +161,11 @@ pub fn parse(buf: []const u8) Error!Frame {
     };
 }
 
+/// Parse a payload whose header was read separately, as the stream reader does.
+pub fn body(header: Header, payload: []const u8) Error!Body {
+    return parseBody(header.frame_type, payload);
+}
+
 fn parseBody(frame_type: FrameType, payload: []const u8) Error!Body {
     return switch (frame_type) {
         .data => .{ .data = payload },

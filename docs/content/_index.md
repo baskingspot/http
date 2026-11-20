@@ -1284,7 +1284,7 @@ Not implemented:
 - Cookies. `Headers` never combines `Set-Cookie`, h2 `cookie` lines stay separate, and there is no jar.
 - Routing. `h1.targetForm` classifies the target and stops. There is no router, no path parameter, and no method dispatch.
 - Middleware. `engine.Handler` is one vtable with four entries, and there is no chain, interceptor, or deferral hook.
-- HTTP/3. `h3.frame`, `h3.head`, and `h3.control` cover framing, heads, and the control stream; `qpack` handles field sections and `varint` the QUIC integer. There is no h3 session yet.
+- HTTP/3. `h3.frame`, `h3.head`, `h3.control`, and `h3.Session` cover framing, heads, the control stream, and one connection; `qpack` handles field sections and `varint` the QUIC integer. There is no QUIC driver yet.
 - Server push. A received `PUSH_PROMISE` is a connection error `PROTOCOL_ERROR`.
 - Priority scheduling. PRIORITY is parsed, checked for a self-dependency, and otherwise ignored.
 - TLS inside `http`. Import `http_tls` for the h2 readiness engines, or hand a plaintext reader and writer to `serveIo`.

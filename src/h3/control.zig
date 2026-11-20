@@ -83,17 +83,17 @@ pub const Control = struct {
 
     /// Feed one complete control-stream frame. Null means the frame was an
     /// unknown extension and is ignored.
-    pub fn receive(self: *Control, value: frame.Frame) Error!?Event {
+    pub fn receive(self: *Control, value: frame.Body) Error!?Event {
         // §6.2.1: any frame other than SETTINGS as the first frame is
         // H3_MISSING_SETTINGS, not H3_FRAME_UNEXPECTED.
         if (!self.settings_seen) {
-            switch (value.body) {
+            switch (value) {
                 .settings => {},
                 else => return error.MissingSettings,
             }
         }
 
-        switch (value.body) {
+        switch (value) {
             .settings => |entries| {
                 if (self.settings_seen) return error.UnexpectedFrame;
 
@@ -146,7 +146,7 @@ fn receiveSettings(control: *Control, values: settings.Values) !?Event {
     const payload = try settings.write(&payload_buf, values);
     var frame_buf: [128]u8 = undefined;
     const bytes = try frame.write(&frame_buf, .settings, payload);
-    return control.receive(try frame.parse(bytes));
+    return control.receive((try frame.parse(bytes)).body);
 }
 
 fn receiveVarint(control: *Control, frame_type: frame.FrameType, id: u62) !?Event {
@@ -154,13 +154,13 @@ fn receiveVarint(control: *Control, frame_type: frame.FrameType, id: u62) !?Even
     const payload = try varint.encode(&payload_buf, id);
     var frame_buf: [16]u8 = undefined;
     const bytes = try frame.write(&frame_buf, frame_type, payload);
-    return control.receive(try frame.parse(bytes));
+    return control.receive((try frame.parse(bytes)).body);
 }
 
 fn receiveBytes(control: *Control, frame_type: frame.FrameType, payload: []const u8) !?Event {
     var frame_buf: [64]u8 = undefined;
     const bytes = try frame.write(&frame_buf, frame_type, payload);
-    return control.receive(try frame.parse(bytes));
+    return control.receive((try frame.parse(bytes)).body);
 }
 
 test "the control stream must start with SETTINGS" {

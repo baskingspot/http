@@ -7,6 +7,11 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `h3.Session` runs one HTTP/3 connection over the numbered-stream seam: the
+  control stream, QPACK decode, request/response/data/trailers, blocked field
+  sections, resets, GOAWAY, and a tagged outbound queue. Push and
+  server-initiated bidirectional streams are rejected; the QPACK encoder is
+  static-only.
 - `h3.settings`, `h3.error_code`, and `h3.control` cover the control stream:
   the three HTTP/3 settings with the reserved HTTP/2 ids, the H3 and QPACK
   error codes, unidirectional stream types, and the SETTINGS-first, monotonic
