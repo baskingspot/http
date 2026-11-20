@@ -24,7 +24,7 @@ const assert = std.debug.assert;
 const mem = std.mem;
 
 const Header = @import("../header.zig").Header;
-const TableStorage = @import("TableStorage.zig");
+const TableStorage = @import("../TableStorage.zig");
 const Slot = TableStorage.Slot;
 
 /// The per-entry accounting overhead (RFC 7541 §4.1).

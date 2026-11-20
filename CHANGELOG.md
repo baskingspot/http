@@ -7,6 +7,20 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `qpack.Decoder` decodes a field section: the Required Insert Count and Base
+  prefix, all five field-line representations, blocked sections, and the `N`
+  bit through `decodeFlags`. Fields and strings are copied into caller buffers.
+- `qpack` holds the RFC 9204 static table (99 entries), the dynamic table with
+  QPACK's absolute index space, the encoder and decoder instruction streams,
+  and the shared string literal.
+- `prefix_int.decodeWide` and `encodeWide` handle the 62-bit integers QPACK
+  requires. The `u32` path is unchanged.
+- `h3.frame` parses and writes HTTP/3 frames (RFC 9114 §7), including a reader
+  that walks one QUIC stream in pieces. Unknown extension types borrow their
+  payload; the reserved HTTP/2 types reject.
+- `varint` encodes and decodes QUIC variable-length integers (RFC 9000 §16),
+  the integer format HTTP/3 frames use. `varint.decodeMinimal` rejects a
+  non-minimal encoding, as the QUIC Frame Type field requires.
 - `h1.ServerConn.Limits.stream_idle_timeout` bounds consecutive `Pending`
   results from a response source. Zero disables this limit.
 - `h1.engine.direct.Config.stall_timeout` and

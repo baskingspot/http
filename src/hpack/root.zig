@@ -22,7 +22,7 @@ pub const Decoder = decoder.Decoder;
 pub const Encoder = encoder.Encoder;
 pub const Mode = encoder.Mode;
 pub const DynamicTable = dynamic_table.DynamicTable;
-pub const TableStorage = @import("TableStorage.zig");
+pub const TableStorage = @import("../TableStorage.zig");
 
 /// The first dynamic index: 62, one past the static table.
 pub const first_dynamic = decoder.first_dynamic;

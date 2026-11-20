@@ -54,7 +54,7 @@ const DynamicTable = dynamic_table.DynamicTable;
 const static_table = @import("static_table.zig");
 /// The first dynamic index. Static indices are 1..61, dynamic start at 62.
 pub const first_dynamic = static_table.first_dynamic;
-const TableStorage = @import("TableStorage.zig");
+const TableStorage = @import("../TableStorage.zig");
 const Slot = TableStorage.Slot;
 
 pub const Error = error{

@@ -101,6 +101,84 @@ pub fn encode(buf: []u8, value: u32, bits: u4) EncodeError![]u8 {
     return buf[0 .. len + 1];
 }
 
+/// The largest value a QPACK integer must decode: 2^62 - 1 (RFC 9204 §4.1.1).
+pub const wide_max: u62 = (1 << 62) - 1;
+
+/// `decodeWide` can fail on the value as well as the input.
+pub const WideError = error{
+    /// The input ended inside an integer.
+    Truncated,
+    /// The value does not fit in 62 bits.
+    TooLarge,
+};
+
+/// Decode the integer whose prefix is the low `bits` bits of the next octet,
+/// advancing `cursor` past the prefix and any continuation octets.
+///
+/// QPACK uses this path: it must decode integers up to 62 bits (RFC 9204
+/// §4.1.1), while HPACK's indices and lengths fit `u32` and use `decode`.
+pub fn decodeWide(cursor: *Cursor, bits: u4) WideError!u62 {
+    assert(bits >= 1);
+    assert(bits <= max_bits);
+    assert(cursor.buf.len <= math.maxInt(u32));
+    const mask: u62 = (@as(u62, 1) << @intCast(bits)) - 1;
+
+    const first = cursor.next() orelse return error.Truncated;
+    var value: u64 = @as(u62, first) & mask;
+    if (value < mask) return @intCast(value);
+
+    // value - mask is encoded base 128, least significant group first. A
+    // group at shift 56 carries at most six usable bits, so anything above
+    // `wide_max` is an error; a group past that cannot fit at all.
+    var shift: u6 = 0;
+    while (true) {
+        const byte = cursor.next() orelse return error.Truncated;
+        if (shift > 56) return error.TooLarge;
+        value += @as(u64, byte & 0x7f) << shift;
+        if (value > wide_max) return error.TooLarge;
+        if (byte & 0x80 == 0) return @intCast(value);
+        shift += 7;
+    }
+}
+
+/// The number of octets `encodeWide` writes for `value` with a `bits`-wide
+/// prefix.
+pub fn encodedLenWide(value: u62, bits: u4) usize {
+    assert(bits >= 1);
+    assert(bits <= max_bits);
+    const mask: u62 = (@as(u62, 1) << @intCast(bits)) - 1;
+    if (value < mask) return 1;
+
+    var rest = value - mask;
+    var len: usize = 1;
+    while (rest >= 128) : (rest /= 128) len += 1;
+    return len + 1;
+}
+
+/// Encode `value` with a `bits`-wide prefix. The high bits of the first octet
+/// are zero; the caller ORs in the representation tag.
+pub fn encodeWide(buf: []u8, value: u62, bits: u4) EncodeError![]u8 {
+    assert(bits >= 1);
+    assert(bits <= max_bits);
+    const mask: u62 = (@as(u62, 1) << @intCast(bits)) - 1;
+    if (buf.len < encodedLenWide(value, bits)) return error.NoSpace;
+
+    if (value < mask) {
+        buf[0] = @intCast(value);
+        return buf[0..1];
+    }
+
+    buf[0] = @intCast(mask);
+    var rest = value - mask;
+    var len: usize = 1;
+    while (rest >= 128) : (rest /= 128) {
+        buf[len] = @intCast(rest % 128 + 128);
+        len += 1;
+    }
+    buf[len] = @intCast(rest);
+    return buf[0 .. len + 1];
+}
+
 test "C.1.1: 10 with a 5-bit prefix fits the prefix (RFC 7541 §5.1)" {
     var buf: [1]u8 = undefined;
     const encoded = try encode(&buf, 10, 5);
@@ -234,4 +312,39 @@ test "fuzz arbitrary bytes never overruns" {
     }.run, .{
         .corpus = &.{ "", "\x1f", "\x1f\x9a\x0a", "\xff\xff\xff\xff\xff\xff" },
     });
+}
+
+test "QPACK integers wider than 32 bits round-trip (RFC 9204 §4.1.1)" {
+    inline for (.{ 1, 4, 5, 7, 8 }) |bits| {
+        const values = [_]u62{ 1 << 32, 1 << 40, wide_max - 1, wide_max };
+        for (values) |value| {
+            var buf: [16]u8 = undefined;
+            const encoded = try encodeWide(&buf, value, bits);
+            try testing.expectEqual(encodedLenWide(value, bits), encoded.len);
+
+            var cursor: Cursor = .init(encoded);
+            try testing.expectEqual(value, try decodeWide(&cursor, bits));
+            try testing.expect(cursor.atEnd());
+        }
+    }
+}
+
+test "QPACK decodeWide rejects a value above 62 bits" {
+    // An 8-bit prefix of 255 followed by continuation groups that carry bit 62.
+    const bytes = [_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    var cursor: Cursor = .init(&bytes);
+    try testing.expectError(error.TooLarge, decodeWide(&cursor, 8));
+}
+
+test "QPACK decodeWide reports truncation" {
+    const bytes = [_]u8{ 0xff, 0x80 };
+    var cursor: Cursor = .init(&bytes);
+    try testing.expectError(error.Truncated, decodeWide(&cursor, 8));
+}
+
+test "the u32 decoder still refuses a value above its range" {
+    var buf: [16]u8 = undefined;
+    const encoded = try encodeWide(&buf, 1 << 32, 8);
+    var cursor: Cursor = .init(encoded);
+    try testing.expectError(error.TooLarge, decode(&cursor, 8));
 }

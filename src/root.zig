@@ -7,6 +7,11 @@
 //! client contract they both implement. The engines own the transport and the
 //! handler loop over `std.Io`, and the parsers import no socket and no
 //! allocator.
+//!
+//! `varint` is the QUIC integer (RFC 9000 §16) that HTTP/3 frames use. `h3` is
+//! the HTTP/3 framing, and `qpack` is the QPACK tables, instruction streams, and
+//! field-section decoder. The h3 session and the QPACK encoder are not here
+//! yet.
 
 pub const content_length = @import("content_length.zig");
 pub const encoding = @import("encoding.zig");
@@ -15,7 +20,9 @@ pub const stream = @import("engine/stream.zig");
 pub const client = @import("client/root.zig");
 pub const h1 = @import("h1/root.zig");
 pub const h2 = @import("h2/root.zig");
+pub const h3 = @import("h3/root.zig");
 pub const hpack = @import("hpack/root.zig");
+pub const qpack = @import("qpack/root.zig");
 pub const huffman = @import("huffman.zig");
 pub const Cursor = @import("Cursor.zig");
 pub const Header = @import("header.zig").Header;
@@ -29,6 +36,7 @@ pub const status = @import("status.zig");
 pub const token_list = @import("token_list.zig");
 pub const transfer_encoding = @import("transfer_encoding.zig");
 pub const uri = @import("uri.zig");
+pub const varint = @import("varint.zig");
 pub const Values = @import("header.zig").Values;
 pub const Version = @import("version.zig").Version;
 pub const WireVersion = @import("version.zig").WireVersion;
@@ -43,7 +51,9 @@ test {
     _ = client;
     _ = h1;
     _ = h2;
+    _ = h3;
     _ = hpack;
+    _ = qpack;
     _ = huffman;
     _ = prefix_int;
     _ = response;
@@ -53,4 +63,5 @@ test {
     _ = token_list;
     _ = transfer_encoding;
     _ = uri;
+    _ = varint;
 }

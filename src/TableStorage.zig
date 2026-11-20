@@ -1,7 +1,7 @@
 //! The storage a dynamic table reads: one opaque byte blob.
 //!
-//! HPACK's table maximum is runtime (SETTINGS_HEADER_TABLE_SIZE), so the
-//! storage is sized at runtime too. `init` allocates the blob; `initBuffer`
+//! HPACK and QPACK size their dynamic table at runtime from the peer's
+//! settings, so the storage is sized at runtime too. `init` allocates the blob; `initBuffer`
 //! wraps a caller buffer for a stack or fixed-size server. `deinit` frees the
 //! blob, so call it only for a storage from `init`: a caller that used
 //! `initBuffer` frees its own memory, exactly as with `std.array_list.Aligned`.
