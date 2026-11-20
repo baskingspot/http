@@ -12,9 +12,10 @@ parameters, streams, loss recovery, and a TLS driver. It has no HTTP.
 `http` is h1 and h2, with HPACK, `huffman`, `prefix_int`, the h2 session, and
 the engines. `http.varint` is the QUIC integer (RFC 9000 §16), and
 `http.h3.frame` is the frame codec and per-stream reader, `http.h3.head`
-validates request and response heads, and `http.qpack` is the static and
-dynamic tables, both instruction streams, the field-section decoder, and a
-static-only encoder. The h3 control stream and session are next.
+validates request and response heads, `http.h3.control` plus `http.h3.settings`
+and `http.h3.error_code` cover the control stream, and `http.qpack` is the
+static and dynamic tables, both instruction streams, the field-section decoder,
+and a static-only encoder. The h3 session is next.
 
 ## Where h3 lives
 
@@ -268,7 +269,7 @@ them.
 | 9 | `h3.engine.quic` driver and example | `curl --http3` gets 200 on loopback; `http` still builds without `quic` before the driver lands |
 | 10 | dynamic QPACK encoder | blocked encoder tests and interop pass |
 
-Steps 1 through 6 are done as of 2026-11-19. Steps 2 and 3 were independent
+Steps 1 through 7 are done as of 2026-11-19. Steps 2 and 3 were independent
 after step 1. Step 8 needs 2, 4, 5, 6, and 7. Step 9 needs 8 and the QUIC
 driver.
 
