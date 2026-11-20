@@ -9,10 +9,10 @@
 //! `Options`; the session writes their type byte and SETTINGS. The peer's
 //! unidirectional streams are classified by the type varint the peer sends.
 //!
-//! Inbound events borrow either the bytes passed to `receive` (DATA) or the
-//! session's decode buffer (heads and trailers). The caller consumes an event
-//! before the next `receive` or `nextEvent`. Outbound writes are tagged with
-//! the stream id and drained with `nextAction` and `release`.
+//! Inbound event bytes borrow the session's buffers and are valid until the
+//! next `receive` or `nextEvent`. The caller consumes an event before either.
+//! Outbound writes are tagged with the stream id and drained with `nextAction`
+//! and `release`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -21,6 +21,7 @@ const assert = std.debug.assert;
 
 const Cursor = @import("../Cursor.zig");
 const Header = @import("../header.zig").Header;
+const Method = @import("../method.zig").Method;
 const Headers = @import("../header.zig").Headers;
 const varint = @import("../varint.zig");
 const qpack = @import("../qpack/root.zig");
@@ -51,6 +52,7 @@ pub const Options = struct {
     max_fields: u16 = 128,
     max_in_header_block: u32 = 32 * 1024,
     max_control_frame: u32 = 16 * 1024,
+    max_data_event: u32 = 16 * 1024,
     max_blocked_bytes: u32 = 64 * 1024,
 };
 
@@ -84,7 +86,7 @@ pub const ResponseEvent = struct {
 
 pub const DataEvent = struct {
     stream_id: u62,
-    /// Borrowed from the bytes passed to `receive`.
+    /// Borrowed from the session until the next event.
     bytes: []const u8,
     end_stream: bool,
 };
@@ -203,6 +205,7 @@ pub const Session = struct {
 
     field_headers: []Header,
     field_bytes: []u8,
+    data_buf: []u8,
     send_block: []u8,
     send_frame: []u8,
     qpack_scratch: []u8,
@@ -223,6 +226,8 @@ pub const Session = struct {
         errdefer allocator.free(field_bytes);
         const field_headers = try allocator.alloc(Header, options.max_fields);
         errdefer allocator.free(field_headers);
+        const data_buf = try allocator.alloc(u8, options.max_data_event);
+        errdefer allocator.free(data_buf);
         const send_block = try allocator.alloc(u8, options.max_in_header_block);
         errdefer allocator.free(send_block);
         const send_frame = try allocator.alloc(u8, options.max_in_header_block + 16);
@@ -262,6 +267,7 @@ pub const Session = struct {
             .goaway_sent = false,
             .field_headers = field_headers,
             .field_bytes = field_bytes,
+            .data_buf = data_buf,
             .send_block = send_block,
             .send_frame = send_frame,
             .qpack_scratch = qpack_scratch,
@@ -312,6 +318,7 @@ pub const Session = struct {
         self.out_queued.deinit(allocator);
         allocator.free(self.field_headers);
         allocator.free(self.field_bytes);
+        allocator.free(self.data_buf);
         allocator.free(self.send_block);
         allocator.free(self.send_frame);
         allocator.free(self.qpack_scratch);
@@ -532,10 +539,14 @@ pub const Session = struct {
                 if (!stream.head_seen or stream.trailers_seen) {
                     return self.fail(allocator, .frame_unexpected);
                 }
+                if (chunk.payload.len > self.data_buf.len) {
+                    return self.fail(allocator, .excessive_load);
+                }
+                @memcpy(self.data_buf[0..chunk.payload.len], chunk.payload);
                 const end_stream = chunk.end and cursor.atEnd() and fin;
                 self.event = .{ .data = .{
                     .stream_id = stream.id,
-                    .bytes = chunk.payload,
+                    .bytes = self.data_buf[0..chunk.payload.len],
                     .end_stream = end_stream,
                 } };
                 if (end_stream) stream.remote_closed = true;
@@ -912,7 +923,7 @@ pub const Session = struct {
     pub fn submitGoaway(self: *Session, allocator: Allocator, id: u62) Error!void {
         if (self.state == .closed) return error.ConnectionClosed;
         var payload: [8]u8 = undefined;
-        const encoded = try varint.encode(&payload, id);
+        const encoded = varint.encode(&payload, id) catch return error.MessageTooLarge;
         const framed = frame.write(self.send_frame, .goaway, encoded) catch
             return error.MessageTooLarge;
         try self.queueWrite(allocator, self.options.control_stream, framed, false);
@@ -1132,4 +1143,187 @@ fn initSettings(allocator: Allocator, from: *Session, to: *Session) !void {
     try testing.expectEqual(@as(u62, 4096), event.settings.qpack_max_table_capacity);
 
     try pumpOne(allocator, from, to); // decoder stream type
+}
+
+test "DATA frames become data events with the FIN on the last one" {
+    var client = try Session.init(testing.allocator, .{
+        .role = .client,
+        .control_stream = 2,
+        .decoder_stream = 6,
+    });
+    defer client.deinit(testing.allocator);
+    var server = try Session.init(testing.allocator, .{
+        .role = .server,
+        .control_stream = 3,
+        .decoder_stream = 7,
+    });
+    defer server.deinit(testing.allocator);
+    try initSettings(testing.allocator, &client, &server);
+    try initSettings(testing.allocator, &server, &client);
+
+    try client.submitRequest(testing.allocator, 0, &.{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = ":path", .value = "/upload" },
+    }, false);
+    try pumpOne(testing.allocator, &client, &server);
+    const request = (try server.nextEvent(testing.allocator)).?.request;
+    try testing.expect(!request.end_stream);
+
+    try client.submitData(testing.allocator, 0, "hello", false);
+    try pumpOne(testing.allocator, &client, &server);
+    const first = (try server.nextEvent(testing.allocator)).?.data;
+    try testing.expectEqualStrings("hello", first.bytes);
+    try testing.expect(!first.end_stream);
+
+    try client.submitData(testing.allocator, 0, " world", true);
+    try pumpOne(testing.allocator, &client, &server);
+    const second = (try server.nextEvent(testing.allocator)).?.data;
+    try testing.expectEqualStrings(" world", second.bytes);
+    try testing.expect(second.end_stream);
+}
+
+test "a trailer section ends the stream" {
+    var client = try Session.init(testing.allocator, .{
+        .role = .client,
+        .control_stream = 2,
+        .decoder_stream = 6,
+    });
+    defer client.deinit(testing.allocator);
+    var server = try Session.init(testing.allocator, .{
+        .role = .server,
+        .control_stream = 3,
+        .decoder_stream = 7,
+    });
+    defer server.deinit(testing.allocator);
+    try initSettings(testing.allocator, &client, &server);
+    try initSettings(testing.allocator, &server, &client);
+
+    try client.submitRequest(testing.allocator, 0, &.{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = ":path", .value = "/upload" },
+    }, false);
+    try pumpOne(testing.allocator, &client, &server);
+    _ = try server.nextEvent(testing.allocator);
+
+    try client.submitData(testing.allocator, 0, "body", false);
+    try pumpOne(testing.allocator, &client, &server);
+    _ = try server.nextEvent(testing.allocator);
+
+    try client.submitTrailers(testing.allocator, 0, &.{
+        .{ .name = "x-check", .value = "done" },
+    });
+    try pumpOne(testing.allocator, &client, &server);
+    const trailers = (try server.nextEvent(testing.allocator)).?.trailers;
+    try testing.expectEqual(@as(usize, 1), trailers.headers.items.len);
+    try testing.expectEqualStrings("x-check", trailers.headers.items[0].name);
+    try testing.expect(trailers.end_stream);
+}
+
+test "a blocked field section waits for the encoder stream" {
+    var server = try Session.init(testing.allocator, .{
+        .role = .server,
+        .control_stream = 3,
+        .decoder_stream = 7,
+    });
+    defer server.deinit(testing.allocator);
+
+    // RIC 1, Base 1. :method GET, :scheme https, :authority example.com,
+    // then dynamic relative 0, which is :path=/blocked from the insert below.
+    const block = [_]u8{
+        0x02, 0x00,
+        0xd1, 0xd7,
+        0x50, 0x0b,
+        'e',  'x',
+        'a',  'm',
+        'p',  'l',
+        'e',  '.',
+        'c',  'o',
+        'm',  0x80,
+    };
+    var frame_buf: [64]u8 = undefined;
+    const framed = try frame.write(&frame_buf, .headers, &block);
+
+    try testing.expectEqual(
+        framed.len,
+        server.receive(testing.allocator, 0, framed, false),
+    );
+    try testing.expect((try server.nextEvent(testing.allocator)) == null);
+
+    // Client encoder stream: Set Capacity 220, Insert :path=/blocked.
+    const encoder_bytes = [_]u8{
+        0x02,
+        0x3f,
+        0xbd,
+        0x01,
+        0xc1,
+        0x08,
+        '/',
+        'b',
+        'l',
+        'o',
+        'c',
+        'k',
+        'e',
+        'd',
+    };
+    try testing.expectEqual(
+        encoder_bytes.len,
+        server.receive(testing.allocator, 10, &encoder_bytes, false),
+    );
+
+    const request = (try server.nextEvent(testing.allocator)).?.request;
+    try testing.expectEqual(Method.GET, request.head.method);
+    try testing.expectEqualStrings("/blocked", request.head.path.?);
+    try testing.expectEqualStrings("example.com", request.head.authority.?);
+}
+
+test "a peer reset becomes an event and frees a held block" {
+    var server = try Session.init(testing.allocator, .{
+        .role = .server,
+        .control_stream = 3,
+        .decoder_stream = 7,
+    });
+    defer server.deinit(testing.allocator);
+
+    const block = [_]u8{
+        0x02, 0x00, 0xd1, 0xd7, 0x50, 0x0b, 'e', 'x',
+        'a',  'm',  'p',  'l',  'e',  '.',  'c', 'o',
+        'm',  0x80,
+    };
+    var frame_buf: [64]u8 = undefined;
+    const framed = try frame.write(&frame_buf, .headers, &block);
+    _ = server.receive(testing.allocator, 0, framed, false);
+
+    server.reset(testing.allocator, 0, 0x10c);
+    const event = (try server.nextEvent(testing.allocator)).?.reset;
+    try testing.expectEqual(Origin.remote, event.origin);
+    try testing.expectEqual(@as(u64, 0x10c), event.code);
+    try testing.expectEqual(@as(u32, 0), server.blocked_streams);
+}
+
+test "GOAWAY crosses the control stream" {
+    var client = try Session.init(testing.allocator, .{
+        .role = .client,
+        .control_stream = 2,
+        .decoder_stream = 6,
+    });
+    defer client.deinit(testing.allocator);
+    var server = try Session.init(testing.allocator, .{
+        .role = .server,
+        .control_stream = 3,
+        .decoder_stream = 7,
+    });
+    defer server.deinit(testing.allocator);
+    try initSettings(testing.allocator, &client, &server);
+    try initSettings(testing.allocator, &server, &client);
+
+    try client.submitGoaway(testing.allocator, 0);
+    try pumpOne(testing.allocator, &client, &server);
+
+    const goaway = (try server.nextEvent(testing.allocator)).?.goaway;
+    try testing.expectEqual(@as(u62, 0), goaway.id);
 }
