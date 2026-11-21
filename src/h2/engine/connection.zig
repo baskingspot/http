@@ -592,7 +592,7 @@ pub const Connection = struct {
                     self.pool.get(handle).parked = false;
                 }
             },
-            .settings, .goaway, .connection_error, .response => {},
+            .settings, .ping_ack, .goaway, .connection_error, .response => {},
         }
     }
 

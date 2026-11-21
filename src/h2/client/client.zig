@@ -305,7 +305,7 @@ pub const Client = struct {
                     self.connection_poisoned = true;
                     return err;
                 },
-                .window_update => {},
+                .window_update, .ping_ack => {},
                 .response => |head_event| {
                     if (head_event.stream_id != self.stream_id) return error.UnexpectedStream;
                     if (head_event.head.status.class() == .informational) {
@@ -489,7 +489,7 @@ pub const Client = struct {
 
     fn onWriteEvent(self: *Client, event: Event) !void {
         switch (event) {
-            .window_update => {},
+            .window_update, .ping_ack => {},
             .settings => try self.flushFrames(),
             .response => |head_event| {
                 if (head_event.stream_id != self.stream_id) return error.UnexpectedStream;
@@ -614,7 +614,7 @@ pub const Client = struct {
                     return error.UnexpectedResponse;
                 },
                 .settings => try self.flushFrames(),
-                .window_update => {},
+                .window_update, .ping_ack => {},
                 .goaway => |goaway| {
                     self.goaway = .{
                         .last_stream_id = goaway.last_stream_id,

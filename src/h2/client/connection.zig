@@ -79,6 +79,7 @@ pub const Event = union(enum) {
     writable: struct {
         stream: u31,
     },
+    ping_ack: [8]u8,
     goaway: shared.GoAway,
 };
 
@@ -145,6 +146,9 @@ pub const Connection = struct {
     preface_remaining: usize,
     goaway: ?shared.GoAway = null,
     poisoned: bool = false,
+    /// Outbound PINGs still awaiting a peer ACK; keeps `wantsInput()` true on
+    /// an otherwise idle connection so drivers read the reply.
+    pings_outstanding: u32 = 0,
     /// The frame error code behind a connection error, kept because `poll`
     /// otherwise reports only `error.ConnectionClosed`. A stream closed as
     /// `.local.unusable` means this happened, and the code is the difference
@@ -218,6 +222,7 @@ pub const Connection = struct {
     /// server SETTINGS has not arrived yet.
     pub fn wantsInput(self: *const Connection) bool {
         if (self.poisoned) return false;
+        if (self.pings_outstanding != 0) return true;
         if (!self.session.settings_received) return self.goaway == null;
         for (self.slots) |*slot| {
             if (slot.used and slot.close_reason == null) return true;
@@ -318,6 +323,14 @@ pub const Connection = struct {
         slot.close_reason = .{ .local = .canceled };
     }
 
+    /// Queue a PING frame with an eight-octet opaque payload (RFC 9113 §6.7).
+    /// The peer's reply arrives from `poll` as `.ping_ack` with the same payload.
+    pub fn ping(self: *Connection, payload: *const [8]u8) !void {
+        if (self.poisoned) return error.ConnectionPoisoned;
+        try self.session.submitPing(self.allocator, payload);
+        self.pings_outstanding +|= 1;
+    }
+
     pub fn trailers(self: *Connection, id: u31, generation: u32) Headers {
         const slot = self.findSlot(id, generation) orelse return .{ .items = &.{} };
         return slot.trailers;
@@ -338,6 +351,10 @@ pub const Connection = struct {
             const event = try self.session.nextEvent(self.allocator) orelse return null;
             switch (event) {
                 .settings => {},
+                .ping_ack => |payload| {
+                    self.pings_outstanding -|= 1;
+                    return .{ .ping_ack = payload };
+                },
                 .window_update => |update| {
                     if (self.writableEvent(update.stream_id)) |writable| {
                         return writable;
@@ -970,4 +987,76 @@ test "GOAWAY keeps accepted streams readable and rejects new streams" {
     }
     try testing.expect(saw_response);
     try testing.expect(!client.wantsInput());
+}
+
+test "ping queues a PING frame, keeps wantsInput true, and poll surfaces ping_ack" {
+    var client: Connection = undefined;
+    try client.init(.{ .allocator = testing.allocator });
+    defer client.deinit();
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
+    defer server.deinit(testing.allocator);
+    try transferServer(&server, &client);
+    try transferConnection(&client, &server);
+    while (try server.nextEvent(testing.allocator)) |_| {}
+    _ = try client.poll();
+    try testing.expect(!client.wantsInput());
+
+    const payload: [8]u8 = .{ 0xde, 0xad, 0xbe, 0xef, 1, 2, 3, 4 };
+    try client.ping(&payload);
+    try testing.expect(client.wantsInput());
+    try transferConnection(&client, &server);
+    try testing.expect((try server.nextEvent(testing.allocator)) == null);
+    try testing.expect(server.hasPendingOutput());
+    try transferServer(&server, &client);
+
+    const event = (try client.poll()).?;
+    switch (event) {
+        .ping_ack => |ack| try testing.expectEqualSlices(u8, &payload, &ack),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect((try client.poll()) == null);
+    try testing.expect(!client.wantsInput());
+}
+
+test "ping fails on a poisoned connection and unsolicited ping_ack does not underflow" {
+    var client: Connection = undefined;
+    try client.init(.{ .allocator = testing.allocator });
+    defer client.deinit();
+    var server: Session = try .init(testing.allocator, .{ .role = .server });
+    defer server.deinit(testing.allocator);
+    try transferServer(&server, &client);
+    try transferConnection(&client, &server);
+    while (try server.nextEvent(testing.allocator)) |_| {}
+    _ = try client.poll();
+
+    // Unsolicited PING ACK (RFC 9113 §6.7) surfaces without error or underflow.
+    const unsolicited = [_]u8{
+        0,                                 0,               8, // length = 8
+        @backingInt(frame.FrameType.ping), frame.flags.ack,
+        0, 0, 0, 0, // stream 0
+        9, 8, 7, 6,
+        5, 4, 3, 2,
+    };
+    try testing.expectEqual(unsolicited.len, client.receive(&unsolicited));
+    const ack = (try client.poll()).?;
+    switch (ack) {
+        .ping_ack => |payload| try testing.expectEqualSlices(u8, unsolicited[9..17], &payload),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(!client.wantsInput());
+
+    // PING ACK on a non-zero stream poisons the connection with protocol_error,
+    // after which ping() must return error.ConnectionPoisoned.
+    const bad_stream = [_]u8{
+        0,                                 0,               8,
+        @backingInt(frame.FrameType.ping), frame.flags.ack,
+        0, 0, 0, 1, // stream 1 (illegal per RFC 9113 §6.7)
+        1, 2, 3, 4,
+        5, 6, 7, 8,
+    };
+    try testing.expectEqual(bad_stream.len, client.receive(&bad_stream));
+    try testing.expectError(error.ConnectionClosed, client.poll());
+    try testing.expectEqual(frame.ErrorCode.protocol_error, client.connectionErrorCode().?);
+    const payload: [8]u8 = @splat(0);
+    try testing.expectError(error.ConnectionPoisoned, client.ping(&payload));
 }

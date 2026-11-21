@@ -100,6 +100,7 @@ pub const Event = union(enum) {
     trailers: TrailersEvent,
     reset: ResetEvent,
     window_update: WindowUpdateEvent,
+    ping_ack: [8]u8,
     goaway: GoAwayEvent,
     settings: settings.Values,
     connection_error: ConnectionErrorEvent,
@@ -695,8 +696,9 @@ pub const Session = struct {
         if (header.stream_id != 0) return self.connectionError(allocator, .protocol_error);
         if (!ping.ack) {
             try self.appendFrame(allocator, .ping, frame.flags.ack, 0, ping.payload);
+            return null;
         }
-        return null;
+        return .{ .ping_ack = ping.payload[0..8].* };
     }
 
     fn onGoAway(
@@ -2019,6 +2021,11 @@ test "PING is acknowledged and GOAWAY is delivered" {
     try testing.expect((try server.nextEvent(testing.allocator)) == null);
     try testing.expect(server.hasPendingOutput());
     try transfer(&server, &client);
+    const ack = (try client.nextEvent(testing.allocator)).?;
+    switch (ack) {
+        .ping_ack => |payload| try testing.expectEqualSlices(u8, &ping, &payload),
+        else => return error.TestUnexpectedResult,
+    }
     try testing.expect((try client.nextEvent(testing.allocator)) == null);
 
     try client.submitGoaway(testing.allocator, .no_error);
@@ -2033,6 +2040,22 @@ test "PING is acknowledged and GOAWAY is delivered" {
         &request_fields,
         true,
     ));
+
+    // A connection error closes the session; submitPing must then reject.
+    const bad_ping = [_]u8{
+        0,                                 0,               8,
+        @backingInt(frame.FrameType.ping), frame.flags.ack,
+        0, 0, 0, 1, // non-zero stream is a connection protocol_error (RFC 9113 §6.7)
+        1, 2, 3, 4,
+        5, 6, 7, 8,
+    };
+    try testing.expectEqual(bad_ping.len, server.receive(&bad_ping));
+    const err_event = (try server.nextEvent(testing.allocator)).?;
+    switch (err_event) {
+        .connection_error => |ce| try testing.expectEqual(frame.ErrorCode.protocol_error, ce.code),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectError(error.ConnectionClosed, server.submitPing(testing.allocator, &ping));
 }
 
 test "a small initial window makes submitData accept a prefix" {

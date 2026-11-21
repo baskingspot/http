@@ -656,7 +656,7 @@ pub const Mux = struct {
                     self.broadcast(stream);
                 }
             },
-            .settings => {},
+            .settings, .ping_ack => {},
             .goaway => |value| {
                 self.goaway = .{
                     .last_stream_id = value.last_stream_id,

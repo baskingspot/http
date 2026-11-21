@@ -7,6 +7,11 @@ All notable changes to http are recorded here. The format follows
 
 ### Added
 
+- `h2.Session` and `h2.client.Connection` surface incoming HTTP/2 PING ACKs as
+  `.ping_ack` events (RFC 9113 §6.7), and `h2.client.Connection.ping` queues
+  an outbound PING frame (keeping `wantsInput()` true until the ACK arrives).
+  Exhaustive switches over `h2.Session.Event` or `h2.client.Connection.Event`
+  must handle `.ping_ack`.
 - `h3.Session` runs one HTTP/3 connection over the numbered-stream seam: the
   control stream, QPACK decode, request/response/data/trailers, blocked field
   sections, resets, GOAWAY, and a tagged outbound queue. Push and
