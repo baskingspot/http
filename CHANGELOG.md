@@ -5,6 +5,8 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-21
+
 ### Added
 
 - `h2.Session` and `h2.client.Connection` surface incoming HTTP/2 PING ACKs as
