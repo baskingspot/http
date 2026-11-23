@@ -5,6 +5,8 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-23
+
 ### Changed
 
 - `http_tls` no longer names a crypto library on its own link line. The link
