@@ -5,6 +5,8 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-23
+
 ### Changed
 
 - `http_tls` pins `tls v0.4.5`, which resolves the libcrypto family through
