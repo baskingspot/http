@@ -5,6 +5,14 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `http_tls` no longer names a crypto library on its own link line. The link
+  comes from the `tls` module, which resolves the libcrypto family through
+  pkg-config, so a consumer whose aws-lc installs `libcrypto-awslc` and
+  `libssl-awslc` links. The TLS tests and examples drop the same redundant
+  declaration.
+
 ## [0.8.1] - 2026-11-23
 
 ### Changed

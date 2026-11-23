@@ -41,7 +41,6 @@ pub fn build(b: *std.Build) void {
     }) else null;
     if (http_tls_mod) |tls_mod| {
         tls_mod.link_libc = true;
-        tls_mod.linkSystemLibrary("crypto", .{});
     }
     if (tls_dep) |dep| {
         http_tls_mod.?.addImport("tls", dep.module("tls"));
@@ -97,9 +96,10 @@ pub fn build(b: *std.Build) void {
 
     if (tls_dep) |dep| {
         const tls_mod = http_tls_mod.?;
-        // `http_tls` links libcrypto, so its tests are a separate artifact: the
-        // h2c `http` module must never link a crypto library. Rooted at the module
-        // so both the trust-anchor builder and the transport mapping are pinned.
+        // `http_tls` links libcrypto through the tls module, so its tests are a
+        // separate artifact: the h2c `http` module must never link a crypto
+        // library. Rooted at the module so both the trust-anchor builder and the
+        // transport mapping are pinned.
         const http_tls_tests_mod = b.addModule("http-tls-tests", .{
             .root_source_file = b.path("src/http_tls.zig"),
             .target = target,
@@ -111,7 +111,6 @@ pub fn build(b: *std.Build) void {
             },
         });
         http_tls_tests_mod.link_libc = true;
-        http_tls_tests_mod.linkSystemLibrary("crypto", .{});
         const http_tls_tests = b.addTest(.{
             .root_module = http_tls_tests_mod,
             .test_runner = test_runner,
@@ -134,7 +133,6 @@ pub fn build(b: *std.Build) void {
             },
         });
         tls_consumer_mod.link_libc = true;
-        tls_consumer_mod.linkSystemLibrary("crypto", .{});
         const tls_consumer_tests = b.addTest(.{
             .root_module = tls_consumer_mod,
             .test_runner = test_runner,
@@ -158,7 +156,6 @@ pub fn build(b: *std.Build) void {
             },
         });
         tls_conn_mod.link_libc = true;
-        tls_conn_mod.linkSystemLibrary("crypto", .{});
         const tls_conn_tests = b.addTest(.{
             .root_module = tls_conn_mod,
             .test_runner = test_runner,
@@ -557,7 +554,6 @@ pub fn build(b: *std.Build) void {
                 },
             });
             h2_tls_readiness_mod.link_libc = true;
-            h2_tls_readiness_mod.linkSystemLibrary("crypto", .{});
             const h2_tls_readiness = b.addExecutable(.{
                 .name = "http2-tls-readiness",
                 .root_module = h2_tls_readiness_mod,
@@ -593,7 +589,6 @@ pub fn build(b: *std.Build) void {
                 },
             });
             h2_tls_mod.link_libc = true;
-            h2_tls_mod.linkSystemLibrary("crypto", .{});
             const h2_tls = b.addExecutable(.{
                 .name = "http2-tls",
                 .root_module = h2_tls_mod,
@@ -637,7 +632,6 @@ pub fn build(b: *std.Build) void {
                 },
             });
             h1_tls_mod.link_libc = true;
-            h1_tls_mod.linkSystemLibrary("crypto", .{});
             const h1_tls = b.addExecutable(.{
                 .name = "http1-tls",
                 .root_module = h1_tls_mod,
@@ -658,7 +652,6 @@ pub fn build(b: *std.Build) void {
                 },
             });
             h1_tls_client_mod.link_libc = true;
-            h1_tls_client_mod.linkSystemLibrary("crypto", .{});
             const h1_tls_client = b.addExecutable(.{
                 .name = "http1-tls-client",
                 .root_module = h1_tls_client_mod,
@@ -693,7 +686,6 @@ pub fn build(b: *std.Build) void {
                 },
             });
             unified_mod.link_libc = true;
-            unified_mod.linkSystemLibrary("crypto", .{});
             const unified = b.addExecutable(.{
                 .name = "http-unified-server",
                 .root_module = unified_mod,
@@ -724,7 +716,6 @@ pub fn build(b: *std.Build) void {
                 },
             });
             curl_mod.link_libc = true;
-            curl_mod.linkSystemLibrary("crypto", .{});
             const curl = b.addExecutable(.{
                 .name = "http1-curl",
                 .root_module = curl_mod,
@@ -754,7 +745,6 @@ pub fn build(b: *std.Build) void {
             },
         });
         compare_mod.link_libc = true;
-        compare_mod.linkSystemLibrary("crypto", .{});
         const compare_client = b.addExecutable(.{
             .name = "bench-client",
             .root_module = compare_mod,
