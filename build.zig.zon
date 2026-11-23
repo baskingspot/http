@@ -40,8 +40,8 @@
             .lazy = true,
         },
         .tls = .{
-            .url = "https://baskingspot.dev/tls/v0.4.4.tar.gz",
-            .hash = "tls-0.4.4-nf2MKKyxKgAMGydoUOBT4jv8yYDiSB8aAzHrKH6XVQI0",
+            .url = "https://baskingspot.dev/tls/v0.4.5.tar.gz",
+            .hash = "tls-0.4.5-nf2MKKCiQgAx99zm0DJ4B2euY021-XyCcKgKZQK6ws89",
             .lazy = true,
         },
         .cli = .{
