@@ -3,7 +3,7 @@
 base_url = "https://baskingspot.dev/http"
 theme = "baskingspot"
 title = "http"
-description = "HTTP/1.1 and HTTP/2 in Zig: field-value parsers, sans-I/O connection machines, and the engines you build a server or client on."
+description = "HTTP/1.1 and HTTP/2 in Zig: field-value parsers, sans-I/O connection machines, and the engines that put them on a socket."
 
 generate_feeds = false
 build_search_index = false

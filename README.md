@@ -5,7 +5,7 @@
   </picture>
 </h1>
 
-HTTP/1.1 and HTTP/2 in Zig: field-value parsers, sans-I/O connection machines, and the engines you build a server or client on.
+HTTP/1.1 and HTTP/2 in Zig: field-value parsers, sans-I/O connection machines, and the engines that put them on a socket.
 
 Zig's `std.http` has an HTTP/1.1 client and server. It has no HTTP/2 and no
 HPACK, and its request and response types come with a connection attached, so a

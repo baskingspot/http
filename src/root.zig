@@ -1,5 +1,5 @@
 //! HTTP/1.1 and HTTP/2 in Zig: field-value parsers, sans-I/O connection
-//! machines, and the engines you build a server or client on.
+//! machines, and the engines that put them on a socket.
 //!
 //! Each parser module reads one field family or message head and returns
 //! borrowed slices or fills caller-owned storage. `h1.ServerConn` and
