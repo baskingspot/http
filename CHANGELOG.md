@@ -5,6 +5,13 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `http_tls` pins `tls v0.4.5`, which resolves the libcrypto family through
+  pkg-config. A consumer whose aws-lc installs `libcrypto-awslc` and
+  `libssl-awslc` now links; build that package with `symbolPrefix = null`,
+  because a prefixed aws-lc carries a symbol table translate-c cannot read.
+
 ## [0.8.0] - 2026-11-21
 
 ### Added
