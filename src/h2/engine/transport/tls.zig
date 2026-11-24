@@ -9,7 +9,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const fd_t = std.posix.fd_t;
 
-const http = @import("http");
+const http = @import("../../../root.zig");
 const tls = @import("tls");
 const tls_nonblocking = @import("tls_nonblocking");
 const wait = http.h2.engine.wait;

@@ -13,7 +13,7 @@ const Io = std.Io;
 const print = std.debug.print;
 
 const http = @import("http");
-const http_tls = @import("http_tls");
+const http_tls = http.tls;
 const tls = @import("tls");
 const tls_fixture = @import("tls_fixture.zig");
 

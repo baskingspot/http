@@ -24,7 +24,7 @@ const fd_t = std.posix.fd_t;
 const tls = @import("tls");
 const tls_nonblocking = @import("tls_nonblocking");
 
-const http = @import("http");
+const http = @import("../../../root.zig");
 const wait = http.h2.engine.wait;
 const common = http.h2.engine.transport;
 const Event = common.Event;
@@ -38,7 +38,7 @@ const Bundle = std.crypto.Certificate.Bundle;
 pub const Transport = struct {
     // ast-grep-ignore: public-struct-field-default -- options bag; alpn defaults to h2
     pub const Options = struct {
-        /// Trust anchors, built by `http_tls.anchors.build`. The caller owns the
+        /// Trust anchors, built by `http.tls.anchors.build`. The caller owns the
         /// bundle and must keep it alive for the transport's lifetime. Null
         /// trusts nothing, so every handshake fails verification unless
         /// `insecure_no_chain_anchor` is set.
@@ -381,7 +381,7 @@ const fixture_now_sec: i64 = 1_798_761_600;
 // itself. Note that `insecure_no_chain_anchor` is only consulted when `ca` is
 // null: with a bundle present the anchor path runs regardless, and a non-CA
 // anchor fails with `error.CertificateIssuerNotCa`. Trust-anchor loading is
-// covered by the `anchors.build` tests in `http_tls`.
+// covered by the `anchors.build` tests in `http.tls`.
 test "a client and server complete a handshake over pumpable buffers" {
     const io = testing.io;
     const allocator = testing.allocator;

@@ -14,75 +14,47 @@ pub fn build(b: *std.Build) void {
     // integer parser here, and consumers resolve it through this import.
     const stdx = b.dependency("stdx", .{ .target = target, .optimize = optimize });
 
-    // The only exported module. Everything below is developer-only: returning
-    // early for a consumer keeps testingx and the bench graph out of its fetch
-    // path.
-    const mod = b.addModule("http", .{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "stdx", .module = stdx.module("stdx") }},
-    });
-
-    // TLS opt-in is false for a consumer and true for this repo's dev graph.
-    // Register the module before the lazy fetch: an outer consumer can resolve
-    // `module("http_tls")` on the first pass, then Zig fetches and reruns.
-    const tls_enabled = b.option(
-        bool,
-        "tls",
-        "Export http_tls and build TLS tests and examples",
-    ) orelse (b.pkg_hash.len == 0);
     // Unset follows tls's own default, so http and a consumer that also
     // depends on tls resolve one shared package. Setting a backend passes
     // `crypto` to tls and deliberately forks the package; a consumer that
     // also depends on tls must pass the same value or the build has two tls
-    // packages. http_tls does not use tls's C ABI, so the C ABI requirement
-    // never enters this build.
+    // packages. http does not use tls's C ABI, so the C ABI requirement never
+    // enters this build.
     const crypto_backend = b.option(
         CryptoBackend,
         "crypto",
         "TLS crypto backend: unset follows tls's default; auto, native, openssl, " ++
             "aws-lc, or boringssl forks the tls package",
     );
-    const tls_dep: ?*std.Build.Dependency = if (tls_enabled)
-        if (crypto_backend) |backend|
-            b.lazyDependency("tls", .{
-                .target = target,
-                .optimize = optimize,
-                .crypto = backend,
-            })
-        else
-            b.lazyDependency("tls", .{ .target = target, .optimize = optimize })
+    const tls_dep = if (crypto_backend) |backend|
+        b.dependency("tls", .{
+            .target = target,
+            .optimize = optimize,
+            .crypto = backend,
+        })
     else
-        null;
-    const http_tls_mod = if (tls_enabled) b.addModule("http_tls", .{
-        .root_source_file = b.path("src/http_tls.zig"),
+        b.dependency("tls", .{ .target = target, .optimize = optimize });
+
+    // The only exported module. The TLS engines and transports live under
+    // `http.tls`; the tls dependency is part of the module graph. Everything
+    // below is developer-only: returning early for a consumer keeps testingx
+    // and the bench graph out of its fetch path.
+    const mod = b.addModule("http", .{
+        .root_source_file = b.path("src/root.zig"),
+
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "http", .module = mod },
             .{ .name = "stdx", .module = stdx.module("stdx") },
+            .{ .name = "tls", .module = tls_dep.module("tls") },
+            .{ .name = "tls_nonblocking", .module = tls_dep.module("tls_nonblocking") },
+            .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
         },
-    }) else null;
-    if (http_tls_mod) |tls_mod| {
-        // The module and its examples use libc for sockets and tls_std. The
-        // crypto library, if any, comes from the tls dependency's selected
-        // backend, never from an ambient link here.
-        tls_mod.link_libc = true;
-    }
-    if (tls_dep) |dep| {
-        http_tls_mod.?.addImport("tls", dep.module("tls"));
-        http_tls_mod.?.addImport("tls_nonblocking", dep.module("tls_nonblocking"));
-        // The platform trust store, for the default high-level client.
-        http_tls_mod.?.addImport("tls_std", dep.module("tls_std"));
-    }
+    });
 
     // Everything below is developer-only. Returning before CLI, the test
     // runner, and benchmarks keeps them out of every consumer's fetch path.
     if (b.pkg_hash.len != 0) return;
-    // The first lazy pass only declares modules. The next pass has TLS and
-    // registers its tests and examples.
-    if (tls_enabled and tls_dep == null) return;
 
     const cli_dep = b.lazyDependency("cli", .{
         .target = target,
@@ -122,41 +94,17 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the unit tests");
     test_step.dependOn(&run_tests.step);
 
-    if (tls_dep) |dep| {
-        const tls_mod = http_tls_mod.?;
-        // The TLS tests are a separate artifact: the h2c `http` module never
-        // imports TLS. The crypto backend comes from the tls dependency; the
-        // native default links no libcrypto. Rooted at the module so both the
-        // trust-anchor builder and the transport mapping are pinned.
-        const http_tls_tests_mod = b.addModule("http-tls-tests", .{
-            .root_source_file = b.path("src/http_tls.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "http", .module = mod },
-                .{ .name = "tls", .module = dep.module("tls") },
-                .{ .name = "tls_nonblocking", .module = dep.module("tls_nonblocking") },
-            },
-        });
-        http_tls_tests_mod.link_libc = true;
-        const http_tls_tests = b.addTest(.{
-            .root_module = http_tls_tests_mod,
-            .test_runner = test_runner,
-        });
-        const run_http_tls_tests = b.addRunArtifact(http_tls_tests);
-        run_http_tls_tests.addPassthruArgs();
-        test_step.dependOn(&run_http_tls_tests.step);
-
-        // A consumer importing `http_tls` by module name, the way grpc does. This
-        // is the regression check for a file inside the module importing
-        // `@import("http_tls")`: that resolves only when the file is its own root.
+    {
+        const dep = tls_dep;
+        // A consumer using `http.tls` through the module name, the way grpc
+        // does. This is the regression check for a file inside the module
+        // importing `http` by name.
         const tls_consumer_mod = b.addModule("http-tls-consumer", .{
             .root_source_file = b.path("tests/tls_consumer.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "http", .module = mod },
-                .{ .name = "http_tls", .module = tls_mod },
                 .{ .name = "tls", .module = dep.module("tls") },
             },
         });
@@ -177,7 +125,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "http", .module = mod },
-                .{ .name = "http_tls", .module = tls_mod },
                 .{ .name = "tls", .module = dep.module("tls") },
                 .{ .name = "tls_nonblocking", .module = dep.module("tls_nonblocking") },
                 .{ .name = "stdx", .module = stdx.module("stdx") },
@@ -558,8 +505,8 @@ pub fn build(b: *std.Build) void {
         h2_readiness_example_run.dependOn(&run_h2_readiness.step);
     }
 
-    // The TLS readiness example is Linux and macOS only. It uses the separate
-    // `http_tls` module, so the h2c core never links libcrypto.
+    // The TLS readiness example is Linux and macOS only. It uses `http.tls`;
+    // the h1 and h2 code paths import no TLS.
     const h2_tls_readiness_example_bin = b.step(
         "example-h2-tls-readiness-bin",
         "Build the HTTP/2 TLS readiness example server",
@@ -568,8 +515,8 @@ pub fn build(b: *std.Build) void {
         "example-h2-tls-readiness",
         "Run the HTTP/2 TLS readiness example server",
     );
-    if (tls_dep) |dep| {
-        const tls_mod = http_tls_mod.?;
+    {
+        const dep = tls_dep;
         if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
             const h2_tls_readiness_mod = b.createModule(.{
                 .root_source_file = b.path("examples/http2_tls_readiness.zig"),
@@ -577,7 +524,6 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "http", .module = mod },
-                    .{ .name = "http_tls", .module = tls_mod },
                     .{ .name = "tls", .module = dep.module("tls") },
                 },
             });
@@ -604,7 +550,8 @@ pub fn build(b: *std.Build) void {
         "example-h2-tls",
         "Run the HTTP/2 TLS example server",
     );
-    if (tls_dep) |dep| {
+    {
+        const dep = tls_dep;
         if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
             const h2_tls_mod = b.createModule(.{
                 .root_source_file = b.path("examples/http2_tls.zig"),
@@ -647,7 +594,8 @@ pub fn build(b: *std.Build) void {
         "example-h1-tls-client",
         "Run the HTTP/1.1 TLS example client",
     );
-    if (tls_dep) |dep| {
+    {
+        const dep = tls_dep;
         if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
             const h1_tls_mod = b.createModule(.{
                 .root_source_file = b.path("examples/http1_tls.zig"),
@@ -676,7 +624,6 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "http", .module = mod },
-                    .{ .name = "http_tls", .module = http_tls_mod.? },
                 },
             });
             h1_tls_client_mod.link_libc = true;
@@ -701,7 +648,8 @@ pub fn build(b: *std.Build) void {
         "example-unified",
         "Run the HTTP/1.1 and HTTP/2 TLS example server",
     );
-    if (tls_dep) |dep| {
+    {
+        const dep = tls_dep;
         if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
             const unified_mod = b.createModule(.{
                 .root_source_file = b.path("examples/http_unified_server.zig"),
@@ -730,7 +678,7 @@ pub fn build(b: *std.Build) void {
     // examples; the HTTP layer still sees only reader and writer interfaces.
     const curl_example_bin = b.step("example-curl-bin", "Build the HTTP/1.1 curl example");
     const curl_example_run = b.step("example-curl", "Run the HTTP/1.1 curl example");
-    if (tls_dep != null) {
+    {
         if (target.result.os.tag == .linux or target.result.os.tag == .macos) {
             const curl_mod = b.createModule(.{
                 .root_source_file = b.path("examples/curl.zig"),
@@ -738,7 +686,6 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "http", .module = mod },
-                    .{ .name = "http_tls", .module = http_tls_mod.? },
                     .{ .name = "stdx", .module = stdx.module("stdx") },
                     .{ .name = "cli", .module = cli_dep.module("cli") },
                 },
@@ -762,14 +709,13 @@ pub fn build(b: *std.Build) void {
         "compare-client-bin",
         "Build the Go/reqwest client comparison binary",
     );
-    if (tls_dep != null) {
+    {
         const compare_mod = b.createModule(.{
             .root_source_file = b.path("bench/compare/client.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "http", .module = mod },
-                .{ .name = "http_tls", .module = http_tls_mod.? },
             },
         });
         compare_mod.link_libc = true;

@@ -95,7 +95,7 @@ just example-h1-tls-client   # in another terminal
 ```
 
 The server uses the blocking `tls_std` integration from `baskingspot/tls` and
-ALPN `http/1.1`. The client is `http_tls.Client` with ALPN pinned to
+ALPN `http/1.1`. The client is `http.tls.Client` with ALPN pinned to
 `http/1.1`, one instance for the whole exchange. The URL names the certificate
 subject (`ztls.server.test`) while `.address` sends the dial to loopback, so
 hostname verification still runs. The HTTP code sees only plaintext

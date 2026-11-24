@@ -44,7 +44,7 @@ pub const Options = struct {
     /// Cleartext settings, used for `http` URLs. `.protocol = .h2` is h2c
     /// prior knowledge.
     plain: plain.Config = .{},
-    /// Connector for `https` URLs, from `http_tls.client.Connector.handle` or
+    /// Connector for `https` URLs, from `http.tls.client.Connector.handle` or
     /// another transport. Null makes an `https` URL `error.TlsUnsupported`.
     /// The connector behind it must outlive the client.
     tls: ?transport.Connector = null,

@@ -7,10 +7,22 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
-- `http_tls` follows tls's crypto backend default. `-Dcrypto=auto`, `native`,
-  `openssl`, `aws-lc`, or `boringssl` selects one and makes the tls dependency
-  a separate package; a consumer that also depends on tls must pass the same
-  value. The `tls` pin moves to v0.4.6.
+- **Breaking:** TLS is folded into `http` as `http.tls`. `@import("http_tls")`
+  and `b.dependency("http", .{ .tls = true })` are removed; import `http` and
+  use `http.tls`.
+- **Breaking:** every `http` consumer now compiles and fetches tls, including
+  h1-only ones, and links libc through `tls_std`. An h1 program that was fully
+  static no longer is. Both are permanent costs of the fold.
+- **Breaking:** the tls default crypto backend moved from `auto` to `native`
+  (`baskingspot/tls#225`), so an existing TLS consumer silently moves off
+  libcrypto. `http` forwards no backend when unset. `-Dcrypto=openssl` (or
+  `auto`, `aws-lc`, `boringssl`) selects one and forks the tls package; a
+  consumer that also depends on tls must pass the same backend.
+- The `tls` pin is the commit
+  `git+https://github.com/baskingspot/tls#83f5630114cf624f12d26d3877720c7e4e02dda9`
+  (hash `tls-0.4.6-nf2MKCXDQgCZlpIX2Mi6h1kpohCSmRnFwO3FOScQ2C-T`), not the
+  v0.4.6 tarball. A consumer that also depends on tls must pin the same commit;
+  the tarball and the commit both report 0.4.6 but are different packages.
 
 ## [0.8.2] - 2026-11-23
 

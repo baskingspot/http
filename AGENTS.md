@@ -44,15 +44,14 @@ Zig 0.17. The flake is the tool contract, from `baskingspot/nix`: `nix develop` 
   three-digit code is still a value. Never let the enum replace the wire form.
 - One module per field family or protocol head. The root exports namespaces:
   `pub const encoding = @import("encoding.zig");`.
-- TLS is not part of the `http` module. The readiness loop is generic over a
-  byte transport; `src/h2/engine/transport/plain.zig` is h2c, and
-  `src/h2/engine/transport/tls.zig` is the `tls_nonblocking` path. The TLS
-  wrappers and that transport live in the separate `http_tls` module, so an
-  h2c build never imports TLS or links libcrypto. `http_tls` follows tls's
-  crypto backend default; `-Dcrypto` selects `auto`, `native`, `openssl`,
-  `aws-lc`, or `boringssl` and forks the tls package. A consumer that also
-  depends on tls must pass the same backend. `http_tls` does not use tls's
-  C ABI. Keep the transport seam generic; do not
+- TLS is `http.tls`, part of the one `http` module. The readiness loop is
+  generic over a byte transport; `src/h2/engine/transport/plain.zig` is h2c,
+  and `src/h2/engine/transport/tls.zig` is the `tls_nonblocking` path. The
+  h1/h2 engines import no TLS, but the package carries the tls dependency for
+  `http.tls`. It follows tls's crypto backend default; `-Dcrypto` selects
+  `auto`, `native`, `openssl`, `aws-lc`, or `boringssl` and forks the tls
+  package. A consumer that also depends on tls must pass the same backend.
+  `http.tls` does not use tls's C ABI. Keep the transport seam generic; do not
   add a `?TlsConfig` to the core readiness config.
 - Tests cite the RFC section they pin. Every parser gets hostile-input cases;
   a parser with a loop gets a fuzz target.

@@ -1,13 +1,15 @@
-//! A consumer of `http_tls` by module name.
+//! A consumer of `http.tls` through the `http` module.
 //!
-//! This file exists to pin one thing: the `http_tls` module must compile when
-//! something other than itself imports it. A file inside the module that
-//! imports `@import("http_tls")` resolves only when that file is the root of
-//! its own compilation, so the mistake is invisible until a consumer tries it.
+//! This file exists to pin one thing: `http.tls` must compile when something
+//! outside the package imports `http` and uses the namespace. A file inside
+//! the module that imports by the wrong name resolves only when that file is
+//! the root of its own compilation, so the mistake stays invisible until a
+//! consumer tries it.
 
 const std = @import("std");
 const testing = std.testing;
-const http_tls = @import("http_tls");
+const http = @import("http");
+const http_tls = http.tls;
 
 test "the module imports by name and exposes the client" {
     _ = http_tls.client.Connection;

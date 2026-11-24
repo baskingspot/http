@@ -3,7 +3,7 @@
 //! A `Connector` turns a parsed URL into a byte transport: a reader, a writer,
 //! the protocol the transport negotiated, and the one deadline both directions
 //! honor. `http` ships a cleartext connector and never names a TLS type, so an
-//! `https` peer needs a connector from `http_tls` or from any other module that
+//! `https` peer needs a connector from `http.tls` or from any other module that
 //! implements this vtable.
 //!
 //! The seam sits above the protocol adapters, not below them. `client.Client`

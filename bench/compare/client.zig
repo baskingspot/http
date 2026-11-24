@@ -15,7 +15,7 @@ const Allocator = std.mem.Allocator;
 const print = std.debug.print;
 
 const http = @import("http");
-const http_tls = @import("http_tls");
+const http_tls = http.tls;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;

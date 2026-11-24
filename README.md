@@ -42,8 +42,8 @@ The library is pre-1.0 and the API is not frozen; a consumer pins a version.
 - [The h2 session and frames](https://baskingspot.dev/http/#the-h2-session-and-frames): `h2.frame.parse` is the frame codec, and `h2.Session` owns SETTINGS, streams, flow control, HPACK, and CONTINUATION assembly.
 - [HPACK](https://baskingspot.dev/http/#hpack): `hpack.Decoder` and `hpack.Encoder` keep the static and dynamic tables in step, and `prefix_int` and `huffman` are the primitives QPACK reuses.
 - [The client contract](https://baskingspot.dev/http/#the-client-contract): `client.Request` and `client.Body` are protocol-neutral, `client.Response.body.reader` is a `std.Io.Reader` over a framing-blind decoder, and `client.Client` dispatches to an h1 or an h2 adapter.
-- [The client](https://baskingspot.dev/http/#the-client): `client.Client.send` dials and sends in one call, `attached` takes a socket you already own, and `client.transport.Connector` is the seam that keeps TLS in a separate module.
-- [Running a server](https://baskingspot.dev/http/#running-a-server): `engine.Handler(Exchange)` is the one vtable every engine calls, and `http_tls` adds TLS without putting crypto in the core.
+- [The client](https://baskingspot.dev/http/#the-client): `client.Client.send` dials and sends in one call, `attached` takes a socket you already own, and `client.transport.Connector` is the seam that keeps TLS behind `http.tls`.
+- [Running a server](https://baskingspot.dev/http/#running-a-server): `engine.Handler(Exchange)` is the one vtable every engine calls, and `http.tls` adds TLS; the h1 and h2 engines import no TLS.
 - [Performance](https://baskingspot.dev/http/#performance): head-parser time on four heads, measured over the corpus in `bench/h1_bench.zig`, with the table as the only place the numbers live.
 - [Limits](https://baskingspot.dev/http/#limits): no chunked request bodies on h1, no connection reuse, and the rest of what is not here.
 
@@ -73,13 +73,12 @@ const http = b.dependency("http", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("http", http.module("http"));
 ```
 
-`std.http` keeps its name, so `http` sits beside it in the same file. For TLS,
-pass `.tls = true` in the dependency arguments and import
-`http.module("http_tls")`; an ordinary `http` consumer does not fetch TLS.
-`http_tls` follows tls's crypto backend default. Set `.crypto = .openssl`,
-`.aws-lc`, `.boringssl`, or `.auto` to select one; that makes the tls
-dependency a separate package, so a consumer that also depends on tls must
-pass the same value. `http` builds with Zig 0.17.
+`std.http` keeps its name, so `http` sits beside it in the same file. TLS is
+under `http.tls`; the tls dependency is part of the package. `http.tls`
+follows tls's crypto backend default. Set `.crypto = .openssl`, `.aws-lc`,
+`.boringssl`, or `.auto` to select one; that makes the tls dependency a
+separate package, so a consumer that also depends on tls must pass the same
+value. `http` builds with Zig 0.17.
 
 ## Documentation
 

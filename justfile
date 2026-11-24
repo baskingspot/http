@@ -30,6 +30,11 @@ fuzz LIMIT="10M":
 bench *ARGS:
     zig build bench -- {{ ARGS }}
 
+[doc("Build the benchmark comparison binary")]
+[group("bench")]
+check-bench:
+    zig build compare-client-bin
+
 [doc("Run every benchmark once: proves the suite builds and runs, without measuring")]
 [group("bench")]
 bench-smoke:
@@ -338,4 +343,4 @@ conformance-ci:
 
 [doc("Everything CI runs")]
 [group("ci")]
-ci: test lint interop interop-tls check-example conformance-ci doc
+ci: test lint interop interop-tls check-example check-bench conformance-ci doc
