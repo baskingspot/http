@@ -291,7 +291,7 @@ after step 1. Step 8 needs 2, 4, 5, 6, and 7. Step 9 needs 8 and quic#5's
   control-stream-looking payload, and a 10 s watchdog. Removing `stream.close`
   blocks the client's ninth `openStream` on stream credit; the watchdog closes
   the connection and the test fails instead of hanging. Removing only the table
-  entry release fails at request 14.
+  entry release fails before request 16.
 - The dev shell has `curl` 8.23 with ngtcp2 and nghttp3. On 2026-11-23
   `curl --http3` against `examples/http3_server.zig` returned `HTTP/3 200`, an
   18-byte body, and two requests reused one connection (`num_connects` 1 then
