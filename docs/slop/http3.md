@@ -286,9 +286,12 @@ after step 1. Step 8 needs 2, 4, 5, 6, and 7. Step 9 needs 8 and quic#5's
   Appendix B; the static-only encoder currently round-trips through our decoder
   only.
 - `tests/h3_quic.zig` runs the driver against a real loopback connection:
-  24 requests over a 16-stream table, one request over `max_body_bytes` that
-  must reset only its stream, and the server handler. Removing the driver's
-  stream release makes it fail at request 14.
+  24 requests over a 16-stream table, one over `max_body_bytes`, one cancelled
+  by the client while the handler sleeps, a reserved stream type followed by a
+  control-stream-looking payload, and a 10 s watchdog. Removing `stream.close`
+  blocks the client's ninth `openStream` on stream credit; the watchdog closes
+  the connection and the test fails instead of hanging. Removing only the table
+  entry release fails at request 14.
 - The dev shell has `curl` 8.23 with ngtcp2 and nghttp3. On 2026-11-23
   `curl --http3` against `examples/http3_server.zig` returned `HTTP/3 200`, an
   18-byte body, and two requests reused one connection (`num_connects` 1 then

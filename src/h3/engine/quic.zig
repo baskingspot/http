@@ -12,6 +12,7 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
 const quic_io = @import("quic-io");
 const session_mod = @import("../session.zig");
@@ -32,15 +33,28 @@ pub fn Engine(comptime limits: quic_io.SizingLimits) type {
         /// head made by `respond` is far smaller; this is the margin.
         const head_reserve: usize = 1024;
 
+        /// The field sections and frames the session buffers for one HEADERS
+        /// or DATA frame.
+        const max_header_block: usize = 16 * 1024;
+        const max_frame: usize = max_header_block + 16;
+        /// A DATA frame's type byte plus the worst-case 8-byte length varint.
+        const data_frame_overhead: usize = 1 + 8;
+
         /// The largest body `Exchange.respond` accepts. A QUIC stream's send
-        /// buffer does not wrap (`SizingLimits.stream_ring`), so the whole
-        /// response must fit once. A larger body returns
-        /// `error.ResponseTooLarge`; the driver resets that stream and leaves
-        /// the connection serving the others.
-        pub const max_body_bytes: usize = if (limits.stream_ring > head_reserve)
-            limits.stream_ring - head_reserve
-        else
-            0;
+        /// buffer does not wrap (`SizingLimits.stream_ring`), and the session's
+        /// DATA frame buffer does not either, so the whole response must fit
+        /// both once. A larger body returns `error.ResponseTooLarge`; the
+        /// driver resets that stream and leaves the connection serving.
+        pub const max_body_bytes: usize = @min(
+            if (limits.stream_ring > head_reserve) limits.stream_ring - head_reserve else 0,
+            max_frame - data_frame_overhead,
+        );
+
+        comptime {
+            assert(max_frame > data_frame_overhead);
+            assert(max_body_bytes <= limits.stream_ring);
+            assert(max_body_bytes <= max_frame - data_frame_overhead);
+        }
 
         pub const Exchange = struct {
             session: *Session,
@@ -179,10 +193,11 @@ pub fn Engine(comptime limits: quic_io.SizingLimits) type {
                                 write.bytes,
                                 write.fin,
                             ) catch |err| switch (err) {
-                                error.SendBufferFull => {
+                                error.SendBufferFull, error.StreamReset, error.StreamClosed => {
                                     // A write outgrew the send buffer without
-                                    // `respond`'s check. Reset this stream, not
-                                    // the connection.
+                                    // `respond`'s check, or the client stopped
+                                    // or reset the stream. Reset this stream;
+                                    // the connection serves the others.
                                     self.session.submitReset(
                                         self.allocator,
                                         write.stream_id,
@@ -251,6 +266,13 @@ pub fn Engine(comptime limits: quic_io.SizingLimits) type {
                                     else => {},
                                 };
                             }
+                            // The stream is retired: drop the session's
+                            // tombstone and stop its task. A later byte in the
+                            // same read must not become a new stream type.
+                            self.session.forgetStream(self.allocator, id) catch |err| switch (err) {
+                                error.StreamBusy => {},
+                                else => {},
+                            };
                         },
                         else => {},
                     }
@@ -310,7 +332,7 @@ pub fn Engine(comptime limits: quic_io.SizingLimits) type {
                 .max_field_section_size = 16 * 1024,
                 .max_streams = limits.streams,
                 .max_fields = 64,
-                .max_in_header_block = 16 * 1024,
+                .max_in_header_block = max_header_block,
                 .max_control_frame = 16 * 1024,
                 .max_data_event = 16 * 1024,
                 .max_blocked_bytes = 64 * 1024,
@@ -394,6 +416,7 @@ pub fn Engine(comptime limits: quic_io.SizingLimits) type {
                         offset += consumed;
                         try state.events();
                         if (state.failed.load(.monotonic)) return;
+                        if (!state.session.containsStream(id)) return;
                         if (consumed == 0) break;
                     }
                     if (offset < len) return error.MessageTooLarge;
@@ -418,6 +441,7 @@ pub fn Engine(comptime limits: quic_io.SizingLimits) type {
                         offset += consumed;
                         try state.events();
                         if (state.failed.load(.monotonic)) return;
+                        if (!state.session.containsStream(id)) return;
                         if (consumed == 0) break;
                     }
                 }

@@ -4,7 +4,12 @@
 //! server's stream table holds. A slot or table entry that is not released at
 //! the end of a request makes the connection stop serving, which is what this
 //! test measures. One request asks for a body one byte over the send-buffer
-//! budget; that stream is reset, and the connection must keep serving.
+//! budget and one is cancelled by the client while the handler sleeps; both
+//! streams are reset, and the connection must keep serving.
+//!
+//! A watchdog closes the connection after ten seconds. Without the stream
+//! release the client's ninth `openStream` blocks on stream credit; the
+//! watchdog turns that into a failure instead of a stuck job.
 //!
 //! `quic-io` is the transport, with the native TLS backend and the public
 //! certificate from `baskingspot/tls`. The client trusts it insecurely because
@@ -37,12 +42,27 @@ const body = "hello from h3";
 var server_endpoint: Engine.Endpoint = undefined;
 var client_endpoint: ClientEndpoint = undefined;
 
-fn serverHandle(_: *anyopaque, exchange: *Engine.Exchange) anyerror!void {
+fn watchdog(io: Io, connection: quic_io.Connection) Io.Cancelable!void {
+    try Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_s }, .awake);
+    connection.closeWith(io, 0);
+}
+
+const Context = struct {
+    io: Io,
+};
+
+fn serverHandle(raw: *anyopaque, exchange: *Engine.Exchange) anyerror!void {
+    const context: *Context = @ptrCast(@alignCast(raw));
     const path = exchange.request.path orelse return error.InvalidPath;
     if (std.mem.eql(u8, path, "/big")) {
         var big: [Engine.max_body_bytes + 1]u8 = @splat('x');
         try exchange.respond(.ok, "text/plain", &big);
         return;
+    }
+    if (std.mem.eql(u8, path, "/slow")) {
+        // The client resets this stream while the handler is here, so the
+        // response write meets StreamReset and must not kill the connection.
+        try Io.sleep(context.io, .{ .nanoseconds = 100 * std.time.ns_per_ms }, .awake);
     }
     try exchange.respond(.ok, "text/plain", body);
 }
@@ -188,11 +208,12 @@ test "the driver serves more requests than its stream table" {
         },
     });
 
+    var context: Context = .{ .io = io };
     var serving = try io.concurrent(Engine.serve, .{
         io,
         testing.allocator,
         &server_endpoint,
-        Engine.Handler{ .context = undefined, .handle = serverHandle },
+        Engine.Handler{ .context = &context, .handle = serverHandle },
     });
     var joined = false;
     defer if (!joined) {
@@ -218,6 +239,11 @@ test "the driver serves more requests than its stream table" {
             .initial_max_streams_uni = 4,
         },
     });
+
+    var guard = try io.concurrent(watchdog, .{ io, connection });
+    defer guard.cancel(io) catch |err| switch (err) {
+        error.Canceled => {},
+    };
 
     const control = try connection.openStream(io, .uni);
     var client: Client = .{
@@ -256,6 +282,15 @@ test "the driver serves more requests than its stream table" {
         try client.feed(@intCast(stream.id), buffer[0..n]);
     }
 
+    // A reserved unidirectional stream type followed by bytes that would look
+    // like a control stream. The server must discard all of it, not reopen the
+    // same id as a new stream type.
+    {
+        const junk = try connection.openStream(io, .uni);
+        try client.writeStream(junk, &.{ 0x21, 0x00, 0x00 }, true);
+        junk.close(io);
+    }
+
     var normal: usize = 0;
     var big_reset = false;
     var path_buffer: [16]u8 = undefined;
@@ -263,6 +298,8 @@ test "the driver serves more requests than its stream table" {
     for (0..request_count) |i| {
         const path = if (i == 0)
             "/big"
+        else if (i == 1)
+            "/slow"
         else
             std.mem.print(&path_buffer, "/{d}", .{i}) catch unreachable;
         const fields = [_]http.Header{
@@ -278,6 +315,22 @@ test "the driver serves more requests than its stream table" {
         client.outcome = .{};
         try client.session.submitRequest(testing.allocator, id, &fields, true);
         try client.drain();
+
+        if (i == 1) {
+            // Let the server's handler start before the reset; a reset this
+            // early can discard the request bytes before the handler runs.
+            try Io.sleep(io, .{ .nanoseconds = 20 * std.time.ns_per_ms }, .awake);
+            try client.session.submitReset(testing.allocator, id, 0);
+            try client.drain();
+            client.session.forgetStream(testing.allocator, id) catch |err| switch (err) {
+                error.StreamBusy => return error.StreamNotReleased,
+                error.UnknownStream => return error.StreamAlreadyGone,
+                else => return err,
+            };
+            stream.close(io);
+            client.request = null;
+            continue;
+        }
 
         var buffer: [4096]u8 = undefined;
         while (true) {
@@ -321,9 +374,21 @@ test "the driver serves more requests than its stream table" {
     }
 
     try testing.expect(big_reset);
-    try testing.expectEqual(request_count - 1, normal);
+    try testing.expectEqual(request_count - 2, normal);
 
     connection.close(io);
     try serving.await(io);
     joined = true;
+}
+
+test "max_body_bytes takes the smaller frame budget" {
+    const Wide = http.h3.engine.quic.Engine(.{
+        .streams = 16,
+        .stream_ring = 64 * 1024,
+        .peer_initial = 4,
+        .preheat = 4,
+    });
+    // The stream ring allows 64 KiB - 1 KiB, but the session's DATA frame
+    // buffer is max_in_header_block + 16, less the frame header.
+    try testing.expectEqual(@as(usize, 16 * 1024 + 16 - 9), Wide.max_body_bytes);
 }

@@ -171,6 +171,9 @@ const Stream = struct {
     local: bool,
     /// The peer's unidirectional stream type has been parsed.
     typed: bool,
+    /// An unknown unidirectional stream type: every later byte is dropped
+    /// until the caller forgets the stream. A tombstone, not a live stream.
+    discarded: bool,
     reader: frame.Reader,
     assembly: []u8,
     assembly_len: usize,
@@ -428,6 +431,7 @@ pub const Session = struct {
                 .kind = if (stream_id & 0x2 == 0) .request else .unknown,
                 .local = false,
                 .typed = stream_id & 0x2 == 0,
+                .discarded = false,
                 .reader = frame.Reader.init(),
                 .assembly = &.{},
                 .assembly_len = 0,
@@ -444,6 +448,11 @@ pub const Session = struct {
         }
         const stream = entry.value_ptr;
 
+        // The type byte of an unknown unidirectional stream is the only
+        // payload the session interprets. The rest of that stream, including
+        // a byte that would look like another stream type, is dropped.
+        if (stream.discarded) return bytes.len;
+
         if (stream.local and stream.kind != .request) return error.WrongStream;
         if (stream.remote_closed and bytes.len != 0) return error.StreamClosed;
 
@@ -459,9 +468,11 @@ pub const Session = struct {
             stream.typed = true;
             try self.classify(allocator, stream, value);
             if (stream.kind == .unknown) {
-                // The first event ends the stream: its slot is a slot for the
-                // life of the session otherwise, and a peer can open many.
-                self.removeStream(allocator, stream_id);
+                // The tombstone drops every later byte; the caller forgets it
+                // when it closes the QUIC stream, so it does not live for the
+                // session. Deleting it here would make the next byte of this
+                // same stream a new type.
+                stream.discarded = true;
                 self.event = .{ .discard_stream = stream_id };
                 return cursor.pos;
             }
@@ -842,16 +853,28 @@ pub const Session = struct {
         } };
     }
 
-    /// Remove a request stream that is finished: the peer's FIN consumed, the
-    /// local FIN queued, and no held field section. The control, encoder, and
-    /// decoder streams live until the session ends; this refuses them. The
-    /// caller must have released every queued action for the stream.
+    /// Remove a request stream that is finished, or an unknown unidirectional
+    /// stream that `discard_stream` reported. For a request, both halves are
+    /// closed and no field section is held. The control, encoder, and decoder
+    /// streams live until the session ends; this refuses them. The caller must
+    /// have released every queued action for the stream.
     pub fn forgetStream(self: *Session, allocator: Allocator, stream_id: u62) Error!void {
         const stream = self.streams.get(stream_id) orelse return error.UnknownStream;
-        if (stream.kind != .request) return error.StreamBusy;
-        if (stream.held != null) return error.StreamBusy;
-        if (!stream.remote_closed or !stream.local_closed) return error.StreamBusy;
+        switch (stream.kind) {
+            .unknown => if (!stream.discarded) return error.StreamBusy,
+            .request => {
+                if (stream.held != null) return error.StreamBusy;
+                if (!stream.remote_closed or !stream.local_closed) return error.StreamBusy;
+            },
+            else => return error.StreamBusy,
+        }
         self.removeStream(allocator, stream_id);
+    }
+
+    /// Whether the session still holds state for `stream_id`. The driver uses
+    /// this to stop feeding a stream that `discard_stream` retired.
+    pub fn containsStream(self: *Session, stream_id: u62) bool {
+        return self.streams.contains(stream_id);
     }
 
     fn removeStream(self: *Session, allocator: Allocator, stream_id: u62) void {
@@ -978,6 +1001,7 @@ pub const Session = struct {
                 .kind = .request,
                 .local = false,
                 .typed = true,
+                .discarded = false,
                 .reader = frame.Reader.init(),
                 .assembly = &.{},
                 .assembly_len = 0,
@@ -1050,6 +1074,7 @@ pub const Session = struct {
             .kind = kind,
             .local = true,
             .typed = true,
+            .discarded = false,
             .reader = frame.Reader.init(),
             .assembly = &.{},
             .assembly_len = 0,
@@ -1419,6 +1444,18 @@ test "an unknown unidirectional stream is discarded" {
         @as(u62, 10),
         (try server.nextEvent(testing.allocator)).?.discard_stream,
     );
+
+    // Bytes after the type belong to the discarded stream, not to a new one.
+    // A zero would otherwise look like a second control stream.
+    try testing.expectEqual(
+        @as(usize, 2),
+        server.receive(testing.allocator, 10, &.{ 0x00, 0x00 }, false),
+    );
+    try testing.expect((try server.nextEvent(testing.allocator)) == null);
+    try testing.expect(!server.isClosed());
+    try testing.expect(server.containsStream(10));
+    try server.forgetStream(testing.allocator, 10);
+    try testing.expect(!server.containsStream(10));
 }
 
 test "a second control stream is a connection error" {

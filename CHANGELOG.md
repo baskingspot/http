@@ -14,13 +14,19 @@ All notable changes to http are recorded here. The format follows
   and its session state, so the connection keeps serving. The driver imports
   no TLS type and makes no crypto call. `examples/http3_server.zig` answers
   GETs with curl 8.23 over `h3` on the native backend.
-- `Engine.max_body_bytes` is the response body `Exchange.respond` accepts. The
-  QUIC send buffer does not wrap, so a larger body returns
-  `error.ResponseTooLarge` and the driver resets that stream only; the
-  connection stays open.
+- `Engine.max_body_bytes` is the response body `Exchange.respond` accepts: the
+  smaller of the QUIC stream send buffer and the session's DATA frame buffer.
+  Both are fixed, so a larger body returns `error.ResponseTooLarge` and the
+  driver resets that stream only; the connection stays open.
 - `h3.Session.forgetStream` releases a finished request stream; a connection
   that never forgets one hits `max_streams`. It returns `error.StreamBusy`
   until both halves are closed and no field section is held.
+- `h3.Session` keeps a discarded unknown unidirectional stream as a tombstone
+  until `forgetStream`, so later bytes are dropped instead of being parsed as
+  a new stream type. `containsStream` reports whether the session holds one.
+- A response write that meets `StreamReset` or `StreamClosed` resets that
+  stream instead of closing the connection, so a client can cancel a request
+  while the handler runs.
 
 ### Changed
 
