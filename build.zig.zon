@@ -43,6 +43,10 @@
             .url = "git+https://github.com/baskingspot/tls#83f5630114cf624f12d26d3877720c7e4e02dda9",
             .hash = "tls-0.4.6-nf2MKCXDQgCZlpIX2Mi6h1kpohCSmRnFwO3FOScQ2C-T",
         },
+        .quic = .{
+            .url = "git+https://github.com/baskingspot/quic#0aeedbe4691c89df84d0df4f880ff0a5f62de572",
+            .hash = "quic-0.0.0-3wsQmpDsDgCP90LOmY9qrIABLunefS-4ULlYlbHulOfU",
+        },
         .cli = .{
             .url = "https://baskingspot.dev/cli/v0.4.0.tar.gz",
             .hash = "cli-0.4.0-nGM5m7AQAQCI1x9m-vfTPk0vwfkSxK2Es2NdViVU0wFS",

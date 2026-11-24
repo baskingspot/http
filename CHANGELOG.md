@@ -5,6 +5,29 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `http.h3.engine.quic.Engine(limits)`: the HTTP/3 server over `quic-io`.
+  `serve` accepts one connection per endpoint, opens the local control and
+  QPACK decoder streams, tags every write to its QUIC stream, and dispatches
+  requests to a handler. Each finished request releases its QUIC stream slot
+  and its session state, so the connection keeps serving. The driver imports
+  no TLS type and makes no crypto call. `examples/http3_server.zig` answers
+  GETs with curl 8.23 over `h3` on the native backend.
+- `Engine.max_body_bytes` is the response body `Exchange.respond` accepts: the
+  smaller of the QUIC stream send buffer and the session's DATA frame buffer.
+  Both are fixed, so a larger body returns `error.ResponseTooLarge` and the
+  driver resets that stream only; the connection stays open.
+- `h3.Session.forgetStream` releases a finished request stream; a connection
+  that never forgets one hits `max_streams`. It returns `error.StreamBusy`
+  until both halves are closed and no field section is held.
+- `h3.Session` keeps a discarded unknown unidirectional stream as a tombstone
+  until `forgetStream`, so later bytes are dropped instead of being parsed as
+  a new stream type. `containsStream` reports whether the session holds one.
+- A response write that meets `StreamReset` or `StreamClosed` resets that
+  stream instead of closing the connection, so a client can cancel a request
+  while the handler runs.
+
 ### Changed
 
 - **Breaking:** TLS is folded into `http` as `http.tls`. `@import("http_tls")`
@@ -23,6 +46,12 @@ All notable changes to http are recorded here. The format follows
   (hash `tls-0.4.6-nf2MKCXDQgCZlpIX2Mi6h1kpohCSmRnFwO3FOScQ2C-T`), not the
   v0.4.6 tarball. A consumer that also depends on tls must pin the same commit;
   the tarball and the commit both report 0.4.6 but are different packages.
+- The package now depends on `baskingspot/quic` at
+  `git+https://github.com/baskingspot/quic#0aeedbe4691c89df84d0df4f880ff0a5f62de572`
+  (hash `quic-0.0.0-3wsQmpDsDgCP90LOmY9qrIABLunefS-4ULlYlbHulOfU`), which pins
+  tls at the commit above. A consumer fetches quic even when it uses only
+  `http.h1`; a consumer that also depends on quic must pin the same commit, or
+  the build has two quic packages.
 
 ## [0.8.2] - 2026-11-23
 
