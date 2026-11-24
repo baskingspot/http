@@ -1,6 +1,6 @@
 //! The TLS engines and transports for `baskingspot/http`, under `http.tls`.
 //!
-//! This namespace imports `tls` and `tls_nonblocking`. The core `http` module
+//! This namespace imports `tls`, `tls_nonblocking`, and `tls_std`. The core `http` module
 //! carries the tls dependency only for these declarations; the crypto backend
 //! is chosen with `-Dcrypto` and defaults to tls's native path, which links no
 //! libcrypto.

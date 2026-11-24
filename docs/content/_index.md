@@ -897,9 +897,9 @@ try client.init(gpa, io, .{ .tls = connector.handle() });
 names come from the URL host, so `RequestOptions.address` pins the address
 without changing SNI or the DNS-ID check.
 
-That seam is what keeps TLS out of `http`: the core names no TLS type, so an
-`https` connector comes from `http.tls` or from any module that fills the
-vtable. `transport.Connection` is already the shape
+That seam keeps the client's HTTP logic protocol-neutral: the core names no TLS
+type, so an `https` connector comes from `http.tls` or from any module that
+fills the vtable. `transport.Connection` is already the shape
 `http.tls.client.Connection` implements.
 
 One deadline covers the dial and every later read and write. Reads go through
@@ -1286,5 +1286,4 @@ Not implemented:
 - HTTP/3. `h3.frame`, `h3.head`, `h3.control`, and `h3.Session` cover framing, heads, the control stream, and one connection; `qpack` handles field sections and `varint` the QUIC integer. There is no QUIC driver yet.
 - Server push. A received `PUSH_PROMISE` is a connection error `PROTOCOL_ERROR`.
 - Priority scheduling. PRIORITY is parsed, checked for a self-dependency, and otherwise ignored.
-- TLS inside `http`. Use `http.tls` for the h2 readiness engines, or hand a plaintext reader and writer to `serveIo`.
 - io_uring. There is no engine for it. `examples/http1_uring.zig` drives the machine from a completion loop.

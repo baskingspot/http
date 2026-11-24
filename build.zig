@@ -505,8 +505,8 @@ pub fn build(b: *std.Build) void {
         h2_readiness_example_run.dependOn(&run_h2_readiness.step);
     }
 
-    // The TLS readiness example is Linux and macOS only. It uses the separate
-    // `http_tls` module, so the h2c core never links libcrypto.
+    // The TLS readiness example is Linux and macOS only. It uses `http.tls`;
+    // the h1 and h2 code paths import no TLS.
     const h2_tls_readiness_example_bin = b.step(
         "example-h2-tls-readiness-bin",
         "Build the HTTP/2 TLS readiness example server",
