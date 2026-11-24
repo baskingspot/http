@@ -1,8 +1,9 @@
 const std = @import("std");
 
 /// The crypto backend `baskingspot/tls` builds with. The names match its own
-/// `-Dcrypto` option, so a consumer of this package can pass the same value
-/// through `b.dependency("http", .{ .crypto = ... })`.
+/// `-Dcrypto` option. Setting this value passes `crypto` to the tls dependency
+/// and makes it a separate package from a consumer's own tls dependency; a
+/// consumer that also depends on tls must pass the same backend.
 const CryptoBackend = enum { auto, native, openssl, @"aws-lc", boringssl };
 
 pub fn build(b: *std.Build) void {
@@ -31,20 +32,29 @@ pub fn build(b: *std.Build) void {
         "tls",
         "Export http_tls and build TLS tests and examples",
     ) orelse (b.pkg_hash.len == 0);
-    // Native is the default: tls's pure-Zig backend needs no OpenSSL headers,
-    // pkg-config, or libcrypto. A libcrypto family is selected explicitly here
-    // and the same choice reaches tls. http_tls does not use tls's C ABI, so
-    // the C ABI requirement never enters this build.
+    // Unset follows tls's own default, so http and a consumer that also
+    // depends on tls resolve one shared package. Setting a backend passes
+    // `crypto` to tls and deliberately forks the package; a consumer that
+    // also depends on tls must pass the same value or the build has two tls
+    // packages. http_tls does not use tls's C ABI, so the C ABI requirement
+    // never enters this build.
     const crypto_backend = b.option(
         CryptoBackend,
         "crypto",
-        "TLS crypto backend: native (default), auto, openssl, aws-lc, or boringssl",
-    ) orelse .native;
-    const tls_dep = if (tls_enabled) b.lazyDependency("tls", .{
-        .target = target,
-        .optimize = optimize,
-        .crypto = crypto_backend,
-    }) else null;
+        "TLS crypto backend: unset follows tls's default; auto, native, openssl, " ++
+            "aws-lc, or boringssl forks the tls package",
+    );
+    const tls_dep: ?*std.Build.Dependency = if (tls_enabled)
+        if (crypto_backend) |backend|
+            b.lazyDependency("tls", .{
+                .target = target,
+                .optimize = optimize,
+                .crypto = backend,
+            })
+        else
+            b.lazyDependency("tls", .{ .target = target, .optimize = optimize })
+    else
+        null;
     const http_tls_mod = if (tls_enabled) b.addModule("http_tls", .{
         .root_source_file = b.path("src/http_tls.zig"),
         .target = target,
