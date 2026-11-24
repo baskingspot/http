@@ -5,6 +5,13 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `http_tls` follows tls's crypto backend default. `-Dcrypto=auto`, `native`,
+  `openssl`, `aws-lc`, or `boringssl` selects one and makes the tls dependency
+  a separate package; a consumer that also depends on tls must pass the same
+  value. The `tls` pin moves to v0.4.6.
+
 ## [0.8.2] - 2026-11-23
 
 ### Changed
