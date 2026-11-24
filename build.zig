@@ -1,5 +1,10 @@
 const std = @import("std");
 
+/// The crypto backend `baskingspot/tls` builds with. The names match its own
+/// `-Dcrypto` option, so a consumer of this package can pass the same value
+/// through `b.dependency("http", .{ .crypto = ... })`.
+const CryptoBackend = enum { auto, native, openssl, @"aws-lc", boringssl };
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -26,9 +31,19 @@ pub fn build(b: *std.Build) void {
         "tls",
         "Export http_tls and build TLS tests and examples",
     ) orelse (b.pkg_hash.len == 0);
+    // Native is the default: tls's pure-Zig backend needs no OpenSSL headers,
+    // pkg-config, or libcrypto. A libcrypto family is selected explicitly here
+    // and the same choice reaches tls. http_tls does not use tls's C ABI, so
+    // the C ABI requirement never enters this build.
+    const crypto_backend = b.option(
+        CryptoBackend,
+        "crypto",
+        "TLS crypto backend: native (default), auto, openssl, aws-lc, or boringssl",
+    ) orelse .native;
     const tls_dep = if (tls_enabled) b.lazyDependency("tls", .{
         .target = target,
         .optimize = optimize,
+        .crypto = crypto_backend,
     }) else null;
     const http_tls_mod = if (tls_enabled) b.addModule("http_tls", .{
         .root_source_file = b.path("src/http_tls.zig"),
@@ -40,6 +55,9 @@ pub fn build(b: *std.Build) void {
         },
     }) else null;
     if (http_tls_mod) |tls_mod| {
+        // The module and its examples use libc for sockets and tls_std. The
+        // crypto library, if any, comes from the tls dependency's selected
+        // backend, never from an ambient link here.
         tls_mod.link_libc = true;
     }
     if (tls_dep) |dep| {
@@ -96,10 +114,10 @@ pub fn build(b: *std.Build) void {
 
     if (tls_dep) |dep| {
         const tls_mod = http_tls_mod.?;
-        // `http_tls` links libcrypto through the tls module, so its tests are a
-        // separate artifact: the h2c `http` module must never link a crypto
-        // library. Rooted at the module so both the trust-anchor builder and the
-        // transport mapping are pinned.
+        // The TLS tests are a separate artifact: the h2c `http` module never
+        // imports TLS. The crypto backend comes from the tls dependency; the
+        // native default links no libcrypto. Rooted at the module so both the
+        // trust-anchor builder and the transport mapping are pinned.
         const http_tls_tests_mod = b.addModule("http-tls-tests", .{
             .root_source_file = b.path("src/http_tls.zig"),
             .target = target,

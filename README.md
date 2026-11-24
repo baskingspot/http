@@ -76,7 +76,9 @@ exe.root_module.addImport("http", http.module("http"));
 `std.http` keeps its name, so `http` sits beside it in the same file. For TLS,
 pass `.tls = true` in the dependency arguments and import
 `http.module("http_tls")`; an ordinary `http` consumer does not fetch TLS.
-`http` builds with Zig 0.17.
+`http_tls` uses tls's `native` crypto backend by default, so it links no
+libcrypto. Pass `.crypto = .openssl`, `.aws-lc`, `.boringssl`, or `.auto` to
+select a libcrypto family. `http` builds with Zig 0.17.
 
 ## Documentation
 
