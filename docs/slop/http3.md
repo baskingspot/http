@@ -267,12 +267,12 @@ them.
 | 6 | `h3.head` and shared field syntax | h2 tests stay green; h3 `Host`/`:authority` cases pass |
 | 7 | settings, error codes, control stream | second control stream, closed critical stream, and missing SETTINGS all fail with the right code |
 | 8 | `h3.Session` | in-memory client and server sessions exchange a request, a response, trailers, a reset, and GOAWAY |
-| 9 | `h3.engine.quic` driver and example | `curl --http3` gets 200 on loopback; `http` still builds without `quic` before the driver lands |
+| 9 | `h3.engine.quic` driver and example | `curl --http3` gets 200 on loopback; the driver imports no tls type and makes no crypto call |
 | 10 | dynamic QPACK encoder | blocked encoder tests and interop pass |
 
-Steps 1 through 8 are done as of 2026-11-19. Steps 2 and 3 were independent
-after step 1. Step 8 needs 2, 4, 5, 6, and 7. Step 9 needs 8 and the QUIC
-driver.
+Steps 1 through 9 are done as of 2026-11-23. Steps 2 and 3 were independent
+after step 1. Step 8 needs 2, 4, 5, 6, and 7. Step 9 needs 8 and quic#5's
+`Stream.id`, and makes `quic` a dependency of `http` itself.
 
 ## Testing
 
@@ -285,8 +285,12 @@ driver.
   `tools/qpack-interop`. It is not built yet. The decoder is covered by RFC 9204
   Appendix B; the static-only encoder currently round-trips through our decoder
   only.
-- The dev shell has `curl` 8.23 with ngtcp2 and nghttp3. `curl --http3` against
-  the example server is the end-to-end check at step 9.
+- The dev shell has `curl` 8.23 with ngtcp2 and nghttp3. On 2026-11-23
+  `curl --http3` against `examples/http3_server.zig` returned `HTTP/3 200`, an
+  18-byte body, and two requests reused one connection (`num_connects` 1 then
+  0). The example accepts one connection per endpoint; `quic-io`'s endpoint
+  holds one connection's storage, so a server needs a fresh endpoint for the
+  next connection.
 - `h3spec` is not installed. It tests a QUIC server and needs step 9. Add it to
   the dev shell then, or run it from a container.
 - Every parser with a loop gets a fuzz target, seeded from the RFC vectors and
