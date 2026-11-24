@@ -10,9 +10,17 @@ All notable changes to http are recorded here. The format follows
 - `http.h3.engine.quic.Engine(limits)`: the HTTP/3 server over `quic-io`.
   `serve` accepts one connection per endpoint, opens the local control and
   QPACK decoder streams, tags every write to its QUIC stream, and dispatches
-  requests to a handler. The driver imports no TLS type and makes no crypto
-  call. `examples/http3_server.zig` answers one GET with curl 8.23 over `h3`
-  on the native backend.
+  requests to a handler. Each finished request releases its QUIC stream slot
+  and its session state, so the connection keeps serving. The driver imports
+  no TLS type and makes no crypto call. `examples/http3_server.zig` answers
+  GETs with curl 8.23 over `h3` on the native backend.
+- `Engine.max_body_bytes` is the response body `Exchange.respond` accepts. The
+  QUIC send buffer does not wrap, so a larger body returns
+  `error.ResponseTooLarge` and the driver resets that stream only; the
+  connection stays open.
+- `h3.Session.forgetStream` releases a finished request stream; a connection
+  that never forgets one hits `max_streams`. It returns `error.StreamBusy`
+  until both halves are closed and no field section is held.
 
 ### Changed
 

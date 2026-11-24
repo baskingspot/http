@@ -64,6 +64,7 @@ pub const Error = error{
     UnknownStream,
     WrongStream,
     StreamClosed,
+    StreamBusy,
     HeadAlreadySent,
     InvalidHead,
     BlockedStreamLimit,
@@ -458,6 +459,9 @@ pub const Session = struct {
             stream.typed = true;
             try self.classify(allocator, stream, value);
             if (stream.kind == .unknown) {
+                // The first event ends the stream: its slot is a slot for the
+                // life of the session otherwise, and a peer can open many.
+                self.removeStream(allocator, stream_id);
                 self.event = .{ .discard_stream = stream_id };
                 return cursor.pos;
             }
@@ -830,11 +834,34 @@ pub const Session = struct {
             }
         }
         stream.remote_closed = true;
+        stream.local_closed = true;
         self.event = .{ .reset = .{
             .stream_id = stream_id,
             .code = code,
             .origin = .remote,
         } };
+    }
+
+    /// Remove a request stream that is finished: the peer's FIN consumed, the
+    /// local FIN queued, and no held field section. The control, encoder, and
+    /// decoder streams live until the session ends; this refuses them. The
+    /// caller must have released every queued action for the stream.
+    pub fn forgetStream(self: *Session, allocator: Allocator, stream_id: u62) Error!void {
+        const stream = self.streams.get(stream_id) orelse return error.UnknownStream;
+        if (stream.kind != .request) return error.StreamBusy;
+        if (stream.held != null) return error.StreamBusy;
+        if (!stream.remote_closed or !stream.local_closed) return error.StreamBusy;
+        self.removeStream(allocator, stream_id);
+    }
+
+    fn removeStream(self: *Session, allocator: Allocator, stream_id: u62) void {
+        const removed = self.streams.fetchRemove(stream_id) orelse return;
+        const stream = removed.value;
+        if (stream.held) |held| {
+            allocator.free(held);
+            if (self.blocked_streams > 0) self.blocked_streams -= 1;
+        }
+        if (stream.assembly.len != 0) allocator.free(stream.assembly);
     }
 
     pub fn submitRequest(

@@ -27,6 +27,21 @@ pub fn Engine(comptime limits: quic_io.SizingLimits) type {
 
         pub const Endpoint = quic_io.Endpoint(quic_io.Sizing(limits));
 
+        /// What `Exchange.respond` reserves for the response head: the QPACK
+        /// block, the frame type and length, and the status line. A response
+        /// head made by `respond` is far smaller; this is the margin.
+        const head_reserve: usize = 1024;
+
+        /// The largest body `Exchange.respond` accepts. A QUIC stream's send
+        /// buffer does not wrap (`SizingLimits.stream_ring`), so the whole
+        /// response must fit once. A larger body returns
+        /// `error.ResponseTooLarge`; the driver resets that stream and leaves
+        /// the connection serving the others.
+        pub const max_body_bytes: usize = if (limits.stream_ring > head_reserve)
+            limits.stream_ring - head_reserve
+        else
+            0;
+
         pub const Exchange = struct {
             session: *Session,
             allocator: Allocator,
@@ -34,12 +49,21 @@ pub fn Engine(comptime limits: quic_io.SizingLimits) type {
             request: head.RequestHead,
 
             /// Send a response head and body, ending the stream.
+            ///
+            /// `body` is limited to `Engine.max_body_bytes` and
+            /// `content_type` to 256 bytes, because the driver queues the
+            /// whole response in the stream's fixed send buffer. A larger
+            /// response returns `error.ResponseTooLarge` without writing;
+            /// the driver resets this stream only.
             pub fn respond(
                 self: *Exchange,
                 status: Status,
                 content_type: []const u8,
                 body: []const u8,
             ) !void {
+                if (body.len > max_body_bytes or content_type.len > 256) {
+                    return error.ResponseTooLarge;
+                }
                 var status_text: [3]u8 = undefined;
                 _ = std.mem.print(&status_text, "{d}", .{status.code()}) catch unreachable;
                 var length_text: [20]u8 = undefined;
@@ -74,6 +98,7 @@ pub fn Engine(comptime limits: quic_io.SizingLimits) type {
             mutex: Io.Mutex = .init,
             entries: [limits.streams]Entry = undefined,
             entry_count: usize = 0,
+            group: Io.Group = .init,
             failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
             fn add(self: *State, stream: quic_io.Stream) bool {
@@ -91,6 +116,52 @@ pub fn Engine(comptime limits: quic_io.SizingLimits) type {
                 return null;
             }
 
+            fn remove(self: *State, id: u62) void {
+                var i: usize = 0;
+                while (i < self.entry_count) : (i += 1) {
+                    if (self.entries[i].id != id) continue;
+                    self.entry_count -= 1;
+                    self.entries[i] = self.entries[self.entry_count];
+                    return;
+                }
+            }
+
+            /// The task for one QUIC stream has ended. Forget the HTTP/3
+            /// stream, free its table entry, and close the QUIC handle, which
+            /// is the only thing that returns the stream slot to `quic-io`.
+            /// A stream that ended without its local FIN gets a reset first.
+            fn finish(self: *State, stream: quic_io.Stream) void {
+                const id: u62 = @intCast(stream.id);
+
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+
+                self.session.forgetStream(self.allocator, id) catch |err| switch (err) {
+                    error.StreamBusy => {
+                        self.session.submitReset(
+                            self.allocator,
+                            id,
+                            @backingInt(error_code.Code.internal_error),
+                        ) catch |submit_err| switch (submit_err) {
+                            error.ConnectionClosed, error.UnknownStream => {},
+                            else => {},
+                        };
+                        self.drain();
+                        self.session.forgetStream(
+                            self.allocator,
+                            id,
+                        ) catch |forget_err| switch (forget_err) {
+                            error.StreamBusy => {},
+                            else => {},
+                        };
+                    },
+                    error.UnknownStream => {},
+                    else => {},
+                };
+                self.remove(id);
+                stream.close(self.io);
+            }
+
             fn fail(self: *State, code: error_code.Code) void {
                 self.connection.closeWith(self.io, @backingInt(code));
                 self.failed.store(true, .monotonic);
@@ -102,8 +173,27 @@ pub fn Engine(comptime limits: quic_io.SizingLimits) type {
                         .write => |write| {
                             const stream = self.find(write.stream_id) orelse
                                 return self.fail(.internal_error);
-                            writeStream(self.io, stream, write.bytes, write.fin) catch
-                                return self.fail(.internal_error);
+                            writeStream(
+                                self.io,
+                                stream,
+                                write.bytes,
+                                write.fin,
+                            ) catch |err| switch (err) {
+                                error.SendBufferFull => {
+                                    // A write outgrew the send buffer without
+                                    // `respond`'s check. Reset this stream, not
+                                    // the connection.
+                                    self.session.submitReset(
+                                        self.allocator,
+                                        write.stream_id,
+                                        @backingInt(error_code.Code.internal_error),
+                                    ) catch |reset_err| switch (reset_err) {
+                                        error.ConnectionClosed, error.UnknownStream => {},
+                                        else => {},
+                                    };
+                                },
+                                else => return self.fail(.internal_error),
+                            };
                         },
                         .reset => |reset| {
                             // The stream is already being torn down; a failure
@@ -233,9 +323,6 @@ pub fn Engine(comptime limits: quic_io.SizingLimits) type {
             state.drain();
             state.mutex.unlock(io);
 
-            var futures: [limits.streams]Io.Future(void) = undefined;
-            var future_count: usize = 0;
-
             while (!state.failed.load(.monotonic)) {
                 const stream = connection.acceptStream(io) catch |err| switch (err) {
                     error.ConnectionClosed => break,
@@ -245,22 +332,26 @@ pub fn Engine(comptime limits: quic_io.SizingLimits) type {
                 state.mutex.lockUncancelable(io);
                 const added = state.add(stream);
                 state.mutex.unlock(io);
-                if (!added or future_count == futures.len) {
+                if (!added) {
                     state.fail(.excessive_load);
                     break;
                 }
 
-                futures[future_count] = io.concurrent(streamTask, .{ &state, stream }) catch {
+                state.group.concurrent(io, streamTask, .{ &state, stream }) catch {
                     state.fail(.internal_error);
                     break;
                 };
-                future_count += 1;
             }
 
-            for (futures[0..future_count]) |*future| future.await(io);
+            state.group.await(io) catch |err| switch (err) {
+                error.Canceled => {},
+            };
+            control.close(io);
+            decoder.close(io);
         }
 
-        fn streamTask(state: *State, stream: quic_io.Stream) void {
+        fn streamTask(state: *State, stream: quic_io.Stream) Io.Cancelable!void {
+            defer state.finish(stream);
             streamLoop(state, stream) catch |err| switch (err) {
                 error.ConnectionClosed, error.StreamClosed, error.StreamReset => {},
                 else => state.fail(.internal_error),

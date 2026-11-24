@@ -285,6 +285,10 @@ after step 1. Step 8 needs 2, 4, 5, 6, and 7. Step 9 needs 8 and quic#5's
   `tools/qpack-interop`. It is not built yet. The decoder is covered by RFC 9204
   Appendix B; the static-only encoder currently round-trips through our decoder
   only.
+- `tests/h3_quic.zig` runs the driver against a real loopback connection:
+  24 requests over a 16-stream table, one request over `max_body_bytes` that
+  must reset only its stream, and the server handler. Removing the driver's
+  stream release makes it fail at request 14.
 - The dev shell has `curl` 8.23 with ngtcp2 and nghttp3. On 2026-11-23
   `curl --http3` against `examples/http3_server.zig` returned `HTTP/3 200`, an
   18-byte body, and two requests reused one connection (`num_connects` 1 then

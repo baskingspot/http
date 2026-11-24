@@ -104,6 +104,33 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // The QUIC driver's own test: a real loopback connection with more requests
+    // than the server's stream table holds. It needs the network and the native
+    // TLS backend, so it is separate from the pure suite.
+    {
+        const h3_quic_mod = b.createModule(.{
+            .root_source_file = b.path("tests/h3_quic.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "quic-io", .module = quic_dep.module("quic-io") },
+            },
+        });
+        h3_quic_mod.addAnonymousImport("tls_server_crt", .{
+            .root_source_file = tls_dep.path("tests/fixtures/server.crt"),
+        });
+        h3_quic_mod.addAnonymousImport("tls_server_key", .{
+            .root_source_file = tls_dep.path("tests/fixtures/server.key"),
+        });
+        const h3_quic_tests = b.addTest(.{
+            .root_module = h3_quic_mod,
+            .test_runner = test_runner,
+        });
+        const run_h3_quic = b.addRunArtifact(h3_quic_tests);
+        test_step.dependOn(&run_h3_quic.step);
+    }
+
     {
         const dep = tls_dep;
         // A consumer using `http.tls` through the module name, the way grpc
