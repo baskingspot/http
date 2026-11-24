@@ -7,6 +7,7 @@
 //! `Session` runs one connection over the numbered-stream seam.
 
 pub const control = @import("control.zig");
+pub const engine = @import("engine/root.zig");
 pub const error_code = @import("error_code.zig");
 pub const frame = @import("frame.zig");
 pub const head = @import("head.zig");
@@ -16,6 +17,7 @@ pub const Session = session.Session;
 
 test {
     _ = control;
+    _ = engine;
     _ = error_code;
     _ = frame;
     _ = head;

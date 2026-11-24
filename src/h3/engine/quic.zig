@@ -1,0 +1,359 @@
+//! HTTP/3 over `quic-io`: the server engine.
+//!
+//! `quic-io` terminates QUIC and TLS; this driver hands it HTTP/3 stream bytes
+//! and takes the tagged writes back. It imports no TLS type and makes no crypto
+//! call. One task per QUIC stream feeds `h3.Session`; the session mutex
+//! serializes receive, events, and the outbound queue.
+//!
+//! The caller opens and owns the endpoint. The engine opens the local control
+//! and QPACK decoder streams, initializes the session with their QUIC stream
+//! ids, and then accepts peer streams until the connection closes.
+
+const std = @import("std");
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
+
+const quic_io = @import("quic-io");
+const session_mod = @import("../session.zig");
+const Session = session_mod.Session;
+const head = @import("../head.zig");
+const error_code = @import("../error_code.zig");
+const Header = @import("../../header.zig").Header;
+const Status = @import("../../status.zig").Status;
+
+pub fn Engine(comptime limits: quic_io.SizingLimits) type {
+    return struct {
+        const Self = @This();
+
+        pub const Endpoint = quic_io.Endpoint(quic_io.Sizing(limits));
+
+        pub const Exchange = struct {
+            session: *Session,
+            allocator: Allocator,
+            stream_id: u62,
+            request: head.RequestHead,
+
+            /// Send a response head and body, ending the stream.
+            pub fn respond(
+                self: *Exchange,
+                status: Status,
+                content_type: []const u8,
+                body: []const u8,
+            ) !void {
+                var status_text: [3]u8 = undefined;
+                _ = std.mem.print(&status_text, "{d}", .{status.code()}) catch unreachable;
+                var length_text: [20]u8 = undefined;
+                const length = std.mem.print(&length_text, "{d}", .{body.len}) catch unreachable;
+
+                const fields = [_]Header{
+                    .{ .name = ":status", .value = &status_text },
+                    .{ .name = "content-type", .value = content_type },
+                    .{ .name = "content-length", .value = length },
+                };
+                try self.session.submitResponse(self.allocator, self.stream_id, &fields, false);
+                try self.session.submitData(self.allocator, self.stream_id, body, true);
+            }
+        };
+
+        pub const Handler = struct {
+            context: *anyopaque,
+            handle: *const fn (context: *anyopaque, exchange: *Exchange) anyerror!void,
+        };
+
+        const Entry = struct {
+            id: u62,
+            stream: quic_io.Stream,
+        };
+
+        const State = struct {
+            io: Io,
+            allocator: Allocator,
+            connection: quic_io.Connection,
+            session: Session,
+            handler: Handler,
+            mutex: Io.Mutex = .init,
+            entries: [limits.streams]Entry = undefined,
+            entry_count: usize = 0,
+            failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+            fn add(self: *State, stream: quic_io.Stream) bool {
+                if (self.entry_count == self.entries.len) return false;
+                const id: u62 = @intCast(stream.id);
+                self.entries[self.entry_count] = .{ .id = id, .stream = stream };
+                self.entry_count += 1;
+                return true;
+            }
+
+            fn find(self: *State, id: u62) ?quic_io.Stream {
+                for (self.entries[0..self.entry_count]) |entry| {
+                    if (entry.id == id) return entry.stream;
+                }
+                return null;
+            }
+
+            fn fail(self: *State, code: error_code.Code) void {
+                self.connection.closeWith(self.io, @backingInt(code));
+                self.failed.store(true, .monotonic);
+            }
+
+            fn drain(self: *State) void {
+                while (self.session.nextAction()) |action| {
+                    switch (action) {
+                        .write => |write| {
+                            const stream = self.find(write.stream_id) orelse
+                                return self.fail(.internal_error);
+                            writeStream(self.io, stream, write.bytes, write.fin) catch
+                                return self.fail(.internal_error);
+                        },
+                        .reset => |reset| {
+                            // The stream is already being torn down; a failure
+                            // here changes nothing.
+                            if (self.find(reset.stream_id)) |stream| {
+                                stream.shutdown(self.io, .both) catch |err| switch (err) {
+                                    error.StreamClosed, error.ConnectionClosed => {},
+                                    else => {},
+                                };
+                            }
+                        },
+                        .stop_sending => |stop| {
+                            if (self.find(stop.stream_id)) |stream| {
+                                stream.shutdown(self.io, .recv) catch |err| switch (err) {
+                                    error.StreamClosed, error.ConnectionClosed => {},
+                                    else => {},
+                                };
+                            }
+                        },
+                        .close => |code| {
+                            self.connection.closeWith(self.io, code);
+                            self.failed.store(true, .monotonic);
+                        },
+                    }
+                    self.session.release(self.allocator);
+                    if (self.failed.load(.monotonic)) return;
+                }
+            }
+
+            fn events(self: *State) !void {
+                while (try self.session.nextEvent(self.allocator)) |event| {
+                    switch (event) {
+                        .request => |request| {
+                            var exchange = Exchange{
+                                .session = &self.session,
+                                .allocator = self.allocator,
+                                .stream_id = request.stream_id,
+                                .request = request.head,
+                            };
+                            self.handler.handle(self.handler.context, &exchange) catch {
+                                self.session.submitReset(
+                                    self.allocator,
+                                    request.stream_id,
+                                    @backingInt(error_code.Code.internal_error),
+                                ) catch |err| switch (err) {
+                                    error.ConnectionClosed, error.UnknownStream => {},
+                                    else => {},
+                                };
+                            };
+                        },
+                        .discard_stream => |id| {
+                            if (self.find(id)) |stream| {
+                                stream.shutdown(self.io, .both) catch |err| switch (err) {
+                                    error.StreamClosed, error.ConnectionClosed => {},
+                                    else => {},
+                                };
+                            }
+                        },
+                        else => {},
+                    }
+                    if (self.failed.load(.monotonic)) return;
+                }
+                self.drain();
+            }
+        };
+
+        /// Accept one connection from `endpoint` and serve it until it closes.
+        /// `quic-io`'s endpoint holds one connection's storage, so a second
+        /// connection needs a second endpoint.
+        pub fn serve(
+            io: Io,
+            allocator: Allocator,
+            endpoint: *Endpoint,
+            handler: Handler,
+        ) !void {
+            const connection = endpoint.accept(io) catch |err| switch (err) {
+                error.ConnectionClosed => return,
+                else => return err,
+            };
+            handleConnection(io, allocator, connection, handler) catch |err| switch (err) {
+                error.ConnectionClosed => {},
+                else => return err,
+            };
+        }
+
+        fn handleConnection(
+            io: Io,
+            allocator: Allocator,
+            connection: quic_io.Connection,
+            handler: Handler,
+        ) !void {
+            defer connection.close(io);
+
+            const control = try connection.openStream(io, .uni);
+            const decoder = try connection.openStream(io, .uni);
+
+            var state: State = .{
+                .io = io,
+                .allocator = allocator,
+                .connection = connection,
+                .session = undefined,
+                .handler = handler,
+            };
+            state.entries[0] = .{ .id = @intCast(control.id), .stream = control };
+            state.entries[1] = .{ .id = @intCast(decoder.id), .stream = decoder };
+            state.entry_count = 2;
+
+            state.session = try Session.init(allocator, .{
+                .role = .server,
+                .control_stream = @intCast(control.id),
+                .decoder_stream = @intCast(decoder.id),
+                .qpack_max_table_capacity = 4096,
+                .qpack_blocked_streams = 16,
+                .max_field_section_size = 16 * 1024,
+                .max_streams = limits.streams,
+                .max_fields = 64,
+                .max_in_header_block = 16 * 1024,
+                .max_control_frame = 16 * 1024,
+                .max_data_event = 16 * 1024,
+                .max_blocked_bytes = 64 * 1024,
+            });
+            defer state.session.deinit(allocator);
+
+            // The type bytes and SETTINGS the session queued for its control
+            // and decoder streams.
+            state.mutex.lockUncancelable(io);
+            state.drain();
+            state.mutex.unlock(io);
+
+            var futures: [limits.streams]Io.Future(void) = undefined;
+            var future_count: usize = 0;
+
+            while (!state.failed.load(.monotonic)) {
+                const stream = connection.acceptStream(io) catch |err| switch (err) {
+                    error.ConnectionClosed => break,
+                    else => break,
+                };
+
+                state.mutex.lockUncancelable(io);
+                const added = state.add(stream);
+                state.mutex.unlock(io);
+                if (!added or future_count == futures.len) {
+                    state.fail(.excessive_load);
+                    break;
+                }
+
+                futures[future_count] = io.concurrent(streamTask, .{ &state, stream }) catch {
+                    state.fail(.internal_error);
+                    break;
+                };
+                future_count += 1;
+            }
+
+            for (futures[0..future_count]) |*future| future.await(io);
+        }
+
+        fn streamTask(state: *State, stream: quic_io.Stream) void {
+            streamLoop(state, stream) catch |err| switch (err) {
+                error.ConnectionClosed, error.StreamClosed, error.StreamReset => {},
+                else => state.fail(.internal_error),
+            };
+        }
+
+        fn streamLoop(state: *State, stream: quic_io.Stream) !void {
+            const id: u62 = @intCast(stream.id);
+            var buffer: [16 * 1024]u8 = undefined;
+            var len: usize = 0;
+
+            while (!state.failed.load(.monotonic)) {
+                if (len == buffer.len) return error.MessageTooLarge;
+
+                var vectors = [1][]u8{buffer[len..]};
+                const n = stream.read(state.io, &vectors) catch |err| switch (err) {
+                    error.StreamReset => {
+                        state.mutex.lockUncancelable(state.io);
+                        defer state.mutex.unlock(state.io);
+                        state.session.reset(state.allocator, id, 0);
+                        try state.events();
+                        return;
+                    },
+                    error.ConnectionClosed, error.StreamClosed => return,
+                    else => return err,
+                };
+
+                if (n == 0) {
+                    state.mutex.lockUncancelable(state.io);
+                    defer state.mutex.unlock(state.io);
+
+                    var offset: usize = 0;
+                    while (offset < len) {
+                        const consumed = state.session.receive(
+                            state.allocator,
+                            id,
+                            buffer[offset..len],
+                            true,
+                        );
+                        offset += consumed;
+                        try state.events();
+                        if (state.failed.load(.monotonic)) return;
+                        if (consumed == 0) break;
+                    }
+                    if (offset < len) return error.MessageTooLarge;
+
+                    _ = state.session.receive(state.allocator, id, "", true);
+                    try state.events();
+                    return;
+                }
+
+                len += n;
+                state.mutex.lockUncancelable(state.io);
+                var offset: usize = 0;
+                {
+                    defer state.mutex.unlock(state.io);
+                    while (offset < len) {
+                        const consumed = state.session.receive(
+                            state.allocator,
+                            id,
+                            buffer[offset..len],
+                            false,
+                        );
+                        offset += consumed;
+                        try state.events();
+                        if (state.failed.load(.monotonic)) return;
+                        if (consumed == 0) break;
+                    }
+                }
+
+                if (offset > 0) {
+                    @memmove(buffer[0 .. len - offset], buffer[offset..len]);
+                    len -= offset;
+                }
+            }
+        }
+
+        fn writeStream(
+            io: Io,
+            stream: quic_io.Stream,
+            bytes: []const u8,
+            fin: bool,
+        ) !void {
+            var pos: usize = 0;
+            while (pos < bytes.len) {
+                const n = stream.write(io, bytes[pos..]) catch |err| switch (err) {
+                    error.NoSpace => return error.SendBufferFull,
+                    else => return err,
+                };
+                if (n == 0) return error.SendBufferFull;
+                pos += n;
+            }
+            if (fin) try stream.shutdown(io, .send);
+        }
+    };
+}

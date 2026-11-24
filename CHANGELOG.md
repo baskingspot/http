@@ -5,6 +5,15 @@ All notable changes to http are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `http.h3.engine.quic.Engine(limits)`: the HTTP/3 server over `quic-io`.
+  `serve` accepts one connection per endpoint, opens the local control and
+  QPACK decoder streams, tags every write to its QUIC stream, and dispatches
+  requests to a handler. The driver imports no TLS type and makes no crypto
+  call. `examples/http3_server.zig` answers one GET with curl 8.23 over `h3`
+  on the native backend.
+
 ### Changed
 
 - **Breaking:** TLS is folded into `http` as `http.tls`. `@import("http_tls")`
@@ -23,6 +32,12 @@ All notable changes to http are recorded here. The format follows
   (hash `tls-0.4.6-nf2MKCXDQgCZlpIX2Mi6h1kpohCSmRnFwO3FOScQ2C-T`), not the
   v0.4.6 tarball. A consumer that also depends on tls must pin the same commit;
   the tarball and the commit both report 0.4.6 but are different packages.
+- The package now depends on `baskingspot/quic` at
+  `git+https://github.com/baskingspot/quic#0aeedbe4691c89df84d0df4f880ff0a5f62de572`
+  (hash `quic-0.0.0-3wsQmpDsDgCP90LOmY9qrIABLunefS-4ULlYlbHulOfU`), which pins
+  tls at the commit above. A consumer fetches quic even when it uses only
+  `http.h1`; a consumer that also depends on quic must pin the same commit, or
+  the build has two quic packages.
 
 ## [0.8.2] - 2026-11-23
 

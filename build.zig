@@ -34,14 +34,23 @@ pub fn build(b: *std.Build) void {
         })
     else
         b.dependency("tls", .{ .target = target, .optimize = optimize });
+    // The same backend, and the same package identity, reaches quic. Unset
+    // forwards nothing, so http, quic, and a consumer's tls are one package.
+    const quic_dep = if (crypto_backend) |backend|
+        b.dependency("quic", .{
+            .target = target,
+            .optimize = optimize,
+            .crypto = backend,
+        })
+    else
+        b.dependency("quic", .{ .target = target, .optimize = optimize });
 
-    // The only exported module. The TLS engines and transports live under
-    // `http.tls`; the tls dependency is part of the module graph. Everything
-    // below is developer-only: returning early for a consumer keeps testingx
-    // and the bench graph out of its fetch path.
+    // The only exported module. The TLS engines live under `http.tls`, and the
+    // HTTP/3 QUIC driver under `http.h3.engine.quic`; both dependencies are part
+    // of the module graph. Everything below is developer-only: returning early
+    // for a consumer keeps testingx and the bench graph out of its fetch path.
     const mod = b.addModule("http", .{
         .root_source_file = b.path("src/root.zig"),
-
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -49,6 +58,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "tls", .module = tls_dep.module("tls") },
             .{ .name = "tls_nonblocking", .module = tls_dep.module("tls_nonblocking") },
             .{ .name = "tls_std", .module = tls_dep.module("tls_std") },
+            .{ .name = "quic-io", .module = quic_dep.module("quic-io") },
         },
     });
 
@@ -538,6 +548,50 @@ pub fn build(b: *std.Build) void {
             run_h2_tls_readiness.addPassthruArgs();
             h2_tls_readiness_example_run.dependOn(&run_h2_tls_readiness.step);
         }
+    }
+
+    // HTTP/3 over QUIC. `quic-io` terminates TLS and QUIC; the example names
+    // the backend it was built with and serves one loopback UDP port.
+    const http3_example_bin = b.step(
+        "example-http3-bin",
+        "Build the HTTP/3 QUIC server example",
+    );
+    const http3_example_run = b.step(
+        "example-http3",
+        "Run the HTTP/3 QUIC server example",
+    );
+    {
+        const http3_options = b.addOptions();
+        http3_options.addOption(
+            []const u8,
+            "crypto",
+            if (crypto_backend) |backend| @tagName(backend) else "native (tls default)",
+        );
+        const http3_mod = b.createModule(.{
+            .root_source_file = b.path("examples/http3_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "http", .module = mod },
+                .{ .name = "quic-io", .module = quic_dep.module("quic-io") },
+                .{ .name = "build_options", .module = http3_options.createModule() },
+            },
+        });
+        http3_mod.addAnonymousImport("tls_server_crt", .{
+            .root_source_file = tls_dep.path("tests/fixtures/server.crt"),
+        });
+        http3_mod.addAnonymousImport("tls_server_key", .{
+            .root_source_file = tls_dep.path("tests/fixtures/server.key"),
+        });
+        const http3 = b.addExecutable(.{
+            .name = "http3-server",
+            .root_module = http3_mod,
+        });
+        http3_example_bin.dependOn(&http3.step);
+
+        const run_http3 = b.addRunArtifact(http3);
+        run_http3.addPassthruArgs();
+        http3_example_run.dependOn(&run_http3.step);
     }
 
     // The TLS h2 example is Linux and macOS only. It imports tls and the

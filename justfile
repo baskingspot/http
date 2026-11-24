@@ -234,6 +234,11 @@ example-h2-tls:
 example-h2-tls-readiness:
     zig build example-h2-tls-readiness
 
+[doc("Run the HTTP/3 QUIC example server on 127.0.0.1:8443")]
+[group("example")]
+example-h3:
+    zig build example-http3
+
 [doc("Build the HTTP/1.1 and HTTP/2 examples without running them")]
 [group("example")]
 check-example:
@@ -250,6 +255,7 @@ check-example:
     zig build example-h2-tls-readiness-bin
     zig build example-h1-tls-bin
     zig build example-h1-tls-client-bin
+    zig build example-http3-bin
     zig build example-unified-bin
     zig build example-curl-bin
     zig build interop-client-bin
