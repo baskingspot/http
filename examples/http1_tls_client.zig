@@ -11,7 +11,8 @@ const std = @import("std");
 const Io = std.Io;
 const print = std.debug.print;
 
-const http_tls = @import("http_tls");
+const http = @import("http");
+const http_tls = http.tls;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;

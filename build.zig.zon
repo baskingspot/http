@@ -42,7 +42,6 @@
         .tls = .{
             .url = "https://baskingspot.dev/tls/v0.4.6.tar.gz",
             .hash = "tls-0.4.6-nf2MKL2lQgC8YdPb9L-G2pzigRSo1YRrOXzJ8Rjw3vKR",
-            .lazy = true,
         },
         .cli = .{
             .url = "https://baskingspot.dev/cli/v0.4.0.tar.gz",

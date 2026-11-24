@@ -264,7 +264,7 @@ pub const Outcome = union(enum) {
 ///
 /// `Io.Reader.StreamError` reports `error.ReadFailed` and nothing else, so an
 /// adapter cannot recover the cause from the error. A caller whose reader has
-/// a latch — `http_tls.client.Connection.readError` is the one in this repo —
+/// a latch — `http.tls.client.Connection.readError` is the one in this repo —
 /// supplies this, and the body reports the cause instead of guessing from the
 /// error alone.
 pub const ReadCause = struct {

@@ -16,12 +16,11 @@ const tls = @import("tls");
 const tls_nonblocking = @import("tls_nonblocking");
 const tls_std = @import("tls_std");
 const anchors = @import("anchors.zig");
-const http = @import("http");
 const time = @import("stdx").time;
-const client = http.client;
-const plain = http.client.plain;
-const transport = http.client.transport;
-const Driver = http.h2.client.Driver;
+const client = @import("../client/root.zig");
+const plain = client.plain;
+const transport = client.transport;
+const Driver = @import("../h2/client/root.zig").Driver;
 
 const SocketClient = tls_nonblocking.SocketClient;
 
@@ -440,7 +439,7 @@ test "a peer without ALPN falls back to HTTP/1.1 when it was offered" {
 /// adapter picked from the ALPN selection.
 ///
 /// ```zig
-/// var client: http_tls.Client = undefined;
+/// var client: http.tls.Client = undefined;
 /// try client.init(allocator, io, .{ .ca_pem = ca_pem });
 /// defer client.deinit();
 ///

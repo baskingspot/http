@@ -20,6 +20,7 @@ pub const stream = @import("engine/stream.zig");
 pub const client = @import("client/root.zig");
 pub const h1 = @import("h1/root.zig");
 pub const h2 = @import("h2/root.zig");
+pub const tls = @import("http_tls.zig");
 pub const h3 = @import("h3/root.zig");
 pub const hpack = @import("hpack/root.zig");
 pub const qpack = @import("qpack/root.zig");
@@ -52,6 +53,7 @@ test {
     _ = h1;
     _ = h2;
     _ = h3;
+    _ = tls;
     _ = hpack;
     _ = qpack;
     _ = huffman;

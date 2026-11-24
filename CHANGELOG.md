@@ -7,10 +7,13 @@ All notable changes to http are recorded here. The format follows
 
 ### Changed
 
-- `http_tls` follows tls's crypto backend default. `-Dcrypto=auto`, `native`,
-  `openssl`, `aws-lc`, or `boringssl` selects one and makes the tls dependency
-  a separate package; a consumer that also depends on tls must pass the same
-  value. The `tls` pin moves to v0.4.6.
+- TLS is folded into `http` as `http.tls`; the separate `http_tls` module and
+  its `.tls` dependency option are gone. A consumer imports `http` and uses
+  `http.tls`; the tls dependency is part of the package.
+- `http.tls` follows tls's crypto backend default. `-Dcrypto=auto`, `native`,
+  `openssl`, `aws-lc`, or `boringssl` selects one and forks the tls package; a
+  consumer that also depends on tls must pass the same value. The `tls` pin
+  moves to v0.4.6.
 
 ## [0.8.2] - 2026-11-23
 

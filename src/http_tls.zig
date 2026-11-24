@@ -1,12 +1,13 @@
-//! The TLS engines and transports for `baskingspot/http`.
+//! The TLS engines and transports for `baskingspot/http`, under `http.tls`.
 //!
-//! This module imports `tls` and `tls_nonblocking`. Import it only when a
-//! program terminates TLS; the core `http` module stays free of TLS code and
-//! links no crypto library.
+//! This namespace imports `tls` and `tls_nonblocking`. The core `http` module
+//! carries the tls dependency only for these declarations; the crypto backend
+//! is chosen with `-Dcrypto` and defaults to tls's native path, which links no
+//! libcrypto.
 //!
 //! ```zig
-//! const http_tls = @import("http_tls");
-//! const Engine = http_tls.h2.engine.tls.poll; // or .epoll / .kqueue
+//! const http = @import("http");
+//! const Engine = http.tls.h2.engine.tls.poll; // or .epoll / .kqueue
 //! ```
 
 const builtin = @import("builtin");

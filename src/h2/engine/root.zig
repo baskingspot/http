@@ -22,7 +22,7 @@ pub const Connection = connection.Connection;
 pub const BodyMode = connection.BodyMode;
 pub const ConnectionOptions = connection.Options;
 
-// Shared with the optional `http_tls` module, which instantiates the
+// Shared with the optional `http.tls` module, which instantiates the
 // readiness loop with a TLS transport. The core `http` module does not import
 // TLS itself.
 pub const readiness = @import("readiness.zig");

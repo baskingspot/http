@@ -20,7 +20,7 @@ storage you own, and never allocate.
 - [The h2 session and frames](#the-h2-session-and-frames): `h2.frame.parse` is the frame codec, and `h2.Session` owns SETTINGS, streams, flow control, HPACK, and CONTINUATION assembly.
 - [HPACK](#hpack): `hpack.Decoder` and `hpack.Encoder` share the static and dynamic tables, and `prefix_int` and `huffman` are the primitives QPACK reuses.
 - [The client contract](#the-client-contract): `client.Request` and `client.Body` are protocol-neutral, and `client.Client` dispatches to an h1 or an h2 adapter.
-- [Running a server](#running-a-server): `engine.Handler(Exchange)` is the one vtable every engine calls, and `http_tls` adds TLS without putting crypto in the core.
+- [Running a server](#running-a-server): `engine.Handler(Exchange)` is the one vtable every engine calls, and `http.tls` adds TLS; the h1 and h2 engines import no TLS.
 - [Performance](#performance): head-parser time on four heads, measured over the corpus in `bench/h1_bench.zig`, with the table as the only place the numbers live.
 - [Limits](#limits): no streaming request bodies, no connection reuse, and the rest of what is not here.
 
@@ -42,9 +42,9 @@ const http = b.dependency("http", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("http", http.module("http"));
 ```
 
-`http` builds with Zig 0.17. The package also exports a second module,
-`http_tls`, for the TLS readiness engines; the `http` module itself imports no
-TLS and links no crypto library.
+`http` builds with Zig 0.17. TLS is `http.tls`, the TLS readiness engines and
+client over `baskingspot/tls`; the h1 and h2 engines import no TLS. The crypto
+backend defaults to tls's native path and links no libcrypto.
 
 ## Import it
 
@@ -795,7 +795,7 @@ stopped early, `.protocol_error` when it broke a rule, `.reset` carrying the
 RST_STREAM code, or `.local` with a `Local` value. `Local.timed_out` is a read
 deadline you set. A reader that latches its own failure cause is wired in with
 `client.Config.read_cause`, which is what
-`http_tls.client.Connection.readCause()` provides.
+`http.tls.client.Connection.readCause()` provides.
 
 There is no total-size bound. A caller that wants one wraps the reader in
 `Io.Reader.limited`. The reader hands out borrowed slices, so holding one pins
@@ -820,12 +820,12 @@ belongs above this layer, where the connection is opened.
 
 ## The client
 
-`http_tls.Client` is the one to reach for. It speaks `http` and `https`, picks
+`http.tls.Client` is the one to reach for. It speaks `http` and `https`, picks
 the adapter from the ALPN selection, and trusts the platform store unless you
 hand it anchors:
 
 ```zig
-var client: http_tls.Client = undefined;
+var client: http.tls.Client = undefined;
 try client.init(allocator, io, .{});
 defer client.deinit();
 
@@ -852,7 +852,7 @@ closed is retried once on a fresh dial.
 
 `http.client.Client` is the same client without TLS: it reaches `http` URLs and
 reports `error.TlsUnsupported` for `https`. `Options.plain` configures the
-cleartext side, and `Options.tls` supplies the connector `http_tls` builds.
+cleartext side, and `Options.tls` supplies the connector `http.tls` builds.
 
 `attached` is the mode for a socket you already own: it takes a reader and a
 writer and never dials, bounds, or closes anything. That is the layer
@@ -878,16 +878,16 @@ It resolves the host, tries each address in order, sets `TCP_NODELAY`, and
 reports `error.TlsUnsupported` for an `https` URL rather than sending cleartext
 to a TLS port.
 
-`http_tls.client.Connector` is the same seam for `https`. It reuses the
+`http.tls.client.Connector` is the same seam for `https`. It reuses the
 cleartext dial, runs the handshake with the caller's CA, offers an ALPN list,
 and reports the selected protocol, so the client picks the h1 or h2 adapter
 without the caller looking at ALPN:
 
-`http_tls.Client` wires this for you. To do it by hand, hand the connector to
+`http.tls.Client` wires this for you. To do it by hand, hand the connector to
 the core client as `Options.tls`:
 
 ```zig
-var connector: http_tls.client.Connector = .init(.{ .ca_pem = ca_pem });
+var connector: http.tls.client.Connector = .init(.{ .ca_pem = ca_pem });
 var client: http.client.Client = undefined;
 try client.init(gpa, io, .{ .tls = connector.handle() });
 ```
@@ -898,9 +898,9 @@ names come from the URL host, so `RequestOptions.address` pins the address
 without changing SNI or the DNS-ID check.
 
 That seam is what keeps TLS out of `http`: the core names no TLS type, so an
-`https` connector comes from `http_tls` or from any module that fills the
+`https` connector comes from `http.tls` or from any module that fills the
 vtable. `transport.Connection` is already the shape
-`http_tls.client.Connection` implements.
+`http.tls.client.Connection` implements.
 
 One deadline covers the dial and every later read and write. Reads go through
 `Io.Batch`, which on the threaded backend is a `poll(2)` with the remaining
@@ -1019,7 +1019,7 @@ transport outcomes; they do not cancel a stream or select an application error.
 The deadline is an absolute awake-monotonic timestamp. Use `.none` for no deadline. `Driver.Wait.socket`
 reads raw socket bytes and requires an unbuffered raw reader.
 A TLS driver uses `.wait = .reader` and
-`.read_deadline = connection.readDeadline()` from `http_tls.client.Connection`.
+`.read_deadline = connection.readDeadline()` from `http.tls.client.Connection`.
 The hooks pass the same deadline to the decrypting reader and report its concrete
 read-error cause. A timed reader wait without these hooks returns
 `error.DeadlineUnsupported`.
@@ -1200,15 +1200,14 @@ total, head, and body deadlines, `accept_backoff`, `drain_timeout`, and a
 accepting, and waits for active streams until `drain_timeout` expires.
 `just conformance-run-readiness` runs h2spec strict against it.
 
-## TLS lives in another module
+## TLS lives in `http.tls`
 
-`http` imports no TLS and links no crypto library. Pass `.tls = true` to
-`b.dependency("http", ...)` for the separate `http_tls` module:
-`http_tls.h2.engine.tls.poll`, `.epoll`, and `.kqueue` are the h2 readiness
+`http.tls` holds the TLS engines and transports; the h1 and h2 engines import
+no TLS, but the package carries the tls dependency.
+`http.tls.h2.engine.tls.poll`, `.epoll`, and `.kqueue` are the h2 readiness
 engines over `tls_nonblocking` from `baskingspot/tls`, with the handshake,
 record buffers, and ALPN inside the transport. Set `Config.transport`, and
-nothing below `h2.engine.Connection` changes. Without that option, a consumer
-does not fetch TLS or the CLI package.
+nothing below `h2.engine.Connection` changes.
 
 The direct engines take a plaintext reader and writer instead.
 `examples/http2_tls.zig` runs `tls_std`'s own handshake with ALPN `h2` and
@@ -1287,5 +1286,5 @@ Not implemented:
 - HTTP/3. `h3.frame`, `h3.head`, `h3.control`, and `h3.Session` cover framing, heads, the control stream, and one connection; `qpack` handles field sections and `varint` the QUIC integer. There is no QUIC driver yet.
 - Server push. A received `PUSH_PROMISE` is a connection error `PROTOCOL_ERROR`.
 - Priority scheduling. PRIORITY is parsed, checked for a self-dependency, and otherwise ignored.
-- TLS inside `http`. Import `http_tls` for the h2 readiness engines, or hand a plaintext reader and writer to `serveIo`.
+- TLS inside `http`. Use `http.tls` for the h2 readiness engines, or hand a plaintext reader and writer to `serveIo`.
 - io_uring. There is no engine for it. `examples/http1_uring.zig` drives the machine from a completion loop.

@@ -15,7 +15,7 @@ const testing = std.testing;
 const Io = std.Io;
 
 const http = @import("http");
-const http_tls = @import("http_tls");
+const http_tls = http.tls;
 const tls = @import("tls");
 const tls_nonblocking = @import("tls_nonblocking");
 const time = @import("stdx").time;
