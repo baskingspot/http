@@ -657,6 +657,15 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    const sse_client_bin = b.step(
+        "example-sse-client-bin",
+        "Build the SSE streaming client example",
+    );
+    const sse_client_run = b.step(
+        "example-sse-client",
+        "Run the SSE streaming client: pass plain or tls, then any options",
+    );
+
     // The HTTP/1 TLS examples use the blocking tls_std integration from
     // baskingspot/tls. Both are Linux and macOS only.
     const h1_tls_example_bin = b.step(
@@ -717,6 +726,27 @@ pub fn build(b: *std.Build) void {
             const run_h1_tls_client = b.addRunArtifact(h1_tls_client);
             run_h1_tls_client.addPassthruArgs();
             h1_tls_client_run.dependOn(&run_h1_tls_client.step);
+
+            // One binary reads the SSE route of either server. The mode is the
+            // first argument: `plain` for sse_poll, `tls` for http1_tls.
+            const sse_client_mod = b.createModule(.{
+                .root_source_file = b.path("examples/sse_client.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "http", .module = mod },
+                },
+            });
+            sse_client_mod.link_libc = true;
+            const sse_client = b.addExecutable(.{
+                .name = "http-sse-client",
+                .root_module = sse_client_mod,
+            });
+            sse_client_bin.dependOn(&sse_client.step);
+
+            const run_sse_client = b.addRunArtifact(sse_client);
+            run_sse_client.addPassthruArgs();
+            sse_client_run.dependOn(&run_sse_client.step);
         }
     }
 

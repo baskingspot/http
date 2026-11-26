@@ -255,6 +255,7 @@ check-example:
     zig build example-h2-tls-readiness-bin
     zig build example-h1-tls-bin
     zig build example-h1-tls-client-bin
+    zig build example-sse-client-bin
     zig build example-http3-bin
     zig build example-unified-bin
     zig build example-curl-bin
@@ -298,6 +299,11 @@ example-sse:
 example-sse-poll:
     zig build example-sse-poll
 
+[doc("Read the poll-engine SSE example as a stream (start `just example-sse-poll` first); args: --chunk=N, --limit=N")]
+[group("example")]
+example-sse-client *ARGS:
+    zig build example-sse-client -- plain {{ ARGS }}
+
 [doc("Run the deferred-handler example on 127.0.0.1:8093")]
 [group("example")]
 example-deferred:
@@ -317,6 +323,11 @@ example-h1-tls:
 [group("example")]
 example-h1-tls-client:
     zig build example-h1-tls-client
+
+[doc("Read the TLS example's event stream, with a supplied CA and ALPN http/1.1 (start `just example-h1-tls` first); args: --chunk=N, --limit=N")]
+[group("example")]
+example-sse-client-tls *ARGS:
+    zig build example-sse-client -- tls {{ ARGS }}
 
 [doc("Run the HTTP/1.1 TLS client against the TLS example server")]
 [group("test")]
