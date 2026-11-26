@@ -725,11 +725,6 @@ fn parseResponseOnce(buf: []const u8, storage: []Header) Error!ParsedResponse {
     return parseResponse(buf, &state, storage);
 }
 
-fn parseFieldSectionOnce(buf: []const u8, storage: []Header) Error!ParsedFieldSection {
-    var state: SearchState = .init;
-    return parseFieldSection(buf, &state, storage);
-}
-
 test "request: a typical head (RFC 9112 §2.1, §3, §5)" {
     var storage: [8]Header = undefined;
     const parsed = try parseRequestOnce(typical, &storage);
