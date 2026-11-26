@@ -28,6 +28,8 @@ const Connection = http_tls.client.Connection;
 /// 2027-01-01T00:00:00Z, inside the fixtures' validity window.
 const now_sec: i64 = 1_798_761_600;
 
+// `examples/tls_ca_fixture.zig` holds a byte-for-byte copy of `ca_b64`,
+// `leaf_b64`, and `leaf_scalar_b64`. Rotate them together.
 const ca_b64 =
     "MIIBoTCCAUegAwIBAgIUYElwU9zW7k8K0l+/pLW0cooLRu4wCgYIKoZIzj0EAwIwHjEcMBoG" ++
     "A1UEAwwTYmFza2luZ3Nwb3QgdGVzdCBDQTAeFw0yNjExMDgyMTI5MTJaFw0zNjExMDUyMTI5" ++

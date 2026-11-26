@@ -242,6 +242,10 @@ const Run = struct {
         stopper.join();
         if ((try end) != .failed) return error.UnexpectedEnd;
 
+        // The `defer` above closes the body again on the way out. That is safe:
+        // `close` on a finished or already closed body does nothing. The
+        // explicit call is here because the next request needs the response
+        // closed first, and it needs the result to be `ConnectionDirty`.
         response.body.close();
         if (self.send()) |_| {
             return error.ExpectedConnectionDirty;
