@@ -175,10 +175,12 @@ writer. Plaintext dials with `Io.net`. TLS wraps the same kind of stream in
 its own slice with `readVec` and cuts events out of whatever comes back.
 
 `error.EndOfStream` is the only clean end. Any other failure is
-`error.ReadFailed`, and `Body.outcome` says why. Because the program owns the
-socket, the client cannot wake a thread parked in a read. `Stream.shutdown` is
-the only thing that does, and the read then fails: as a truncation on
-plaintext, as `unusable` over TLS. `Body.close`
+`error.ReadFailed`, and `Body.outcome` says why. `attached` hands the client no
+socket, so it cannot wake a thread parked in a read: `Stream.shutdown` is the
+only thing that does, and the read then fails, as a truncation on plaintext and
+as `unusable` over TLS. A client that dials its own connection passes
+`RequestOptions.progress`, which the exchange polls, so a stop needs no
+shutdown. `Body.close`
 reads the rest of an unfinished response first, so on a live stream it waits.
 After a failed read it returns at once and the connection is
 `ConnectionDirty`; open another. `Body.abort` leaves at once and does the same.

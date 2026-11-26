@@ -218,11 +218,13 @@ const Run = struct {
     /// Stop a read that another thread is blocked in, then try to reuse the
     /// connection.
     ///
-    /// The caller owns the socket, so the client has no way to wake a thread
+    /// `attached` gives the client no socket, so it has no way to wake a thread
     /// parked in `read`, and no way to know why it should. `Stream.shutdown`
-    /// is the only thing that does it. The read then fails, as a truncation
-    /// on plaintext and as `unusable` over TLS, and `stopped` is how this
-    /// program knows the failure was its own doing.
+    /// is the only thing that does it, and only this program can call it. The
+    /// read then fails, as a truncation on plaintext and as `unusable` over
+    /// TLS, and `stopped` is how this program knows the failure was its own
+    /// doing. A client that dials its own connection passes
+    /// `RequestOptions.progress` instead, and the exchange polls it.
     ///
     /// `Body.close` reads the rest of an unfinished response before it
     /// returns, because HTTP/1.1 cannot reset a stream. That read fails on a
