@@ -2,10 +2,15 @@
 //!
 //!     just example-h1-tls
 //!     curl -k https://127.0.0.1:8444/
+//!     curl -kN https://127.0.0.1:8444/events
 //!
 //! TLS comes from `baskingspot/tls` through `tls_std`. The handshake is
 //! eager; its reader and writer are the plaintext transport for the h1
-//! direct engine. One thread per connection.
+//! direct engine. One thread per connection. The certificate is a leaf signed
+//! by a test CA, so a client can verify the chain against that CA.
+//!
+//! `/events` is a `text/event-stream` that ends after five one-second ticks.
+//! `examples/sse_client.zig` reads it.
 
 const std = @import("std");
 const Io = std.Io;
@@ -19,22 +24,39 @@ const tls_std = @import("tls_std");
 const address_text = "127.0.0.1:8444";
 const response_body = "h1 over tls hello\n";
 
-const cert_b64 =
-    "MIIByzCCAXKgAwIBAgIUbmarzBd+vWR/mRLY6OMXZSPvVQQwCgYIKoZIzj0EAwIwGzEZMBcGA1UEAwwQ" ++
-    "enRscy5zZXJ2ZXIudGVzdDAeFw0yNjA2MDEwMTA3MzFaFw0zNjA1MjkwMTA3MzFaMBsxGTAXBgNVBAMM" ++
-    "EHp0bHMuc2VydmVyLnRlc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATKaYKPBZrI1VlFanyJm97M" ++
-    "16XUgwbBJkpHVern9TQuuQmG35VDsVMFA0FvUT6cigFaiHvB6NSZWczKYURvdTIlo4GTMIGQMB0GA1Ud" ++
-    "DgQWBBQVmks0H0iMK08RcQYrOzH1jLnV0jAfBgNVHSMEGDAWgBQVmks0H0iMK08RcQYrOzH1jLnV0jAM" ++
-    "BgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDATAbBgNVHREEFDAS" ++
-    "ghB6dGxzLnNlcnZlci50ZXN0MAoGCCqGSM49BAMCA0cAMEQCIE7rvZ4pcB7M69DXnXztJ3RKJzHRMZg/" ++
-    "jvjL7Ad2t9wZAiB7s3wziFsMpfnXGN05V/q29wgFLilNG8YQX6ssYxwWog==";
-const scalar_b64 = "139HGdxmRe2N5F69cAY4IgK8B4ybwx0hgPE0siIOaeY=";
+const fixture = @import("tls_ca_fixture.zig");
 
 const Handler = http.h1.engine.Handler;
 
+const tick_count = 5;
+
+/// One event a second, then a clean end. The direct engine serves one
+/// connection per thread, so `next` may sleep.
+const Ticks = struct {
+    io: Io,
+    sent: usize = 0,
+    buffer: [32]u8 = undefined,
+
+    const vtable: http.stream.ReadStream.VTable = .{ .next = next, .close = close };
+
+    fn next(ptr: *anyopaque) http.stream.ReadError!http.stream.ReadResult {
+        const self: *Ticks = @ptrCast(@alignCast(ptr));
+        if (self.sent == tick_count) return error.EndOfStream;
+        self.io.sleep(.fromSeconds(1), .awake) catch return error.Canceled;
+        const event = std.mem.print(&self.buffer, "data: tick {d}\n\n", .{self.sent}) catch
+            return error.ReadFailed;
+        self.sent += 1;
+        return .{ .data = event };
+    }
+
+    fn close(_: *anyopaque) void {}
+};
+
 const App = struct {
-    fn handler() Handler {
-        return .{ .ptr = undefined, .vtable = &.{
+    io: Io,
+
+    fn handler(self: *App) Handler {
+        return .{ .ptr = self, .vtable = &.{
             .handle = handle,
             .complete = Handler.noopComplete,
             .report_error = reportError,
@@ -42,7 +64,19 @@ const App = struct {
         } };
     }
 
-    fn handle(_: *anyopaque, exchange: *http.h1.engine.Exchange) anyerror!void {
+    fn handle(ptr: *anyopaque, exchange: *http.h1.engine.Exchange) anyerror!void {
+        const self: *App = @ptrCast(@alignCast(ptr));
+        if (std.mem.eql(u8, exchange.request.head.target, "/events")) {
+            const ticks = try exchange.arena.create(Ticks);
+            ticks.* = .{ .io = self.io };
+            return exchange.respondStream(.{
+                .status = .ok,
+                .content_type = "text/event-stream",
+            }, .{
+                .stream = .{ .ptr = ticks, .vtable = &Ticks.vtable },
+                .content_length = null,
+            });
+        }
         try exchange.respond(.{
             .status = .ok,
             .content_type = "text/plain; charset=utf-8",
@@ -87,13 +121,10 @@ fn serveThread(gpa: Allocator, io: Io, stream: Io.net.Stream) void {
 
 fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
     var cert_buf: [1024]u8 = undefined;
-    const cert_len = try std.base64.standard.Decoder.calcSizeForSlice(cert_b64);
-    const cert = cert_buf[0..cert_len];
-    try std.base64.standard.Decoder.decode(cert, cert_b64);
-    var scalar_buf: [32]u8 = undefined;
-    try std.base64.standard.Decoder.decode(&scalar_buf, scalar_b64);
+    const cert = try fixture.decodeLeaf(&cert_buf);
+    const scalar = try fixture.decodeScalar();
 
-    var signer = try tls.signature.PrivateKey.fromP256Scalar(scalar_buf[0..32]);
+    var signer = try tls.signature.PrivateKey.fromP256Scalar(&scalar);
     defer signer.deinit();
 
     var conn: tls_std.Server = undefined;
@@ -109,6 +140,7 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
     const alpn = conn.selectedAlpn() orelse return error.NoAlpn;
     if (!std.mem.eql(u8, alpn, "http/1.1")) return error.WrongAlpn;
 
+    var app: App = .{ .io = io };
     var request_buffer: [16 * 1024]u8 = undefined;
     var headers: [64]http.Header = undefined;
     var response_head: [1024]u8 = undefined;
@@ -116,7 +148,7 @@ fn serveConnection(gpa: Allocator, io: Io, stream: Io.net.Stream) !void {
         io,
         conn.reader(),
         conn.writer(),
-        App.handler(),
+        app.handler(),
         .{
             .allocator = gpa,
             .request_buffer = &request_buffer,

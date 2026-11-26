@@ -100,8 +100,10 @@ ALPN `http/1.1`. The client is `http.tls.Client` with ALPN pinned to
 subject (`ztls.server.test`) while `.address` sends the dial to loopback, so
 hostname verification still runs. The HTTP code sees only plaintext
 `Io.Reader` and `Io.Writer` interfaces; `just interop-tls` runs the pair in CI.
-The example certificate and scalar are the public test fixture from
-`baskingspot/tls`.
+The example certificate is a leaf signed by a test CA, and its scalar is public
+(`examples/tls_ca_fixture.zig`). The shared `baskingspot/tls` certificate is an
+end entity, and a client cannot use an end entity as a trust anchor. The same
+server answers `/events` with a five-tick event stream for the SSE client below.
 
 ## One port, both protocols
 
@@ -150,6 +152,41 @@ producer with `Io.async`, so closing the queue wakes the producer with
 without blocking the other slots. `stream_pipeline.zig` reads a file in 16 KiB
 chunks and XORs each chunk before returning it, standing in for a compression
 or cipher transform.
+
+## Streaming client
+
+```sh
+just example-sse-poll        # server on 127.0.0.1:8092
+just example-sse-client      # in another terminal
+
+just example-h1-tls          # server on 127.0.0.1:8444
+just example-sse-client-tls  # in another terminal
+```
+
+`examples/sse_client.zig` reads a `text/event-stream` response as it arrives.
+It does two exchanges over one connection: it reads until the server ends the
+stream, then it reads until another thread shuts the socket down. Each event
+prints with the time it arrived. The server sends one a second.
+
+The program owns the socket and gives `client.Client.attached` a reader and a
+writer. Plaintext dials with `Io.net`. TLS wraps the same kind of stream in
+`http.tls.client.Connection` with a CA the program supplies and ALPN pinned to
+`http/1.1`. The body is an `Io.Reader` with no buffer, so the loop reads into
+its own slice with `readVec` and cuts events out of whatever comes back.
+
+`error.EndOfStream` is the only clean end. Any other failure is
+`error.ReadFailed`, and `Body.outcome` says why. Because the program owns the
+socket, the client cannot wake a thread parked in a read. `Stream.shutdown` is
+the only thing that does, and the read then fails: as a truncation on
+plaintext, as `unusable` over TLS. `Body.close`
+reads the rest of an unfinished response first, so on a live stream it waits.
+After a failed read it returns at once and the connection is
+`ConnectionDirty`; open another. `Body.abort` leaves at once and does the same.
+
+The body has no total-size limit, because a stream has no length. A caller
+that needs one wraps the body in `Io.Reader.limited`, which reports a spent
+limit as `error.EndOfStream`. `--limit=N` does that, and `--chunk=N` caps each
+read so events split across reads.
 
 ## Tiny curl
 
